@@ -1,0 +1,14 @@
+{
+  "name": "@gtrz/cloud-sync",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "tsc -b --pretty false && wrangler deploy --dry-run",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "5.20260917.1",
+    "wrangler": "4.133.0"
+  }
+}

@@ -1,10 +1,13 @@
 import { app, BrowserWindow, shell } from 'electron';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const mainDirectory = path.dirname(fileURLToPath(import.meta.url));
 
 function getWindowIconPath(): string {
   return app.isPackaged
     ? path.join(process.resourcesPath, 'icon.png')
-    : path.join(__dirname, '../../resources/icon.png');
+    : path.join(mainDirectory, '../../resources/icon.png');
 }
 
 export function createMainWindow(): BrowserWindow {
@@ -19,7 +22,7 @@ export function createMainWindow(): BrowserWindow {
     title: 'GTRZ System',
     icon: getWindowIconPath(),
     webPreferences: {
-      preload: path.join(__dirname, '../preload/index.cjs'),
+      preload: path.join(mainDirectory, '../preload/index.cjs'),
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
@@ -48,7 +51,7 @@ export function createMainWindow(): BrowserWindow {
   if (developmentUrl !== undefined) {
     void window.loadURL(developmentUrl);
   } else {
-    void window.loadFile(path.join(__dirname, '../renderer/index.html'));
+    void window.loadFile(path.join(mainDirectory, '../renderer/index.html'));
   }
 
   return window;

@@ -1,5 +1,7 @@
-import { CreditCard, KeyRound, Settings, ShieldCheck } from 'lucide-react';
-import { useEffect, useState, type SyntheticEvent } from 'react';
+import { Cloud, CreditCard, KeyRound, RefreshCw, Settings, ShieldCheck } from 'lucide-react';
+import { useCallback, useEffect, useState, type SyntheticEvent } from 'react';
+
+import type { CloudSyncStatus } from '@gtrz/contracts';
 
 import { PrintingSettingsPanel } from './PrintingSettingsPanel';
 
@@ -30,6 +32,17 @@ export function SettingsPage(): React.JSX.Element {
   const [creditRate, setCreditRate] = useState('0.00');
   const [terminalMessage, setTerminalMessage] = useState<string | null>(null);
   const [terminalError, setTerminalError] = useState<string | null>(null);
+  const [cloudStatus, setCloudStatus] = useState<CloudSyncStatus | null>(null);
+  const [cloudLoading, setCloudLoading] = useState(true);
+
+  const loadCloudStatus = useCallback(async (): Promise<void> => {
+    setCloudLoading(true);
+    try {
+      setCloudStatus(await window.gtrz.settings.getCloudSyncStatus());
+    } finally {
+      setCloudLoading(false);
+    }
+  }, []);
 
   useEffect(() => {
     async function loadPaymentTerminal(): Promise<void> {
@@ -56,6 +69,10 @@ export function SettingsPage(): React.JSX.Element {
 
     void loadPaymentTerminal();
   }, []);
+
+  useEffect(() => {
+    void loadCloudStatus();
+  }, [loadCloudStatus]);
 
   async function handleSubmit(formEvent: SyntheticEvent<HTMLFormElement>): Promise<void> {
     formEvent.preventDefault();
@@ -262,6 +279,56 @@ export function SettingsPage(): React.JSX.Element {
             Salvar taxas da maquininha
           </button>
         </form>
+
+        <article className="panel cloud-sync-panel">
+          <div className="panel__heading">
+            <Cloud size={20} aria-hidden="true" />
+            <div>
+              <h2>Conexão em nuvem</h2>
+              <p>Cloudflare centraliza a validação do acesso e as operações em tempo real.</p>
+            </div>
+          </div>
+
+          <div className="cloud-sync-panel__state">
+            <span
+              className={`cloud-sync-status cloud-sync-status--${cloudStatus?.connection ?? 'offline'}`}
+            >
+              {cloudLoading
+                ? 'Testando conexão'
+                : cloudStatus?.connection === 'connected'
+                  ? 'Conectado'
+                  : cloudStatus?.connection === 'attention'
+                    ? 'Atenção necessária'
+                    : 'Sem conexão'}
+            </span>
+            <span>{cloudStatus?.endpoint ?? 'API da nuvem'}</span>
+          </div>
+
+          <dl className="cloud-sync-panel__checks">
+            <div>
+              <dt>API</dt>
+              <dd>{cloudStatus?.apiReachable ? 'Online' : 'Aguardando teste'}</dd>
+            </div>
+            <div>
+              <dt>Credencial</dt>
+              <dd>{cloudStatus?.credentialAccepted ? 'Validada' : 'Não validada'}</dd>
+            </div>
+          </dl>
+
+          <p className={cloudStatus?.connection === 'connected' ? 'form-success' : 'form-error'}>
+            {cloudLoading ? 'Consultando a API segura...' : (cloudStatus?.message ?? 'Teste indisponível.')}
+          </p>
+
+          <button
+            className="button button--ghost"
+            disabled={cloudLoading}
+            onClick={() => void loadCloudStatus()}
+            type="button"
+          >
+            <RefreshCw size={17} aria-hidden="true" />
+            Testar conexão
+          </button>
+        </article>
 
         <PrintingSettingsPanel />
       </div>

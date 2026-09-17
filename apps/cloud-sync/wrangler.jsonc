@@ -1,0 +1,34 @@
+{
+  "name": "gtrz-sync",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-09-17",
+  "workers_dev": true,
+  "r2_buckets": [
+    {
+      "binding": "SYNC_AUDIT_ARCHIVE",
+      "bucket_name": "gtrz-sync-audit"
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "EVENT_ROOM",
+        "class_name": "EventRoom"
+      },
+      {
+        "name": "MONITOR_ROOM",
+        "class_name": "MonitorRoom"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["EventRoom"]
+    },
+    {
+      "tag": "v2",
+      "new_sqlite_classes": ["MonitorRoom"]
+    }
+  ]
+}

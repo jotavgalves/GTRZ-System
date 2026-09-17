@@ -8,6 +8,8 @@ import type {
   UpdateTicketLotInput,
 } from '@gtrz/contracts';
 
+import { useRealtimeReload } from '../../shared/realtime/useRealtimeReload';
+
 interface TicketViewState {
   readonly state: TicketState | null;
   readonly loading: boolean;
@@ -34,8 +36,8 @@ export function useTickets(): TicketViewState {
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
 
-  const reload = useCallback(async (): Promise<void> => {
-    setLoading(true);
+  const reload = useCallback(async (silent = false): Promise<void> => {
+    if (!silent) setLoading(true);
     setError(null);
 
     try {
@@ -43,13 +45,14 @@ export function useTickets(): TicketViewState {
     } catch (loadError: unknown) {
       setError(getErrorMessage(loadError));
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
   }, []);
 
   useEffect(() => {
     void reload();
   }, [reload]);
+  useRealtimeReload(reload);
 
   const run = useCallback(
     async (operation: () => Promise<unknown>, successMessage: string): Promise<void> => {

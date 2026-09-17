@@ -1,8 +1,8 @@
-import { Database, Shield, WifiOff } from 'lucide-react';
+import { Cloud, Database, Shield, WifiOff } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { NavLink, Outlet } from 'react-router';
 
-import type { SystemInfo } from '@gtrz/contracts';
+import type { CloudSyncStatus, SystemInfo } from '@gtrz/contracts';
 
 import gtrzLockup from '../../assets/brand/gtrz-lockup.svg';
 import { navigationModules } from '../../shared/navigation/modules';
@@ -24,6 +24,7 @@ function formatEventDate(timestamp: number): string {
 export function AppShell(): React.JSX.Element {
   const [systemInfo, setSystemInfo] = useState<SystemInfo | null>(null);
   const [systemError, setSystemError] = useState<string | null>(null);
+  const [cloudStatus, setCloudStatus] = useState<CloudSyncStatus | null>(null);
   const { state: sessionState, loading: sessionLoading, error: sessionError } = useSession();
   const activeProfile = sessionState?.profile ?? 'production';
   const activeEvent = sessionState?.activeEvent ?? null;
@@ -47,6 +48,27 @@ export function AppShell(): React.JSX.Element {
 
     return () => {
       mounted = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    let mounted = true;
+    const loadCloudStatus = (): void => {
+      void window.gtrz.settings
+        .getCloudSyncStatus()
+        .then((status) => {
+          if (mounted) setCloudStatus(status);
+        })
+        .catch(() => {
+          if (mounted) setCloudStatus(null);
+        });
+    };
+
+    loadCloudStatus();
+    const interval = window.setInterval(loadCloudStatus, 15_000);
+    return () => {
+      mounted = false;
+      window.clearInterval(interval);
     };
   }, []);
 
@@ -110,18 +132,31 @@ export function AppShell(): React.JSX.Element {
       <div className="workspace">
         <header className="topbar">
           <div>
-            <strong>Operação local</strong>
+            <strong>{cloudStatus?.connection === 'connected' ? 'Operação conectada' : 'Operação local'}</strong>
             <span>
               {sessionLoading
                 ? 'Carregando sessão local'
-                : (sessionError ?? 'Dados armazenados exclusivamente neste computador')}
+                : (sessionError ??
+                  (cloudStatus?.connection === 'connected'
+                    ? 'Canal Cloudflare autenticado'
+                    : 'Dados armazenados neste computador'))}
             </span>
           </div>
 
           <div className="topbar-status" aria-live="polite">
-            <span className="status-pill">
-              <WifiOff size={16} aria-hidden="true" />
-              Offline
+            <span
+              className={
+                cloudStatus?.connection === 'connected'
+                  ? 'status-pill status-pill--success'
+                  : 'status-pill'
+              }
+            >
+              {cloudStatus?.connection === 'connected' ? (
+                <Cloud size={16} aria-hidden="true" />
+              ) : (
+                <WifiOff size={16} aria-hidden="true" />
+              )}
+              {cloudStatus?.connection === 'connected' ? 'Nuvem conectada' : 'Nuvem indisponível'}
             </span>
             <span
               className={

@@ -3,6 +3,7 @@ import { createHashRouter, Navigate } from 'react-router';
 import { AuditPage } from '../features/audit';
 import { BackupsPage } from '../features/backups';
 import { CashPage } from '../features/cash';
+import { CloudMonitorPage } from '../features/cloud-monitor';
 import { DashboardPage } from '../features/dashboard';
 import { EventsPage } from '../features/events';
 import { ExpensesPage } from '../features/expenses';
@@ -33,6 +34,7 @@ export const router = createHashRouter([
           { path: 'auditoria', element: <AuditPage /> },
           { path: 'backups', element: <BackupsPage /> },
           { path: 'configuracoes', element: <SettingsPage /> },
+          { path: 'nuvem', element: <CloudMonitorPage /> },
         ],
       },
       { path: 'estoque', element: <InventoryPage /> },

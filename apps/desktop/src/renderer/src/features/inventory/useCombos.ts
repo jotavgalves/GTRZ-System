@@ -7,6 +7,8 @@ import type {
   UpdateComboInput,
 } from '@gtrz/contracts';
 
+import { useRealtimeReload } from '../../shared/realtime/useRealtimeReload';
+
 interface ComboViewState {
   readonly combos: readonly InventoryCombo[];
   readonly loading: boolean;
@@ -29,8 +31,8 @@ export function useCombos(products: readonly InventoryProduct[]): ComboViewState
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
 
-  const reload = useCallback(async (): Promise<void> => {
-    setLoading(true);
+  const reload = useCallback(async (silent = false): Promise<void> => {
+    if (!silent) setLoading(true);
     setError(null);
 
     try {
@@ -38,13 +40,14 @@ export function useCombos(products: readonly InventoryProduct[]): ComboViewState
     } catch (loadError: unknown) {
       setError(getErrorMessage(loadError));
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
   }, []);
 
   useEffect(() => {
     void reload();
   }, [products, reload]);
+  useRealtimeReload(reload);
 
   const run = useCallback(
     async (operation: () => Promise<unknown>, successMessage: string): Promise<void> => {

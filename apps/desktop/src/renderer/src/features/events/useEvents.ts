@@ -3,6 +3,7 @@ import { useCallback, useEffect, useState } from 'react';
 import type { EventDeletionResult, EventStatus, GtrzEvent } from '@gtrz/contracts';
 
 import { useSession } from '../../shared/session/session-context';
+import { useRealtimeReload } from '../../shared/realtime/useRealtimeReload';
 
 interface EventsState {
   readonly events: readonly GtrzEvent[];
@@ -30,8 +31,8 @@ export function useEvents(): EventsState {
   const [error, setError] = useState<string | null>(null);
   const { setActiveEvent } = useSession();
 
-  const reload = useCallback(async (): Promise<void> => {
-    setLoading(true);
+  const reload = useCallback(async (silent = false): Promise<void> => {
+    if (!silent) setLoading(true);
     setError(null);
 
     try {
@@ -39,13 +40,14 @@ export function useEvents(): EventsState {
     } catch (loadError: unknown) {
       setError(getErrorMessage(loadError));
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
   }, []);
 
   useEffect(() => {
     void reload();
   }, [reload]);
+  useRealtimeReload(reload);
 
   const executeAndReload = useCallback(
     async (operation: () => Promise<unknown>): Promise<void> => {

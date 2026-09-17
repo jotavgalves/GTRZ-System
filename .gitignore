@@ -10,9 +10,15 @@ test-results/
 *.sqlite
 *.sqlite-shm
 *.sqlite-wal
+*.gtrzbackup
+release-*/
+tmp-release-check/
 .env
 .env.*
 !.env.example
+.dev.vars
+.wrangler/
+*.tsbuildinfo
 .DS_Store
 Thumbs.db
 .vscode/

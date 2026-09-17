@@ -3,6 +3,7 @@ import {
   Boxes,
   ClipboardList,
   CreditCard,
+  Cloud,
   LayoutDashboard,
   ReceiptText,
   Settings,
@@ -92,6 +93,13 @@ export const navigationModules: readonly NavigationModule[] = [
     label: 'Backups',
     path: '/backups',
     icon: ArchiveRestore,
+    profiles: ['production'],
+  },
+  {
+    key: 'cloud',
+    label: 'Nuvem',
+    path: '/nuvem',
+    icon: Cloud,
     profiles: ['production'],
   },
   {

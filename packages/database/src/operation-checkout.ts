@@ -119,7 +119,23 @@ export function closeOrder(
       eventId: order.event_id,
       details: {
         discountCents: input.discountCents,
+        order: {
+          id: order.id,
+          openedAt: order.opened_at,
+          servicePointId: order.service_point_id,
+          servicePointLabel: order.service_point_label,
+        },
+        items: items.map((item) => ({
+          id: item.id,
+          itemId: item.itemId,
+          itemKind: item.itemKind,
+          itemName: item.itemName,
+          quantity: item.quantity,
+          totalCents: item.totalCents,
+          unitPriceCents: item.unitPriceCents,
+        })),
         payments: payments.map((payment) => ({
+          id: payment.id,
           amountCents: payment.amountCents,
           changeCents: payment.changeCents,
           method: payment.method,
@@ -128,6 +144,13 @@ export function closeOrder(
         subtotalCents: order.subtotal_cents,
         totalCents,
         totalChangeCents: payments.reduce((total, payment) => total + payment.changeCents, 0),
+        stockMovements: database.sqlite
+          .prepare(
+            `SELECT id, product_id, quantity, delta, note, created_at
+             FROM stock_movements
+             WHERE event_id = ? AND type = 'sale' AND note = ? ORDER BY id`,
+          )
+          .all(order.event_id, `Venda da comanda ${order.id}`),
         vouchers: redemptions,
       },
     });

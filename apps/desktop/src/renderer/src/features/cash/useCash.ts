@@ -2,6 +2,8 @@ import { useCallback, useEffect, useState } from 'react';
 
 import type { CashState, RecordCashMovementInput } from '@gtrz/contracts';
 
+import { useRealtimeReload } from '../../shared/realtime/useRealtimeReload';
+
 interface CashViewState {
   readonly state: CashState | null;
   readonly loading: boolean;
@@ -25,8 +27,8 @@ export function useCash(): CashViewState {
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
 
-  const reload = useCallback(async (): Promise<void> => {
-    setLoading(true);
+  const reload = useCallback(async (silent = false): Promise<void> => {
+    if (!silent) setLoading(true);
     setError(null);
 
     try {
@@ -34,13 +36,14 @@ export function useCash(): CashViewState {
     } catch (loadError: unknown) {
       setError(getErrorMessage(loadError));
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
   }, []);
 
   useEffect(() => {
     void reload();
   }, [reload]);
+  useRealtimeReload(reload);
 
   const run = useCallback(
     async (operation: () => Promise<CashState>, successMessage: string): Promise<void> => {

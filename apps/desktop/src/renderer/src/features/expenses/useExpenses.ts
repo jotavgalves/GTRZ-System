@@ -7,6 +7,8 @@ import type {
   UpdateExpenseInput,
 } from '@gtrz/contracts';
 
+import { useRealtimeReload } from '../../shared/realtime/useRealtimeReload';
+
 interface ExpenseViewState {
   readonly state: ExpenseState | null;
   readonly loading: boolean;
@@ -35,8 +37,8 @@ export function useExpenses(): ExpenseViewState {
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
 
-  const reload = useCallback(async (): Promise<void> => {
-    setLoading(true);
+  const reload = useCallback(async (silent = false): Promise<void> => {
+    if (!silent) setLoading(true);
     setError(null);
 
     try {
@@ -44,13 +46,14 @@ export function useExpenses(): ExpenseViewState {
     } catch (loadError: unknown) {
       setError(getErrorMessage(loadError));
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
   }, []);
 
   useEffect(() => {
     void reload();
   }, [reload]);
+  useRealtimeReload(reload);
 
   const run = useCallback(
     async (operation: () => Promise<unknown>, successMessage: string): Promise<void> => {

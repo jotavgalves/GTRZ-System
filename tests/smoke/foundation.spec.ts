@@ -28,6 +28,7 @@ describe('SMK-INF-001 — fundação modular', () => {
       'audit',
       'backups',
       'cash',
+      'cloud-monitor',
       'dashboard',
       'events',
       'expenses',

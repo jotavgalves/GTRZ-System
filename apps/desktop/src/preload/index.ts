@@ -5,11 +5,14 @@ import {
   backupStateSchema,
   changeEventStatusInputSchema,
   changeProductionPasswordInputSchema,
+  cloudSyncStatusSchema,
+  cloudMonitorSchema,
   createEventInputSchema,
   deleteEventInputSchema,
   eventDeletionResultSchema,
   eventListSchema,
   eventSchema,
+  IPC_EVENTS,
   IPC_CHANNELS,
   operationResultSchema,
   paymentTerminalSettingsSchema,
@@ -25,6 +28,8 @@ import {
   type BackupState,
   type ChangeEventStatusInput,
   type ChangeProductionPasswordInput,
+  type CloudSyncStatus,
+  type CloudMonitor,
   type CreateEventInput,
   type DeleteEventInput,
   type EventDeletionResult,
@@ -57,6 +62,17 @@ const api: GtrzDesktopApi = {
     async getInfo(): Promise<SystemInfo> {
       const payload: unknown = await ipcRenderer.invoke(IPC_CHANNELS.systemGetInfo);
       return systemInfoSchema.parse(payload);
+    },
+  },
+  realtime: {
+    onDataChanged(listener: () => void): () => void {
+      const handler = (): void => {
+        listener();
+      };
+      ipcRenderer.on(IPC_EVENTS.dataChanged, handler);
+      return () => {
+        ipcRenderer.removeListener(IPC_EVENTS.dataChanged, handler);
+      };
     },
   },
   dashboard: dashboardApi,
@@ -132,6 +148,14 @@ const api: GtrzDesktopApi = {
         parsedInput,
       );
       return paymentTerminalSettingsSchema.parse(payload);
+    },
+    async getCloudSyncStatus(): Promise<CloudSyncStatus> {
+      const payload: unknown = await ipcRenderer.invoke(IPC_CHANNELS.settingsGetCloudSyncStatus);
+      return cloudSyncStatusSchema.parse(payload);
+    },
+    async getCloudMonitor(): Promise<CloudMonitor> {
+      const payload: unknown = await ipcRenderer.invoke(IPC_CHANNELS.settingsGetCloudMonitor);
+      return cloudMonitorSchema.parse(payload);
     },
   },
   printing: printingApi,

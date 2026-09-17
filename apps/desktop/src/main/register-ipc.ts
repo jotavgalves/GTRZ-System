@@ -5,6 +5,8 @@ import {
   backupStateSchema,
   changeEventStatusInputSchema,
   changeProductionPasswordInputSchema,
+  cloudSyncStatusSchema,
+  cloudMonitorSchema,
   createEventInputSchema,
   deleteEventInputSchema,
   eventDeletionResultSchema,
@@ -41,6 +43,7 @@ import {
 } from '@gtrz/database/payment-terminal';
 
 import type { BackupService } from './backup-service';
+import type { CloudSyncService } from './cloud-sync-service';
 import { registerComboIpcHandlers } from './register-combo-ipc';
 import { registerEventCloseIpcHandlers } from './register-event-close-ipc';
 import { registerFinanceIpcHandlers } from './register-finance-ipc';
@@ -56,6 +59,7 @@ interface RegisterIpcOptions {
   readonly getDatabase: () => DatabaseContext;
   readonly databaseReady: () => boolean;
   readonly backupService: BackupService;
+  readonly cloudSyncService: CloudSyncService;
 }
 
 const CONTROL_CHANNELS = [
@@ -71,6 +75,8 @@ const CONTROL_CHANNELS = [
   IPC_CHANNELS.settingsChangeProductionPassword,
   IPC_CHANNELS.settingsGetPaymentTerminal,
   IPC_CHANNELS.settingsUpdatePaymentTerminal,
+  IPC_CHANNELS.settingsGetCloudSyncStatus,
+  IPC_CHANNELS.settingsGetCloudMonitor,
   IPC_CHANNELS.backupsGetState,
   IPC_CHANNELS.backupsChooseDestination,
   IPC_CHANNELS.backupsCreateManual,
@@ -158,6 +164,21 @@ export function registerIpcHandlers(options: RegisterIpcOptions): void {
     return paymentTerminalSettingsSchema.parse(
       updatePaymentTerminalSettings(options.getDatabase(), input),
     );
+  });
+
+  ipcMain.handle(IPC_CHANNELS.settingsGetCloudSyncStatus, async () => {
+    return cloudSyncStatusSchema.parse(await options.cloudSyncService.getStatus());
+  });
+
+  ipcMain.handle(IPC_CHANNELS.settingsGetCloudMonitor, async () => {
+    const database = options.getDatabase();
+    const activeEventId = getSessionState(database).activeEvent?.id ?? null;
+    const monitor = await options.cloudSyncService.getMonitor(activeEventId);
+    return cloudMonitorSchema.parse({
+      ...monitor,
+      localQueue: options.cloudSyncService.getQueueState(database),
+      localConflicts: options.cloudSyncService.getConflicts(database),
+    });
   });
 
   ipcMain.handle(IPC_CHANNELS.backupsGetState, async () => {

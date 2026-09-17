@@ -63,6 +63,7 @@ export function createTicketSale(
   const unitPriceCents = input.source === 'courtesy' ? 0 : lot.priceCents;
   const totalCents = unitPriceCents * input.quantity;
   const now = Date.now();
+  const ticketCodes = codes.map((code) => ({ id: randomUUID(), code }));
 
   database.sqlite.transaction(() => {
     database.sqlite
@@ -92,8 +93,8 @@ export function createTicketSale(
        VALUES (?, ?, ?, ?, 'valid', ?)`,
     );
 
-    for (const code of codes) {
-      insertCode.run(randomUUID(), eventId, saleId, code, now);
+    for (const code of ticketCodes) {
+      insertCode.run(code.id, eventId, saleId, code.code, now);
     }
 
     appendAudit(database, {
@@ -103,12 +104,14 @@ export function createTicketSale(
       eventId,
       details: {
         attendeeName,
-        codes,
+        codes: ticketCodes,
         lotId: lot.id,
+        lotName: lot.name,
         paymentMethod: input.paymentMethod ?? null,
         quantity: input.quantity,
         source: input.source,
         totalCents,
+        unitPriceCents,
       },
     });
   })();

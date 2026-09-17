@@ -170,10 +170,29 @@ describe('event operations database', () => {
     expect(getOperationState(database).servicePoints[0]?.status).toBe('available');
     expect(getOperationState(database).recentOrders[0]?.id).toBe(paidOrder.id);
 
+    const paymentAudit = database.sqlite
+      .prepare("SELECT details_json FROM audit_log WHERE action = 'operations.order-paid'")
+      .get() as { readonly details_json: string };
+    const paymentAuditDetails = JSON.parse(paymentAudit.details_json) as {
+      readonly stockMovements: readonly unknown[];
+    };
+    expect(paymentAuditDetails).toMatchObject({
+      order: { id: paidOrder.id, servicePointId: counter.id },
+      items: [
+        { itemId: catalog.waterId, quantity: 1 },
+        { itemId: catalog.comboId, quantity: 2 },
+      ],
+      payments: [
+        { method: 'pix', amountCents: 800 },
+        { method: 'cash', amountCents: 800, receivedCents: 1000 },
+      ],
+    });
+
     const saleMovements = database.sqlite
       .prepare("SELECT product_id, quantity, delta FROM stock_movements WHERE type = 'sale'")
       .all();
     expect(saleMovements).toHaveLength(2);
+    expect(paymentAuditDetails.stockMovements).toHaveLength(2);
     database.close();
   });
 

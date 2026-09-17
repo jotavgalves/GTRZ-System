@@ -9,6 +9,8 @@ import type {
   DeleteServicePointInput,
 } from '@gtrz/contracts';
 
+import { useRealtimeReload } from '../../shared/realtime/useRealtimeReload';
+
 interface OperationsViewState {
   readonly state: OperationState | null;
   readonly order: Order | null;
@@ -46,8 +48,8 @@ export function useOperations(): OperationsViewState {
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
 
-  const reload = useCallback(async (): Promise<void> => {
-    setLoading(true);
+  const reload = useCallback(async (silent = false): Promise<void> => {
+    if (!silent) setLoading(true);
     setError(null);
 
     try {
@@ -60,13 +62,14 @@ export function useOperations(): OperationsViewState {
     } catch (loadError: unknown) {
       setError(getErrorMessage(loadError));
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
   }, []);
 
   useEffect(() => {
     void reload();
   }, [reload]);
+  useRealtimeReload(reload);
 
   const run = useCallback(
     async <T>(operation: () => Promise<T>, successMessage?: string): Promise<T> => {

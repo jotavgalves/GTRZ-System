@@ -37,6 +37,8 @@ export const IPC_CHANNELS = {
   settingsChangeProductionPassword: 'settings:change-production-password',
   settingsGetPaymentTerminal: 'settings:get-payment-terminal',
   settingsUpdatePaymentTerminal: 'settings:update-payment-terminal',
+  settingsGetCloudSyncStatus: 'settings:get-cloud-sync-status',
+  settingsGetCloudMonitor: 'settings:get-cloud-monitor',
   printingListPrinters: 'printing:list-printers',
   printingGetSettings: 'printing:get-settings',
   printingUpdateSettings: 'printing:update-settings',
@@ -95,6 +97,10 @@ export const IPC_CHANNELS = {
   ticketsCreateSale: 'tickets:create-sale',
   ticketsCancelSale: 'tickets:cancel-sale',
   ticketsDeleteSale: 'tickets:delete-sale',
+} as const;
+
+export const IPC_EVENTS = {
+  dataChanged: 'system:data-changed',
 } as const;
 
 export const systemInfoSchema = z.object({
@@ -187,6 +193,90 @@ export const operationResultSchema = z.object({
   success: z.literal(true),
 });
 
+export const cloudSyncStatusSchema = z.object({
+  connection: z.enum(['connected', 'attention', 'offline']),
+  endpoint: z.url(),
+  apiReachable: z.boolean(),
+  credentialPresent: z.boolean(),
+  credentialAccepted: z.boolean(),
+  checkedAt: z.number().int().nonnegative(),
+  message: z.string().min(1).max(240),
+});
+
+export const cloudMonitorDeviceSchema = z.object({
+  id: z.string().min(1).max(80),
+  label: z.string().min(1).max(80),
+  activeEventId: z.uuid().nullable(),
+  lastSeenAt: z.number().int().nonnegative(),
+  latencyMs: z.number().int().nonnegative(),
+});
+
+export const cloudMonitorCommandSchema = z.object({
+  commandId: z.string().min(1).max(160),
+  eventId: z.string().min(1).max(160),
+  deviceId: z.string().min(1).max(80),
+  action: z.string().min(1).max(160),
+  auditId: z.number().int().positive(),
+  payload: z.record(z.string(), z.unknown()),
+  createdAt: z.number().int().nonnegative(),
+});
+
+export const cloudMonitorTransportSchema = z.object({
+  sequence: z.number().int().positive(),
+  commandId: z.string().min(1).max(160).nullable(),
+  eventId: z.string().min(1).max(160),
+  deviceId: z.string().min(1).max(80),
+  direction: z.enum(['up', 'down']),
+  transport: z.enum(['journal', 'websocket']),
+  action: z.string().min(1).max(180),
+  createdAt: z.number().int().nonnegative(),
+});
+
+export const cloudSyncQueueSchema = z.object({
+  outboxPending: z.number().int().nonnegative(),
+  outboxAccepted: z.number().int().nonnegative(),
+  outboxFailed: z.number().int().nonnegative(),
+  inboxReceived: z.number().int().nonnegative(),
+  inboxAwaitingApply: z.number().int().nonnegative(),
+  conflictsOpen: z.number().int().nonnegative(),
+});
+
+export const cloudSyncConflictSchema = z.object({
+  commandId: z.string().min(1).max(160),
+  eventId: z.string().min(1).max(160),
+  action: z.string().min(1).max(180),
+  entityId: z.string().nullable(),
+  reason: z.string().min(1).max(240),
+  createdAt: z.number().int().nonnegative(),
+});
+
+export const cloudMonitorConflictSchema = z.object({
+  sequence: z.number().int().positive(),
+  commandId: z.string().min(1).max(160),
+  eventId: z.string().min(1).max(160),
+  deviceId: z.string().min(1).max(80),
+  action: z.string().min(1).max(180),
+  entityId: z.string().nullable(),
+  reason: z.string().min(1).max(240),
+  createdAt: z.number().int().nonnegative(),
+});
+
+export const cloudMonitorSchema = z.object({
+  endpoint: z.url(),
+  checkedAt: z.number().int().nonnegative(),
+  activeDevices: z.array(cloudMonitorDeviceSchema),
+  recentCommands: z.array(cloudMonitorCommandSchema),
+  recentTransport: z.array(cloudMonitorTransportSchema),
+  recentConflicts: z.array(cloudMonitorConflictSchema),
+  idempotency: z.object({
+    acceptedCommands: z.number().int().nonnegative(),
+    journalAttempts: z.number().int().nonnegative(),
+    replayedAttempts: z.number().int().nonnegative(),
+  }),
+  localQueue: cloudSyncQueueSchema,
+  localConflicts: z.array(cloudSyncConflictSchema),
+});
+
 export const backupKindSchema = z.enum(['automatic', 'event-close', 'manual', 'pre-restore']);
 export const backupIntegritySchema = z.enum(['valid', 'invalid']);
 
@@ -235,6 +325,8 @@ export type UpdatePaymentTerminalSettingsInput = z.infer<
   typeof updatePaymentTerminalSettingsInputSchema
 >;
 export type OperationResult = z.infer<typeof operationResultSchema>;
+export type CloudSyncStatus = z.infer<typeof cloudSyncStatusSchema>;
+export type CloudMonitor = z.infer<typeof cloudMonitorSchema>;
 export type BackupKind = z.infer<typeof backupKindSchema>;
 export type BackupRecord = z.infer<typeof backupRecordSchema>;
 export type BackupState = z.infer<typeof backupStateSchema>;
@@ -244,6 +336,9 @@ export type RestoreBackupResult = z.infer<typeof restoreBackupResultSchema>;
 export interface GtrzDesktopApi {
   readonly system: {
     getInfo(): Promise<SystemInfo>;
+  };
+  readonly realtime: {
+    onDataChanged(listener: () => void): () => void;
   };
   readonly dashboard: DashboardApi;
   readonly audit: AuditApi;
@@ -266,6 +361,8 @@ export interface GtrzDesktopApi {
     updatePaymentTerminal(
       input: UpdatePaymentTerminalSettingsInput,
     ): Promise<PaymentTerminalSettings>;
+    getCloudSyncStatus(): Promise<CloudSyncStatus>;
+    getCloudMonitor(): Promise<CloudMonitor>;
   };
   readonly printing: PrintingApi;
   readonly backups: {

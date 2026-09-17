@@ -2,6 +2,8 @@ import { useCallback, useEffect, useState } from 'react';
 
 import type { DashboardState } from '@gtrz/contracts';
 
+import { useRealtimeReload } from '../../shared/realtime/useRealtimeReload';
+
 interface DashboardViewState {
   readonly state: DashboardState | null;
   readonly loading: boolean;
@@ -18,8 +20,8 @@ export function useDashboard(): DashboardViewState {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  const reload = useCallback(async (): Promise<void> => {
-    setLoading(true);
+  const reload = useCallback(async (silent = false): Promise<void> => {
+    if (!silent) setLoading(true);
     setError(null);
 
     try {
@@ -27,13 +29,14 @@ export function useDashboard(): DashboardViewState {
     } catch (loadError: unknown) {
       setError(getErrorMessage(loadError));
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
   }, []);
 
   useEffect(() => {
     void reload();
   }, [reload]);
+  useRealtimeReload(reload);
 
   return { state, loading, error, reload };
 }

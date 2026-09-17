@@ -5,6 +5,7 @@
     { "path": "./packages/domain/tsconfig.json" },
     { "path": "./packages/database/tsconfig.json" },
     { "path": "./apps/desktop/tsconfig.json" },
+    { "path": "./apps/cloud-sync/tsconfig.json" },
     { "path": "./tsconfig.tools.json" }
   ]
 }

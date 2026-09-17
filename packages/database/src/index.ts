@@ -5,6 +5,10 @@ import { expensePaymentStatusMigration } from './expense-payment-status-migratio
 import { financeMigration } from './finance-migration';
 import { technicalSchema } from './schema';
 import { stockSaleMigration } from './stock-sale-migration';
+import { syncMigration } from './sync-migration';
+import { syncInboxMigration } from './sync-inbox-migration';
+import { syncConflictMigration } from './sync-conflict-migration';
+import { syncRepairMigration } from './sync-repair-migration';
 import { ticketMigration } from './ticket-migration';
 import type { DatabaseContext } from './types';
 import { voucherOrderMigration } from './voucher-order-migration';
@@ -297,6 +301,10 @@ const migrations: readonly Migration[] = [
   voucherOrderMigration,
   stockSaleMigration,
   expensePaymentStatusMigration,
+  syncMigration,
+  syncInboxMigration,
+  syncRepairMigration,
+  syncConflictMigration,
 ];
 
 function ensureMigrationTable(sqlite: BetterSqlite3.Database): void {
