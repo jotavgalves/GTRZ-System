@@ -134,20 +134,21 @@ function calculateFinancials(
   database: DatabaseContext,
   productId: string,
   eventId: string | null,
-  costCents: number,
   salePriceCents: number,
   quantity: number,
 ): DatabaseProductFinancials {
-  const grossProfitCents = salePriceCents - costCents;
+  const economics = getProductEconomics(database, productId, eventId);
+  const effectiveCostCents = economics.averagePurchaseCostCents;
+  const grossProfitCents = salePriceCents - effectiveCostCents;
   const marginPercent =
     salePriceCents === 0 ? 0 : Math.round((grossProfitCents / salePriceCents) * 10_000) / 100;
   return {
-    costCents,
+    costCents: effectiveCostCents,
     grossProfitCents,
     marginPercent,
     potentialGrossRevenueCents: quantity * salePriceCents,
     potentialGrossProfitCents: quantity * grossProfitCents,
-    ...getProductEconomics(database, productId, eventId),
+    ...economics,
   };
 }
 
@@ -187,7 +188,6 @@ function mapProduct(
           database,
           row.id,
           eventId,
-          row.cost_cents,
           row.sale_price_cents,
           row.quantity,
         )
