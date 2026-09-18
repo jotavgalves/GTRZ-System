@@ -225,6 +225,7 @@ export function InventoryPage(): React.JSX.Element {
             hasActiveEvent={hasActiveEvent}
             key={product.id}
             onDelete={deleteProduct}
+            onChanged={reload}
             onMovement={recordMovement}
             onPreviewDeletion={previewDeletion}
             onUpdate={updateProduct}

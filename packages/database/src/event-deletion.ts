@@ -132,6 +132,7 @@ export function deleteEventPermanently(
     database.sqlite.prepare('DELETE FROM cash_registers WHERE event_id = ?').run(event.id);
     database.sqlite.prepare('DELETE FROM expenses WHERE event_id = ?').run(event.id);
 
+    database.sqlite.prepare('DELETE FROM stock_purchase_lot_voids WHERE event_id = ?').run(event.id);
     database.sqlite.prepare('DELETE FROM stock_purchase_lots WHERE event_id = ?').run(event.id);
     database.sqlite.prepare('DELETE FROM stock_movements WHERE event_id = ?').run(event.id);
     database.sqlite.prepare('DELETE FROM event_stock WHERE event_id = ?').run(event.id);

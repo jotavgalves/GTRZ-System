@@ -12,7 +12,9 @@ export function getEventStockCostCents(database: DatabaseContext, eventId: strin
        FROM stock_movements sm
        INNER JOIN products p ON p.id = sm.product_id
        LEFT JOIN stock_purchase_lots lot ON lot.movement_id = sm.id
-       WHERE sm.event_id = ? AND sm.type = 'purchase'`,
+       LEFT JOIN stock_purchase_lot_voids void ON void.movement_id = sm.id
+       WHERE sm.event_id = ? AND sm.type = 'purchase'
+         AND void.movement_id IS NULL`,
     )
     .all(eventId) as StockCostRow[];
 

@@ -64,6 +64,17 @@ export interface DatabaseInventoryState {
   readonly products: readonly DatabaseInventoryProduct[];
 }
 
+export interface DatabaseStockPurchaseLot {
+  readonly movementId: string;
+  readonly productId: string;
+  readonly quantity: number;
+  readonly totalCostCents: number;
+  readonly unitCostCents: number;
+  readonly createdAt: number;
+  readonly voided: boolean;
+  readonly canUndo: boolean;
+}
+
 interface CategoryRow {
   readonly id: string;
   readonly name: string;
@@ -123,21 +134,20 @@ function calculateFinancials(
   database: DatabaseContext,
   productId: string,
   eventId: string | null,
+  costCents: number,
   salePriceCents: number,
   quantity: number,
 ): DatabaseProductFinancials {
-  const economics = getProductEconomics(database, productId, eventId);
-  const effectiveCostCents = economics.averagePurchaseCostCents;
-  const grossProfitCents = salePriceCents - effectiveCostCents;
+  const grossProfitCents = salePriceCents - costCents;
   const marginPercent =
     salePriceCents === 0 ? 0 : Math.round((grossProfitCents / salePriceCents) * 10_000) / 100;
   return {
-    costCents: effectiveCostCents,
+    costCents,
     grossProfitCents,
     marginPercent,
     potentialGrossRevenueCents: quantity * salePriceCents,
     potentialGrossProfitCents: quantity * grossProfitCents,
-    ...economics,
+    ...getProductEconomics(database, productId, eventId),
   };
 }
 
@@ -177,6 +187,7 @@ function mapProduct(
           database,
           row.id,
           eventId,
+          row.cost_cents,
           row.sale_price_cents,
           row.quantity,
         )
@@ -520,4 +531,163 @@ export function recordStockMovement(
     });
   })();
   return getProduct(database, input.productId, eventId);
+}
+
+export function listStockPurchaseLots(
+  database: DatabaseContext,
+  productId: string,
+): readonly DatabaseStockPurchaseLot[] {
+  requireProduction(database);
+  const eventId = requireActiveEvent(database);
+  const rows = database.sqlite
+    .prepare(
+      `SELECT lot.movement_id, lot.product_id, lot.quantity, lot.total_cost_cents, lot.created_at,
+         void.movement_id AS voided_movement_id,
+         EXISTS(
+           SELECT 1 FROM stock_movements later
+           WHERE later.event_id = lot.event_id AND later.product_id = lot.product_id
+             AND later.delta < 0 AND later.created_at > lot.created_at
+         ) AS has_later_decrease
+       FROM stock_purchase_lots lot
+       LEFT JOIN stock_purchase_lot_voids void ON void.movement_id = lot.movement_id
+       WHERE lot.event_id = ? AND lot.product_id = ?
+       ORDER BY lot.created_at DESC`,
+    )
+    .all(eventId, productId) as Array<{
+    readonly movement_id: string;
+    readonly product_id: string;
+    readonly quantity: number;
+    readonly total_cost_cents: number;
+    readonly created_at: number;
+    readonly voided_movement_id: string | null;
+    readonly has_later_decrease: number;
+  }>;
+  return rows.map((lot) => ({
+    movementId: lot.movement_id,
+    productId: lot.product_id,
+    quantity: lot.quantity,
+    totalCostCents: lot.total_cost_cents,
+    unitCostCents: Math.round(lot.total_cost_cents / lot.quantity),
+    createdAt: lot.created_at,
+    voided: lot.voided_movement_id !== null,
+    canUndo: lot.voided_movement_id === null && lot.has_later_decrease === 0,
+  }));
+}
+
+export function correctStockPurchaseLot(
+  database: DatabaseContext,
+  input: { readonly movementId: string; readonly totalCostCents: number; readonly reason: string },
+): DatabaseStockPurchaseLot {
+  requireProduction(database);
+  const eventId = requireActiveEvent(database);
+  if (!Number.isInteger(input.totalCostCents) || input.totalCostCents <= 0) {
+    throw new Error('O valor corrigido do lote deve ser maior que zero.');
+  }
+  const lot = database.sqlite
+    .prepare(
+      `SELECT movement_id, event_id, product_id, quantity, total_cost_cents, created_at
+       FROM stock_purchase_lots WHERE movement_id = ?`,
+    )
+    .get(input.movementId) as
+    | {
+        readonly movement_id: string;
+        readonly event_id: string;
+        readonly product_id: string;
+        readonly quantity: number;
+        readonly total_cost_cents: number;
+        readonly created_at: number;
+      }
+    | undefined;
+  if (lot === undefined || lot.event_id !== eventId) {
+    throw new Error('O lote não pertence ao evento ativo.');
+  }
+  const reason = input.reason.trim();
+  if (reason.length < 3) throw new Error('Informe o motivo da correção.');
+  const previousTotalCents = lot.total_cost_cents;
+  database.sqlite.transaction(() => {
+    database.sqlite
+      .prepare('UPDATE stock_purchase_lots SET total_cost_cents = ? WHERE movement_id = ?')
+      .run(input.totalCostCents, lot.movement_id);
+    appendAudit(database, {
+      action: 'inventory.purchase-lot-corrected',
+      entityType: 'stock-purchase-lot',
+      entityId: lot.movement_id,
+      eventId,
+      details: {
+        productId: lot.product_id,
+        previousTotalCents,
+        totalCostCents: input.totalCostCents,
+        reason,
+      },
+    });
+  })();
+  return {
+    movementId: lot.movement_id,
+    productId: lot.product_id,
+    quantity: lot.quantity,
+    totalCostCents: input.totalCostCents,
+    unitCostCents: Math.round(input.totalCostCents / lot.quantity),
+    createdAt: lot.created_at,
+    voided: false,
+    canUndo: false,
+  };
+}
+
+export function voidStockPurchaseLot(
+  database: DatabaseContext,
+  input: { readonly movementId: string; readonly reason: string },
+): DatabaseStockPurchaseLot {
+  requireProduction(database);
+  const eventId = requireActiveEvent(database);
+  const reason = input.reason.trim();
+  if (reason.length < 3) throw new Error('Informe o motivo para desfazer a entrada.');
+  const lot = database.sqlite
+    .prepare(
+      `SELECT lot.movement_id, lot.event_id, lot.product_id, lot.quantity, lot.total_cost_cents,
+         lot.created_at, void.movement_id AS voided_movement_id,
+         EXISTS(
+           SELECT 1 FROM stock_movements later
+           WHERE later.event_id = lot.event_id AND later.product_id = lot.product_id
+             AND later.delta < 0 AND later.created_at > lot.created_at
+         ) AS has_later_decrease
+       FROM stock_purchase_lots lot
+       LEFT JOIN stock_purchase_lot_voids void ON void.movement_id = lot.movement_id
+       WHERE lot.movement_id = ?`,
+    )
+    .get(input.movementId) as
+    | {
+        readonly movement_id: string; readonly event_id: string; readonly product_id: string;
+        readonly quantity: number; readonly total_cost_cents: number; readonly created_at: number;
+        readonly voided_movement_id: string | null; readonly has_later_decrease: number;
+      }
+    | undefined;
+  if (lot === undefined || lot.event_id !== eventId) throw new Error('O lote não pertence ao evento ativo.');
+  if (lot.voided_movement_id !== null) throw new Error('Esta entrada já foi desfeita.');
+  if (lot.has_later_decrease !== 0) {
+    throw new Error('Esta entrada já possui baixas posteriores; corrija o estoque sem apagar o histórico.');
+  }
+  const stock = database.sqlite
+    .prepare('SELECT quantity FROM event_stock WHERE event_id = ? AND product_id = ?')
+    .get(eventId, lot.product_id) as { readonly quantity: number } | undefined;
+  if ((stock?.quantity ?? 0) < lot.quantity) throw new Error('O saldo atual não permite desfazer esta entrada.');
+  const now = Date.now();
+  database.sqlite.transaction(() => {
+    database.sqlite
+      .prepare('UPDATE event_stock SET quantity = quantity - ?, updated_at = ? WHERE event_id = ? AND product_id = ?')
+      .run(lot.quantity, now, eventId, lot.product_id);
+    database.sqlite
+      .prepare(
+        `INSERT INTO stock_movements (id, event_id, product_id, type, quantity, delta, note, created_at)
+         VALUES (?, ?, ?, 'correction-negative', ?, ?, ?, ?)`,
+      )
+      .run(randomUUID(), eventId, lot.product_id, lot.quantity, -lot.quantity, `Desfazer entrada: ${reason}`, now);
+    database.sqlite
+      .prepare('INSERT INTO stock_purchase_lot_voids (movement_id, event_id, reason, created_at) VALUES (?, ?, ?, ?)')
+      .run(lot.movement_id, eventId, reason, now);
+    appendAudit(database, {
+      action: 'inventory.purchase-lot-voided', entityType: 'stock-purchase-lot', entityId: lot.movement_id, eventId,
+      details: { productId: lot.product_id, quantity: lot.quantity, reason },
+    });
+  })();
+  return { movementId: lot.movement_id, productId: lot.product_id, quantity: lot.quantity, totalCostCents: lot.total_cost_cents, unitCostCents: Math.round(lot.total_cost_cents / lot.quantity), createdAt: lot.created_at, voided: true, canUndo: false };
 }

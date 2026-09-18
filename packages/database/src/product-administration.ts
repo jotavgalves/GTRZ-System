@@ -7,7 +7,6 @@ import type { DatabaseContext } from './types';
 export type DatabaseProductDeletionMode = 'keep-sales-history' | 'refund-active-event-sales';
 
 export interface DatabaseProductEconomics {
-  readonly averagePurchaseCostCents: number;
   readonly currentStockValueCents: number;
   readonly contributedCostCents: number;
 }
@@ -59,7 +58,7 @@ export function getProductEconomics(
 ): DatabaseProductEconomics {
   const product = requireProduct(database, productId);
   if (eventId === null) {
-    return { averagePurchaseCostCents: product.costCents, currentStockValueCents: 0, contributedCostCents: 0 };
+    return { currentStockValueCents: 0, contributedCostCents: 0 };
   }
 
   const stock = database.sqlite
@@ -67,28 +66,22 @@ export function getProductEconomics(
     .get(eventId, productId) as { readonly quantity: number } | undefined;
   const contribution = database.sqlite
     .prepare(
-      `SELECT
-         COALESCE(SUM(sm.quantity), 0) AS units,
-         COALESCE(SUM(COALESCE(lot.total_cost_cents, sm.quantity * p.cost_cents)), 0)
-           AS total_cost_cents
-       FROM stock_movements sm
-       INNER JOIN products p ON p.id = sm.product_id
-       LEFT JOIN stock_purchase_lots lot ON lot.movement_id = sm.id
-       WHERE sm.event_id = ? AND sm.product_id = ? AND sm.type = 'purchase'`,
+      `SELECT COALESCE(SUM(
+         CASE type
+           WHEN 'purchase' THEN quantity
+           WHEN 'correction-positive' THEN quantity
+           WHEN 'correction-negative' THEN -quantity
+           ELSE 0
+         END
+       ), 0) AS units
+       FROM stock_movements
+       WHERE event_id = ? AND product_id = ?`,
     )
-    .get(eventId, productId) as {
-    readonly units: number;
-    readonly total_cost_cents: number;
-  };
-  const averagePurchaseCostCents =
-    contribution.units === 0
-      ? product.costCents
-      : Math.round(contribution.total_cost_cents / contribution.units);
+    .get(eventId, productId) as { readonly units: number };
 
   return {
-    averagePurchaseCostCents,
-    currentStockValueCents: Math.max((stock?.quantity ?? 0) * averagePurchaseCostCents, 0),
-    contributedCostCents: contribution.total_cost_cents,
+    currentStockValueCents: Math.max((stock?.quantity ?? 0) * product.costCents, 0),
+    contributedCostCents: Math.max(contribution.units * product.costCents, 0),
   };
 }
 
@@ -214,6 +207,7 @@ export function deleteInventoryProduct(
 
     database.sqlite.prepare('DELETE FROM combo_components WHERE product_id = ?').run(product.id);
     database.sqlite.prepare('DELETE FROM stock_transfers WHERE product_id = ?').run(product.id);
+    database.sqlite.prepare('DELETE FROM stock_purchase_lot_voids WHERE movement_id IN (SELECT movement_id FROM stock_purchase_lots WHERE product_id = ?)').run(product.id);
     database.sqlite.prepare('DELETE FROM stock_purchase_lots WHERE product_id = ?').run(product.id);
     database.sqlite.prepare('DELETE FROM stock_movements WHERE product_id = ?').run(product.id);
     database.sqlite.prepare('DELETE FROM event_stock WHERE product_id = ?').run(product.id);

@@ -85,6 +85,8 @@ const SYNCHRONIZED_ACTIONS = new Set([
   'inventory.category-created',
   'inventory.product-created',
   'inventory.stock-moved',
+  'inventory.purchase-lot-corrected',
+  'inventory.purchase-lot-voided',
   'operations.service-point-created',
   'operations.order-paid',
   'operations.order-cancelled',
@@ -971,6 +973,32 @@ export class CloudSyncService {
           )
           .run(payload.entityId, eventId, productId, quantity, totalCostCents, payload.createdAt);
       }
+      return;
+    }
+
+    if (payload.action === 'inventory.purchase-lot-corrected') {
+      const totalCostCents = integerField(payload.details, 'totalCostCents');
+      if (payload.entityId === null || totalCostCents === null || totalCostCents <= 0) {
+        throw new Error('Dados insuficientes para corrigir o lote remoto.');
+      }
+      database.sqlite
+        .prepare('UPDATE stock_purchase_lots SET total_cost_cents = ? WHERE movement_id = ?')
+        .run(totalCostCents, payload.entityId);
+      return;
+    }
+
+    if (payload.action === 'inventory.purchase-lot-voided') {
+      const productId = stringField(payload.details, 'productId');
+      const quantity = integerField(payload.details, 'quantity');
+      const reason = stringField(payload.details, 'reason');
+      if (payload.entityId === null || productId === null || quantity === null || quantity <= 0 || reason === null) {
+        throw new Error('Dados insuficientes para desfazer o lote remoto.');
+      }
+      const exists = database.sqlite.prepare('SELECT movement_id FROM stock_purchase_lot_voids WHERE movement_id = ?').get(payload.entityId);
+      if (exists !== undefined) return;
+      database.sqlite.prepare('UPDATE event_stock SET quantity = quantity - ?, updated_at = ? WHERE event_id = ? AND product_id = ?').run(quantity, payload.createdAt, eventId, productId);
+      database.sqlite.prepare(`INSERT INTO stock_movements (id, event_id, product_id, type, quantity, delta, note, created_at) VALUES (?, ?, ?, 'correction-negative', ?, ?, ?, ?)`).run(randomUUID(), eventId, productId, quantity, -quantity, `Desfazer entrada: ${reason}`, payload.createdAt);
+      database.sqlite.prepare('INSERT INTO stock_purchase_lot_voids (movement_id, event_id, reason, created_at) VALUES (?, ?, ?, ?)').run(payload.entityId, eventId, reason, payload.createdAt);
       return;
     }
 

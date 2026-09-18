@@ -130,6 +130,27 @@ export const transferStockInputSchema = z
     }
   });
 
+export const stockPurchaseLotSchema = z.object({
+  movementId: z.uuid(),
+  productId: z.uuid(),
+  quantity: z.number().int().positive(),
+  totalCostCents: z.number().int().positive(),
+  unitCostCents: z.number().int().positive(),
+  voided: z.boolean(),
+  canUndo: z.boolean(),
+  createdAt: z.number().int().nonnegative(),
+});
+export const stockPurchaseLotListSchema = z.array(stockPurchaseLotSchema);
+export const correctStockPurchaseLotInputSchema = z.object({
+  movementId: z.uuid(),
+  totalCostCents: z.number().int().positive(),
+  reason: z.string().trim().min(3).max(240),
+});
+export const voidStockPurchaseLotInputSchema = z.object({
+  movementId: z.uuid(),
+  reason: z.string().trim().min(3).max(240),
+});
+
 export const stockTransferSchema = z.object({
   id: z.uuid(),
   productId: z.uuid(),
@@ -187,6 +208,9 @@ export type CreateCategoryInput = z.infer<typeof createCategoryInputSchema>;
 export type CreateProductInput = z.infer<typeof createProductInputSchema>;
 export type UpdateProductInput = z.infer<typeof updateProductInputSchema>;
 export type RecordStockMovementInput = z.infer<typeof recordStockMovementInputSchema>;
+export type StockPurchaseLot = z.infer<typeof stockPurchaseLotSchema>;
+export type CorrectStockPurchaseLotInput = z.infer<typeof correctStockPurchaseLotInputSchema>;
+export type VoidStockPurchaseLotInput = z.infer<typeof voidStockPurchaseLotInputSchema>;
 export type TransferStockInput = z.infer<typeof transferStockInputSchema>;
 export type StockTransfer = z.infer<typeof stockTransferSchema>;
 export type ProductDeletionMode = z.infer<typeof productDeletionModeSchema>;
@@ -200,6 +224,9 @@ export interface InventoryApi {
   createProduct(input: CreateProductInput): Promise<InventoryProduct>;
   updateProduct(input: UpdateProductInput): Promise<InventoryProduct>;
   recordMovement(input: RecordStockMovementInput): Promise<InventoryProduct>;
+  listPurchaseLots(productId: string): Promise<readonly StockPurchaseLot[]>;
+  correctPurchaseLot(input: CorrectStockPurchaseLotInput): Promise<StockPurchaseLot>;
+  voidPurchaseLot(input: VoidStockPurchaseLotInput): Promise<StockPurchaseLot>;
   listTransfers(): Promise<readonly StockTransfer[]>;
   transferStock(input: TransferStockInput): Promise<StockTransfer>;
   previewDeletion(productId: string): Promise<ProductDeletionImpact>;

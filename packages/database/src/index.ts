@@ -6,6 +6,7 @@ import { financeMigration } from './finance-migration';
 import { technicalSchema } from './schema';
 import { stockSaleMigration } from './stock-sale-migration';
 import { stockPurchaseLotsMigration } from './stock-purchase-lots-migration';
+import { stockPurchaseLotVoidsMigration } from './stock-purchase-lot-voids-migration';
 import { syncMigration } from './sync-migration';
 import { syncInboxMigration } from './sync-inbox-migration';
 import { syncConflictMigration } from './sync-conflict-migration';
@@ -309,6 +310,7 @@ const migrations: readonly Migration[] = [
   syncConflictMigration,
   financeLedgerMigration,
   stockPurchaseLotsMigration,
+  stockPurchaseLotVoidsMigration,
 ];
 
 function ensureMigrationTable(sqlite: BetterSqlite3.Database): void {

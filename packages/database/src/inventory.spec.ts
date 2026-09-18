@@ -15,8 +15,11 @@ import {
   openOrder,
   openDatabase,
   recordStockMovement,
+  correctStockPurchaseLot,
+  listStockPurchaseLots,
   setActiveEvent,
   switchProfile,
+  voidStockPurchaseLot,
   type DatabaseContext,
 } from './index';
 
@@ -173,31 +176,32 @@ describe('inventory database', () => {
     database.close();
   });
 
-  it('mostra custo médio e aporte usando os valores reais dos lotes', async () => {
+  it('corrige e desfaz uma entrada recente sem apagar seu histórico', async () => {
     const database = await createTemporaryDatabase();
-    createEvent(database, { name: 'Evento de custos reais', startsAt: Date.now() });
+    createEvent(database, { name: 'Evento de correção de lote', startsAt: Date.now() });
     const { productId } = createCatalog(database);
     recordStockMovement(database, {
       productId,
       type: 'purchase',
-      quantity: 10,
-      purchaseTotalCents: 6_000,
+      quantity: 5,
+      purchaseTotalCents: 1_000,
     });
-    recordStockMovement(database, {
-      productId,
-      type: 'purchase',
-      quantity: 10,
-      purchaseTotalCents: 8_000,
-    });
-
-    expect(getInventoryState(database).products.find((item) => item.id === productId)?.financials).toMatchObject({
-      costCents: 700,
-      currentStockValueCents: 14_000,
-      contributedCostCents: 14_000,
-      grossProfitCents: 300,
-    });
+    const lot = listStockPurchaseLots(database, productId)[0];
+    if (lot === undefined) throw new Error('Lote não criado.');
+    expect(correctStockPurchaseLot(database, {
+      movementId: lot.movementId,
+      totalCostCents: 1_250,
+      reason: 'Nota de compra corrigida',
+    })).toMatchObject({ totalCostCents: 1_250, voided: false });
+    expect(voidStockPurchaseLot(database, {
+      movementId: lot.movementId,
+      reason: 'Entrada de teste',
+    })).toMatchObject({ voided: true });
+    expect(getInventoryState(database).products.find((item) => item.id === productId)?.quantity).toBe(0);
+    expect(listStockPurchaseLots(database, productId)[0]).toMatchObject({ voided: true });
     database.close();
   });
+
 
   it('mantém saldos independentes para o mesmo produto em eventos diferentes', async () => {
     const database = await createTemporaryDatabase();

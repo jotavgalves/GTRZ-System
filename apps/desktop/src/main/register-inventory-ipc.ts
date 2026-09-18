@@ -2,6 +2,7 @@ import { ipcMain } from 'electron';
 
 import {
   createCategoryInputSchema,
+  correctStockPurchaseLotInputSchema,
   createProductInputSchema,
   deleteProductInputSchema,
   inventoryProductSchema,
@@ -11,15 +12,21 @@ import {
   productDeletionImpactSchema,
   productDeletionResultSchema,
   recordStockMovementInputSchema,
+  stockPurchaseLotListSchema,
+  stockPurchaseLotSchema,
   stockTransferListSchema,
   stockTransferSchema,
   transferStockInputSchema,
+  voidStockPurchaseLotInputSchema,
   updateProductInputSchema,
 } from '@gtrz/contracts';
 import {
   createInventoryProduct,
   createProductCategory,
   getInventoryState,
+  correctStockPurchaseLot,
+  listStockPurchaseLots,
+  voidStockPurchaseLot,
   listStockTransfers,
   recordStockMovement,
   transferStockBetweenEvents,
@@ -41,6 +48,9 @@ const INVENTORY_CHANNELS = [
   IPC_CHANNELS.inventoryCreateProduct,
   IPC_CHANNELS.inventoryUpdateProduct,
   IPC_CHANNELS.inventoryRecordMovement,
+  IPC_CHANNELS.inventoryListPurchaseLots,
+  IPC_CHANNELS.inventoryCorrectPurchaseLot,
+  IPC_CHANNELS.inventoryVoidPurchaseLot,
   IPC_CHANNELS.inventoryListTransfers,
   IPC_CHANNELS.inventoryTransferStock,
   IPC_CHANNELS.inventoryPreviewProductDeletion,
@@ -115,6 +125,19 @@ export function registerInventoryIpcHandlers(options: RegisterInventoryIpcOption
       ...(input.note === undefined ? {} : { note: input.note }),
     };
     return inventoryProductSchema.parse(recordStockMovement(options.getDatabase(), movementInput));
+  });
+  ipcMain.handle(IPC_CHANNELS.inventoryListPurchaseLots, (_event, productId: unknown) => {
+    return stockPurchaseLotListSchema.parse(
+      listStockPurchaseLots(options.getDatabase(), String(productId)),
+    );
+  });
+  ipcMain.handle(IPC_CHANNELS.inventoryCorrectPurchaseLot, (_event, payload: unknown) => {
+    const input = correctStockPurchaseLotInputSchema.parse(payload);
+    return stockPurchaseLotSchema.parse(correctStockPurchaseLot(options.getDatabase(), input));
+  });
+  ipcMain.handle(IPC_CHANNELS.inventoryVoidPurchaseLot, (_event, payload: unknown) => {
+    const input = voidStockPurchaseLotInputSchema.parse(payload);
+    return stockPurchaseLotSchema.parse(voidStockPurchaseLot(options.getDatabase(), input));
   });
   ipcMain.handle(IPC_CHANNELS.inventoryListTransfers, () => {
     return stockTransferListSchema.parse(listStockTransfers(options.getDatabase()));

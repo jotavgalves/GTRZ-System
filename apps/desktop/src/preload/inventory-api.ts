@@ -2,6 +2,7 @@ import { ipcRenderer } from 'electron';
 
 import {
   createCategoryInputSchema,
+  correctStockPurchaseLotInputSchema,
   createProductInputSchema,
   deleteProductInputSchema,
   inventoryProductSchema,
@@ -11,11 +12,15 @@ import {
   productDeletionImpactSchema,
   productDeletionResultSchema,
   recordStockMovementInputSchema,
+  stockPurchaseLotListSchema,
+  stockPurchaseLotSchema,
   stockTransferListSchema,
   stockTransferSchema,
   transferStockInputSchema,
+  voidStockPurchaseLotInputSchema,
   updateProductInputSchema,
   type CreateCategoryInput,
+  type CorrectStockPurchaseLotInput,
   type CreateProductInput,
   type DeleteProductInput,
   type InventoryApi,
@@ -26,8 +31,10 @@ import {
   type ProductDeletionResult,
   type RecordStockMovementInput,
   type StockTransfer,
+  type StockPurchaseLot,
   type TransferStockInput,
   type UpdateProductInput,
+  type VoidStockPurchaseLotInput,
 } from '@gtrz/contracts';
 
 export const inventoryApi: InventoryApi = {
@@ -66,6 +73,26 @@ export const inventoryApi: InventoryApi = {
       parsedInput,
     );
     return inventoryProductSchema.parse(payload);
+  },
+  async listPurchaseLots(productId: string): Promise<readonly StockPurchaseLot[]> {
+    const payload: unknown = await ipcRenderer.invoke(IPC_CHANNELS.inventoryListPurchaseLots, productId);
+    return stockPurchaseLotListSchema.parse(payload);
+  },
+  async correctPurchaseLot(input: CorrectStockPurchaseLotInput): Promise<StockPurchaseLot> {
+    const parsedInput = correctStockPurchaseLotInputSchema.parse(input);
+    const payload: unknown = await ipcRenderer.invoke(
+      IPC_CHANNELS.inventoryCorrectPurchaseLot,
+      parsedInput,
+    );
+    return stockPurchaseLotSchema.parse(payload);
+  },
+  async voidPurchaseLot(input: VoidStockPurchaseLotInput): Promise<StockPurchaseLot> {
+    const parsedInput = voidStockPurchaseLotInputSchema.parse(input);
+    const payload: unknown = await ipcRenderer.invoke(
+      IPC_CHANNELS.inventoryVoidPurchaseLot,
+      parsedInput,
+    );
+    return stockPurchaseLotSchema.parse(payload);
   },
   async listTransfers(): Promise<readonly StockTransfer[]> {
     const payload: unknown = await ipcRenderer.invoke(IPC_CHANNELS.inventoryListTransfers);
