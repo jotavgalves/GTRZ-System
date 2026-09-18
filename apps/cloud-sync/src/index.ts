@@ -61,6 +61,14 @@ function cashierToken(request: Request): string | null {
   return match === null ? null : decodeURIComponent(match[1] ?? '');
 }
 
+function mobileToken(request: Request): string | null {
+  const authorization = request.headers.get('Authorization');
+  if (authorization?.startsWith('Bearer ')) return authorization.slice('Bearer '.length);
+  const cookie = request.headers.get('Cookie') ?? '';
+  const match = /(?:^|;\s*)gtrz_mobile=([^;]+)/u.exec(cookie);
+  return match === null ? null : decodeURIComponent(match[1] ?? '');
+}
+
 function isRecord(value: unknown): value is JsonRecord {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
@@ -179,6 +187,32 @@ function sendSocket(socket: WebSocket, payload: unknown): void {
   socket.send(JSON.stringify(payload));
 }
 
+function hex(bytes: Uint8Array): string {
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
+}
+
+async function passwordHash(password: string, salt: string): Promise<string> {
+  const key = await crypto.subtle.importKey(
+    'raw',
+    new TextEncoder().encode(password),
+    'PBKDF2',
+    false,
+    ['deriveBits'],
+  );
+  const bits = await crypto.subtle.deriveBits(
+    { name: 'PBKDF2', hash: 'SHA-256', salt: new TextEncoder().encode(salt), iterations: 2_000 },
+    key,
+    256,
+  );
+  return hex(new Uint8Array(bits));
+}
+
+function newSalt(): string {
+  const bytes = new Uint8Array(24);
+  crypto.getRandomValues(bytes);
+  return hex(bytes);
+}
+
 export class MonitorRoom extends DurableObject<Env> {
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -243,6 +277,28 @@ export class MonitorRoom extends DurableObject<Env> {
       );
       CREATE INDEX IF NOT EXISTS cashier_devices_event_idx
         ON cashier_devices (event_id, last_seen_at DESC);
+      CREATE TABLE IF NOT EXISTS mobile_operators (
+        operator_id TEXT PRIMARY KEY,
+        name TEXT NOT NULL COLLATE NOCASE UNIQUE,
+        password_salt TEXT NOT NULL,
+        password_hash TEXT NOT NULL,
+        role TEXT NOT NULL CHECK (role IN ('sales', 'inventory', 'sales-and-inventory')),
+        active INTEGER NOT NULL CHECK (active IN (0, 1)),
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        last_seen_at INTEGER
+      );
+      CREATE TABLE IF NOT EXISTS mobile_sessions (
+        session_token TEXT PRIMARY KEY,
+        operator_id TEXT NOT NULL,
+        device_id TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        last_seen_at INTEGER NOT NULL,
+        revoked_at INTEGER,
+        revoke_reason TEXT
+      );
+      CREATE INDEX IF NOT EXISTS mobile_sessions_operator_idx
+        ON mobile_sessions (operator_id, revoked_at, last_seen_at DESC);
       DELETE FROM flow_log WHERE type = 'connection.heartbeat';
     `);
   }
@@ -285,6 +341,39 @@ export class MonitorRoom extends DurableObject<Env> {
 
       if (request.method === 'GET' && url.pathname === '/v1/cashier/devices') {
         return json(this.#cashierDevices());
+      }
+
+      if (request.method === 'GET' && url.pathname === '/v1/mobile/operators') {
+        return json(this.#mobileOperators());
+      }
+
+      if (request.method === 'POST' && url.pathname === '/v1/mobile/operators') {
+        return json(await this.#createMobileOperator(await readJson(request)));
+      }
+
+      const operatorMatch = /^\/v1\/mobile\/operators\/([^/]+)$/.exec(url.pathname);
+      if (request.method === 'PATCH' && operatorMatch !== null) {
+        return json(await this.#updateMobileOperator(decodeURIComponent(operatorMatch[1] ?? ''), await readJson(request)));
+      }
+      if (request.method === 'DELETE' && operatorMatch !== null) {
+        return json(this.#deleteMobileOperator(decodeURIComponent(operatorMatch[1] ?? '')));
+      }
+
+      const sessionsMatch = /^\/v1\/mobile\/operators\/([^/]+)\/sessions$/.exec(url.pathname);
+      if (request.method === 'POST' && sessionsMatch !== null) {
+        return json(this.#endMobileSessions(decodeURIComponent(sessionsMatch[1] ?? ''), await readJson(request)));
+      }
+
+      if (request.method === 'POST' && url.pathname === '/v1/mobile/login') {
+        return json(await this.#loginMobile(await readJson(request)));
+      }
+
+      if (request.method === 'POST' && url.pathname === '/v1/mobile/authorize') {
+        return json(this.#authorizeMobile(await readJson(request)));
+      }
+
+      if (url.pathname === '/v1/mobile/session/stream') {
+        return this.#openMobileSessionStream(request);
       }
 
       throw new ApiError(404, 'NOT_FOUND', 'Rota de monitoramento não encontrada.');
@@ -623,6 +712,208 @@ export class MonitorRoom extends DurableObject<Env> {
     return { devices };
   }
 
+  #mobileOperators(): readonly JsonRecord[] {
+    return this.ctx.storage.sql
+      .exec(
+        `SELECT o.operator_id, o.name, o.role, o.active, o.created_at, o.updated_at, o.last_seen_at,
+                (SELECT COUNT(*) FROM mobile_sessions s WHERE s.operator_id = o.operator_id AND s.revoked_at IS NULL) AS session_count
+         FROM mobile_operators o ORDER BY o.active DESC, o.name COLLATE NOCASE`,
+      )
+      .toArray()
+      .map((row) => this.#mobileOperatorPublic(row));
+  }
+
+  #mobileOperatorPublic(row: Record<string, unknown>): JsonRecord {
+    return {
+      id: storedString(row.operator_id, 'operator_id'),
+      name: storedString(row.name, 'name'),
+      role: storedString(row.role, 'role'),
+      active: Number(row.active) === 1,
+      createdAt: Number(row.created_at),
+      updatedAt: Number(row.updated_at),
+      lastSeenAt: typeof row.last_seen_at === 'number' ? row.last_seen_at : null,
+      sessionCount: Number(row.session_count ?? 0),
+    };
+  }
+
+  async #createMobileOperator(payload: JsonRecord): Promise<JsonRecord> {
+    const name = requiredString(payload.name, 'name', 60);
+    const password = requiredString(payload.password, 'password', 128);
+    if (password.length < 6) throw new ApiError(400, 'INVALID_INPUT', 'A senha deve possuir ao menos 6 caracteres.');
+    const role = requiredString(payload.role, 'role', 32);
+    if (role !== 'sales' && role !== 'inventory' && role !== 'sales-and-inventory') {
+      throw new ApiError(400, 'INVALID_INPUT', 'Permissão móvel inválida.');
+    }
+    const operatorId = crypto.randomUUID();
+    const salt = newSalt();
+    const now = Date.now();
+    try {
+      this.ctx.storage.sql.exec(
+        `INSERT INTO mobile_operators
+         (operator_id, name, password_salt, password_hash, role, active, created_at, updated_at, last_seen_at)
+         VALUES (?, ?, ?, ?, ?, 1, ?, ?, NULL)`,
+        operatorId, name, salt, await passwordHash(password, salt), role, now, now,
+      ).toArray();
+    } catch {
+      throw new ApiError(409, 'OPERATOR_EXISTS', 'Já existe um operador móvel com este nome.');
+    }
+    return this.#mobileOperatorById(operatorId);
+  }
+
+  async #updateMobileOperator(operatorId: string, payload: JsonRecord): Promise<JsonRecord> {
+    requiredString(operatorId, 'operatorId', 80);
+    const current = this.#mobileOperatorRow(operatorId);
+    const name = payload.name === undefined ? current.name : requiredString(payload.name, 'name', 60);
+    const role = payload.role === undefined ? current.role : requiredString(payload.role, 'role', 32);
+    const active = payload.active === undefined ? Number(current.active) === 1 : payload.active === true;
+    if (role !== 'sales' && role !== 'inventory' && role !== 'sales-and-inventory') {
+      throw new ApiError(400, 'INVALID_INPUT', 'Permissão móvel inválida.');
+    }
+    let salt = storedString(current.password_salt, 'password_salt');
+    let hash = storedString(current.password_hash, 'password_hash');
+    if (payload.password !== undefined) {
+      const password = requiredString(payload.password, 'password', 128);
+      if (password.length < 6) throw new ApiError(400, 'INVALID_INPUT', 'A senha deve possuir ao menos 6 caracteres.');
+      salt = newSalt();
+      hash = await passwordHash(password, salt);
+    }
+    const now = Date.now();
+    try {
+      this.ctx.storage.sql.exec(
+        `UPDATE mobile_operators SET name = ?, password_salt = ?, password_hash = ?, role = ?, active = ?, updated_at = ?
+         WHERE operator_id = ?`,
+        name, salt, hash, role, active ? 1 : 0, now, operatorId,
+      ).toArray();
+    } catch {
+      throw new ApiError(409, 'OPERATOR_EXISTS', 'Já existe um operador móvel com este nome.');
+    }
+    if (!active || payload.password !== undefined) {
+      this.#revokeMobileSessions(operatorId, !active ? 'deactivated' : 'password-required');
+    } else {
+      this.#notifyMobileOperator(operatorId, { type: 'mobile.permissions', operator: this.#mobileOperatorById(operatorId) });
+    }
+    return this.#mobileOperatorById(operatorId);
+  }
+
+  #endMobileSessions(operatorId: string, payload: JsonRecord): JsonRecord {
+    requiredString(operatorId, 'operatorId', 80);
+    this.#mobileOperatorRow(operatorId);
+    const reason = payload.reason === 'signed-out' ? 'signed-out' : 'password-required';
+    this.#revokeMobileSessions(operatorId, reason);
+    return { success: true };
+  }
+
+  #deleteMobileOperator(operatorId: string): JsonRecord {
+    requiredString(operatorId, 'operatorId', 80);
+    this.#mobileOperatorRow(operatorId);
+    this.#revokeMobileSessions(operatorId, 'deleted');
+    this.ctx.storage.sql.exec('DELETE FROM mobile_sessions WHERE operator_id = ?', operatorId).toArray();
+    this.ctx.storage.sql.exec('DELETE FROM mobile_operators WHERE operator_id = ?', operatorId).toArray();
+    return { success: true };
+  }
+
+  async #loginMobile(payload: JsonRecord): Promise<JsonRecord> {
+    const password = requiredString(payload.password, 'password', 128);
+    const deviceId = requiredString(payload.deviceId, 'deviceId', 80);
+    const rows = this.ctx.storage.sql
+      .exec(
+        `SELECT operator_id, name, password_salt, password_hash, role, active, created_at, updated_at, last_seen_at
+         FROM mobile_operators WHERE active = 1`,
+      )
+      .toArray() as Array<Record<string, unknown>>;
+    let operator: Record<string, unknown> | null = null;
+    for (const row of rows) {
+      const candidate = await passwordHash(password, storedString(row.password_salt, 'password_salt'));
+      if (candidate === storedString(row.password_hash, 'password_hash')) {
+        operator = row;
+        break;
+      }
+    }
+    if (operator === null) throw new ApiError(401, 'MOBILE_UNAUTHORIZED', 'Senha não reconhecida ou operador desativado.');
+    const eventId = this.#activeEventId();
+    if (eventId === null) throw new ApiError(409, 'NO_ACTIVE_EVENT', 'Nenhum evento ativo está disponível no momento.');
+    const now = Date.now();
+    const token = `${crypto.randomUUID()}${crypto.randomUUID()}`.replaceAll('-', '');
+    this.ctx.storage.sql.exec(
+      `INSERT INTO mobile_sessions (session_token, operator_id, device_id, created_at, last_seen_at, revoked_at, revoke_reason)
+       VALUES (?, ?, ?, ?, ?, NULL, NULL)`,
+      token, operator.operator_id, deviceId, now, now,
+    ).toArray();
+    this.ctx.storage.sql.exec('UPDATE mobile_operators SET last_seen_at = ? WHERE operator_id = ?', now, operator.operator_id).toArray();
+    return { token, eventId, operator: this.#mobileOperatorById(storedString(operator.operator_id, 'operator_id')) };
+  }
+
+  #authorizeMobile(payload: JsonRecord): JsonRecord {
+    const token = requiredString(payload.token, 'token', 160);
+    const row = this.ctx.storage.sql.exec(
+      `SELECT o.operator_id, o.name, o.role, o.active, o.created_at, o.updated_at, o.last_seen_at,
+              s.device_id, s.created_at AS session_created_at
+       FROM mobile_sessions s JOIN mobile_operators o ON o.operator_id = s.operator_id
+       WHERE s.session_token = ? AND s.revoked_at IS NULL`, token,
+    ).toArray()[0] as Record<string, unknown> | undefined;
+    if (row === undefined || Number(row.active) !== 1) {
+      throw new ApiError(401, 'MOBILE_UNAUTHORIZED', 'A sessão móvel foi encerrada.');
+    }
+    const eventId = this.#activeEventId();
+    if (eventId === null) throw new ApiError(409, 'NO_ACTIVE_EVENT', 'Nenhum evento ativo está disponível no momento.');
+    const now = Date.now();
+    this.ctx.storage.sql.exec('UPDATE mobile_sessions SET last_seen_at = ? WHERE session_token = ?', now, token).toArray();
+    this.ctx.storage.sql.exec('UPDATE mobile_operators SET last_seen_at = ? WHERE operator_id = ?', now, row.operator_id).toArray();
+    return {
+      operatorId: storedString(row.operator_id, 'operator_id'),
+      name: storedString(row.name, 'name'),
+      role: storedString(row.role, 'role'),
+      deviceId: storedString(row.device_id, 'device_id'),
+      eventId,
+    };
+  }
+
+  #mobileOperatorRow(operatorId: string): Record<string, unknown> {
+    const row = this.ctx.storage.sql.exec(
+      `SELECT operator_id, name, password_salt, password_hash, role, active, created_at, updated_at, last_seen_at
+       FROM mobile_operators WHERE operator_id = ?`, operatorId,
+    ).toArray()[0] as Record<string, unknown> | undefined;
+    if (row === undefined) throw new ApiError(404, 'OPERATOR_NOT_FOUND', 'Operador móvel não encontrado.');
+    return row;
+  }
+
+  #mobileOperatorById(operatorId: string): JsonRecord {
+    const row = this.ctx.storage.sql.exec(
+      `SELECT o.operator_id, o.name, o.role, o.active, o.created_at, o.updated_at, o.last_seen_at,
+              (SELECT COUNT(*) FROM mobile_sessions s WHERE s.operator_id = o.operator_id AND s.revoked_at IS NULL) AS session_count
+       FROM mobile_operators o WHERE o.operator_id = ?`, operatorId,
+    ).toArray()[0] as Record<string, unknown> | undefined;
+    if (row === undefined) throw new ApiError(404, 'OPERATOR_NOT_FOUND', 'Operador móvel não encontrado.');
+    return this.#mobileOperatorPublic(row);
+  }
+
+  #revokeMobileSessions(operatorId: string, reason: string): void {
+    this.ctx.storage.sql.exec(
+      `UPDATE mobile_sessions SET revoked_at = ?, revoke_reason = ? WHERE operator_id = ? AND revoked_at IS NULL`,
+      Date.now(), reason, operatorId,
+    ).toArray();
+    this.#notifyMobileOperator(operatorId, { type: 'mobile.session-revoked', reason });
+  }
+
+  #openMobileSessionStream(request: Request): Response {
+    if (!websocketRequested(request)) throw new ApiError(426, 'WEBSOCKET_REQUIRED', 'Esta rota exige WebSocket.');
+    const operatorId = requiredString(request.headers.get('X-GTRZ-Mobile-Operator'), 'X-GTRZ-Mobile-Operator', 80);
+    const pair = new WebSocketPair();
+    const [client, server] = Object.values(pair);
+    if (client === undefined || server === undefined) throw new Error('Não foi possível iniciar o canal de sessão.');
+    server.serializeAttachment({ operatorId });
+    this.ctx.acceptWebSocket(server, ['mobile']);
+    sendSocket(server, { type: 'mobile.permissions', operator: this.#mobileOperatorById(operatorId) });
+    return new Response(null, { status: 101, webSocket: client });
+  }
+
+  #notifyMobileOperator(operatorId: string, payload: JsonRecord): void {
+    for (const socket of this.ctx.getWebSockets('mobile')) {
+      const attachment = socket.deserializeAttachment() as { readonly operatorId?: unknown } | null;
+      if (attachment?.operatorId === operatorId) sendSocket(socket, payload);
+    }
+  }
+
   #activeEventId(): string | null {
     const row = this.ctx.storage.sql
       .exec(
@@ -701,6 +992,15 @@ export class EventRoom extends DurableObject<Env> {
 
       if (request.method === 'POST' && url.pathname.endsWith('/cashier/sales')) {
         return json(this.#commitCashierSale(
+          await readJson(request),
+          requiredString(request.headers.get('X-GTRZ-Cashier-Device'), 'X-GTRZ-Cashier-Device', 80),
+          requiredString(request.headers.get('X-GTRZ-Cashier-Label'), 'X-GTRZ-Cashier-Label', 60),
+          url.pathname.split('/')[3] ?? '',
+        ));
+      }
+
+      if (request.method === 'POST' && url.pathname.endsWith('/cashier/stock')) {
+        return json(this.#commitMobileStock(
           await readJson(request),
           requiredString(request.headers.get('X-GTRZ-Cashier-Device'), 'X-GTRZ-Cashier-Device', 80),
           requiredString(request.headers.get('X-GTRZ-Cashier-Label'), 'X-GTRZ-Cashier-Label', 60),
@@ -983,6 +1283,67 @@ export class EventRoom extends DurableObject<Env> {
         },
       };
       return this.#recordCommand(commandId, 'journal.committed', journalPayload, now);
+    });
+    this.#broadcast(response.event, eventId);
+    this.#recordJournalInMonitor(eventId, response.event, false);
+    this.#archiveAcceptedJournal(eventId, response.event);
+    return response;
+  }
+
+  #commitMobileStock(
+    payload: JsonRecord,
+    deviceId: string,
+    deviceLabel: string,
+    eventId: string,
+  ): CommandResponse {
+    const commandId = requiredString(payload.commandId, 'commandId');
+    const productId = requiredString(payload.productId, 'productId');
+    const type = requiredString(payload.type, 'type', 32);
+    const quantity = positiveInteger(payload.quantity, 'quantity');
+    const allowedTypes = ['purchase', 'correction-positive', 'correction-negative', 'loss', 'breakage', 'internal-consumption', 'courtesy', 'return'];
+    if (!allowedTypes.includes(type)) throw new ApiError(400, 'INVALID_INPUT', 'Tipo de movimento inválido.');
+    const isPositive = type === 'purchase' || type === 'correction-positive' || type === 'return';
+    const delta = isPositive ? quantity : -quantity;
+    const purchaseTotalCents = type === 'purchase'
+      ? positiveInteger(payload.purchaseTotalCents, 'purchaseTotalCents')
+      : null;
+    const note = payload.note === undefined || payload.note === null ? null : requiredString(payload.note, 'note', 240);
+    const existing = this.#existingCommand(commandId);
+    if (existing !== null) return existing;
+    const response = this.ctx.storage.transactionSync(() => {
+      const product = this.ctx.storage.sql.exec(
+        `SELECT label, quantity, active FROM cashier_products WHERE product_id = ?`, productId,
+      ).toArray()[0] as { readonly label: string; readonly quantity: number; readonly active: number } | undefined;
+      if (product?.active !== 1) throw new ApiError(404, 'PRODUCT_NOT_FOUND', 'Produto não disponível no estoque móvel.');
+      const afterQuantity = product.quantity + delta;
+      if (afterQuantity < 0) throw new ApiError(409, 'INSUFFICIENT_STOCK', `Estoque insuficiente para ${product.label}.`);
+      const now = Date.now();
+      this.ctx.storage.sql.exec(
+        `UPDATE cashier_products SET quantity = ?, updated_at = ? WHERE product_id = ?`, afterQuantity, now, productId,
+      ).toArray();
+      const movementId = crypto.randomUUID();
+      return this.#recordCommand(commandId, 'journal.committed', {
+        commandId,
+        deviceId,
+        auditId: now,
+        profile: 'mobile-inventory',
+        action: 'inventory.stock-moved',
+        entityType: 'stock-movement',
+        entityId: movementId,
+        createdAt: now,
+        details: {
+          productId,
+          productLabel: product.label,
+          type,
+          quantity,
+          delta,
+          beforeQuantity: product.quantity,
+          afterQuantity,
+          purchaseTotalCents,
+          note: note ?? `Movimento móvel por ${deviceLabel}`,
+          operatorName: deviceLabel,
+        },
+      }, now);
     });
     this.#broadcast(response.event, eventId);
     this.#recordJournalInMonitor(eventId, response.event, false);
@@ -1405,6 +1766,15 @@ interface CashierAuthorization {
   readonly token: string;
 }
 
+interface MobileAuthorization {
+  readonly operatorId: string;
+  readonly name: string;
+  readonly role: 'sales' | 'inventory' | 'sales-and-inventory';
+  readonly deviceId: string;
+  readonly eventId: string;
+  readonly token: string;
+}
+
 function cashierSessionCookie(token: string): string {
   return `gtrz_cashier=${encodeURIComponent(token)}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=34560000`;
 }
@@ -1433,12 +1803,36 @@ async function authorizeCashier(request: Request, env: Env): Promise<CashierAuth
   return { deviceId: payload.deviceId, label: payload.label, eventId: payload.eventId, token };
 }
 
+function mobileSessionCookie(token: string): string {
+  return `gtrz_mobile=${encodeURIComponent(token)}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=34560000`;
+}
+
+async function authorizeMobile(request: Request, env: Env): Promise<MobileAuthorization | null> {
+  const token = mobileToken(request);
+  if (token === null) return null;
+  const monitor = env.MONITOR_ROOM.get(env.MONITOR_ROOM.idFromName('gtrz-monitor'));
+  const response = await monitor.fetch(
+    new Request('https://monitor.internal/v1/mobile/authorize', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token }),
+    }),
+  );
+  if (!response.ok) return null;
+  const payload: unknown = await response.json();
+  if (!isRecord(payload) || typeof payload.operatorId !== 'string' || typeof payload.name !== 'string' || typeof payload.deviceId !== 'string' || typeof payload.eventId !== 'string') return null;
+  if (payload.role !== 'sales' && payload.role !== 'inventory' && payload.role !== 'sales-and-inventory') return null;
+  return { operatorId: payload.operatorId, name: payload.name, role: payload.role, deviceId: payload.deviceId, eventId: payload.eventId, token };
+}
+
 function eventRequest(url: URL): boolean {
   return /^\/v1\/events\/[^/]+\/(stock|sales|journal|snapshot|stream|cashier\/(catalog|sales|reject-sale))$/.test(url.pathname);
 }
 
 function cashierApiRequest(url: URL): boolean {
   return /^\/v1\/cashier\/(catalog|sales|stream)$/.test(url.pathname);
+}
+
+function mobileApiRequest(url: URL): boolean {
+  return /^\/v1\/mobile\/(catalog|sales|stock|stream|session|session\/stream)$/.test(url.pathname);
 }
 
 function monitorRequest(url: URL): boolean {
@@ -1541,6 +1935,66 @@ export default {
           body: JSON.stringify(await readJson(request)),
         }),
       );
+    }
+
+    if (request.method === 'POST' && url.pathname === '/v1/mobile/session') {
+      const monitor = env.MONITOR_ROOM.get(env.MONITOR_ROOM.idFromName('gtrz-monitor'));
+      const response = await monitor.fetch(
+        new Request('https://monitor.internal/v1/mobile/login', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(await readJson(request)),
+        }),
+      );
+      const payload: unknown = await response.json();
+      if (!response.ok || !isRecord(payload) || typeof payload.token !== 'string') return json(payload, response.status);
+      const { token, ...session } = payload;
+      return json(session, 200, { 'Set-Cookie': mobileSessionCookie(token) });
+    }
+
+    if (/^\/v1\/mobile\/operators(?:\/[^/]+(?:\/sessions)?)?$/.test(url.pathname)) {
+      if (!authorized(request, env)) {
+        return json({ error: { code: 'UNAUTHORIZED', message: 'Chave de acesso inválida.' } }, 401);
+      }
+      const monitor = env.MONITOR_ROOM.get(env.MONITOR_ROOM.idFromName('gtrz-monitor'));
+      const target = new URL(`https://monitor.internal${url.pathname}`);
+      return monitor.fetch(new Request(target, {
+        method: request.method,
+        headers: { 'Content-Type': 'application/json' },
+        ...(request.method === 'GET' ? {} : { body: await request.text() }),
+      }));
+    }
+
+    if (mobileApiRequest(url)) {
+      const mobile = await authorizeMobile(request, env);
+      if (mobile === null) {
+        return json({ error: { code: 'MOBILE_UNAUTHORIZED', message: 'A sessão móvel expirou ou foi encerrada.' } }, 401);
+      }
+      if (url.pathname === '/v1/mobile/session') {
+        return json({ operator: { id: mobile.operatorId, name: mobile.name, role: mobile.role }, eventId: mobile.eventId });
+      }
+      if (url.pathname === '/v1/mobile/session/stream') {
+        const monitor = env.MONITOR_ROOM.get(env.MONITOR_ROOM.idFromName('gtrz-monitor'));
+        const headers = new Headers(request.headers);
+        headers.set('X-GTRZ-Mobile-Operator', mobile.operatorId);
+        return monitor.fetch(new Request('https://monitor.internal/v1/mobile/session/stream', { headers }));
+      }
+      const isSalesRequest = url.pathname === '/v1/mobile/sales';
+      const isStockRequest = url.pathname === '/v1/mobile/stock';
+      if ((isSalesRequest && mobile.role === 'inventory') || (isStockRequest && mobile.role === 'sales')) {
+        return json({ error: { code: 'MOBILE_FORBIDDEN', message: 'Este perfil não possui esta permissão.' } }, 403);
+      }
+      const suffix = url.pathname.slice('/v1/mobile/'.length);
+      const targetSuffix = suffix === 'catalog' ? 'catalog' : suffix === 'stream' ? 'stream' : suffix === 'stock' ? 'stock' : 'sales';
+      const room = env.EVENT_ROOM.get(env.EVENT_ROOM.idFromName(`event:${mobile.eventId}`));
+      const targetUrl = new URL(`https://event.internal/v1/events/${encodeURIComponent(mobile.eventId)}/cashier/${targetSuffix}`);
+      targetUrl.search = url.search;
+      const headers = new Headers(request.headers);
+      headers.set('X-GTRZ-Cashier-Device', `mobile:${mobile.operatorId}:${mobile.deviceId}`.slice(0, 80));
+      headers.set('X-GTRZ-Cashier-Label', mobile.name);
+      if (suffix === 'stream') return room.fetch(request);
+      const response = await room.fetch(new Request(targetUrl, {
+        method: request.method, headers, ...(request.method === 'POST' ? { body: await request.text() } : {}),
+      }));
+      return refreshCashierSession(response, mobile.token);
     }
 
     if (cashierApiRequest(url)) {

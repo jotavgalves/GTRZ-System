@@ -8,7 +8,10 @@ import {
   cloudSyncStatusSchema,
   cloudMonitorSchema,
   createEventInputSchema,
+  createMobileOperatorInputSchema,
+  deleteMobileOperatorInputSchema,
   deleteEventInputSchema,
+  endMobileOperatorSessionsInputSchema,
   eventDeletionResultSchema,
   eventListSchema,
   eventSchema,
@@ -22,6 +25,7 @@ import {
   switchProfileInputSchema,
   systemInfoSchema,
   updatePaymentTerminalSettingsInputSchema,
+  updateMobileOperatorInputSchema,
   verifyBackupInputSchema,
   type SystemInfo,
 } from '@gtrz/contracts';
@@ -78,6 +82,11 @@ const CONTROL_CHANNELS = [
   IPC_CHANNELS.settingsUpdatePaymentTerminal,
   IPC_CHANNELS.settingsGetCloudSyncStatus,
   IPC_CHANNELS.settingsGetCloudMonitor,
+  IPC_CHANNELS.settingsListMobileOperators,
+  IPC_CHANNELS.settingsCreateMobileOperator,
+  IPC_CHANNELS.settingsUpdateMobileOperator,
+  IPC_CHANNELS.settingsEndMobileOperatorSessions,
+  IPC_CHANNELS.settingsDeleteMobileOperator,
   IPC_CHANNELS.backupsGetState,
   IPC_CHANNELS.backupsChooseDestination,
   IPC_CHANNELS.backupsCreateManual,
@@ -181,6 +190,30 @@ export function registerIpcHandlers(options: RegisterIpcOptions): void {
       localQueue: options.cloudSyncService.getQueueState(database),
       localConflicts: options.cloudSyncService.getConflicts(database),
     });
+  });
+
+  ipcMain.handle(IPC_CHANNELS.settingsListMobileOperators, async () =>
+    options.cloudSyncService.listMobileOperators(),
+  );
+
+  ipcMain.handle(IPC_CHANNELS.settingsCreateMobileOperator, async (_event, payload: unknown) =>
+    options.cloudSyncService.createMobileOperator(createMobileOperatorInputSchema.parse(payload)),
+  );
+
+  ipcMain.handle(IPC_CHANNELS.settingsUpdateMobileOperator, async (_event, payload: unknown) =>
+    options.cloudSyncService.updateMobileOperator(updateMobileOperatorInputSchema.parse(payload)),
+  );
+
+  ipcMain.handle(IPC_CHANNELS.settingsEndMobileOperatorSessions, async (_event, payload: unknown) => {
+    await options.cloudSyncService.endMobileOperatorSessions(
+      endMobileOperatorSessionsInputSchema.parse(payload),
+    );
+    return operationResultSchema.parse({ success: true });
+  });
+
+  ipcMain.handle(IPC_CHANNELS.settingsDeleteMobileOperator, async (_event, payload: unknown) => {
+    await options.cloudSyncService.deleteMobileOperator(deleteMobileOperatorInputSchema.parse(payload));
+    return operationResultSchema.parse({ success: true });
   });
 
   ipcMain.handle(IPC_CHANNELS.backupsGetState, async () => {

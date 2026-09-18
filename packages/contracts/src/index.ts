@@ -41,6 +41,11 @@ export const IPC_CHANNELS = {
   settingsUpdatePaymentTerminal: 'settings:update-payment-terminal',
   settingsGetCloudSyncStatus: 'settings:get-cloud-sync-status',
   settingsGetCloudMonitor: 'settings:get-cloud-monitor',
+  settingsListMobileOperators: 'settings:list-mobile-operators',
+  settingsCreateMobileOperator: 'settings:create-mobile-operator',
+  settingsUpdateMobileOperator: 'settings:update-mobile-operator',
+  settingsEndMobileOperatorSessions: 'settings:end-mobile-operator-sessions',
+  settingsDeleteMobileOperator: 'settings:delete-mobile-operator',
   printingListPrinters: 'printing:list-printers',
   printingGetSettings: 'printing:get-settings',
   printingUpdateSettings: 'printing:update-settings',
@@ -221,6 +226,36 @@ export const cloudSyncStatusSchema = z.object({
   message: z.string().min(1).max(240),
 });
 
+export const mobileOperatorRoleSchema = z.enum(['sales', 'inventory', 'sales-and-inventory']);
+export const mobileOperatorSchema = z.object({
+  id: z.uuid(),
+  name: z.string().trim().min(2).max(60),
+  role: mobileOperatorRoleSchema,
+  active: z.boolean(),
+  createdAt: z.number().int().nonnegative(),
+  updatedAt: z.number().int().nonnegative(),
+  lastSeenAt: z.number().int().nonnegative().nullable(),
+  sessionCount: z.number().int().nonnegative(),
+});
+export const mobileOperatorListSchema = z.array(mobileOperatorSchema);
+export const createMobileOperatorInputSchema = z.object({
+  name: z.string().trim().min(2).max(60),
+  password: z.string().min(6).max(128),
+  role: mobileOperatorRoleSchema,
+});
+export const updateMobileOperatorInputSchema = z.object({
+  operatorId: z.uuid(),
+  name: z.string().trim().min(2).max(60).optional(),
+  password: z.string().min(6).max(128).optional(),
+  role: mobileOperatorRoleSchema.optional(),
+  active: z.boolean().optional(),
+});
+export const endMobileOperatorSessionsInputSchema = z.object({
+  operatorId: z.uuid(),
+  reason: z.enum(['signed-out', 'password-required']).default('password-required'),
+});
+export const deleteMobileOperatorInputSchema = z.object({ operatorId: z.uuid() });
+
 export const cloudMonitorDeviceSchema = z.object({
   id: z.string().min(1).max(80),
   label: z.string().min(1).max(80),
@@ -344,6 +379,12 @@ export type UpdatePaymentTerminalSettingsInput = z.infer<
 >;
 export type OperationResult = z.infer<typeof operationResultSchema>;
 export type CloudSyncStatus = z.infer<typeof cloudSyncStatusSchema>;
+export type MobileOperatorRole = z.infer<typeof mobileOperatorRoleSchema>;
+export type MobileOperator = z.infer<typeof mobileOperatorSchema>;
+export type CreateMobileOperatorInput = z.infer<typeof createMobileOperatorInputSchema>;
+export type UpdateMobileOperatorInput = z.infer<typeof updateMobileOperatorInputSchema>;
+export type EndMobileOperatorSessionsInput = z.infer<typeof endMobileOperatorSessionsInputSchema>;
+export type DeleteMobileOperatorInput = z.infer<typeof deleteMobileOperatorInputSchema>;
 export type CloudMonitor = z.infer<typeof cloudMonitorSchema>;
 export type BackupKind = z.infer<typeof backupKindSchema>;
 export type BackupRecord = z.infer<typeof backupRecordSchema>;
@@ -381,6 +422,11 @@ export interface GtrzDesktopApi {
     ): Promise<PaymentTerminalSettings>;
     getCloudSyncStatus(): Promise<CloudSyncStatus>;
     getCloudMonitor(): Promise<CloudMonitor>;
+    listMobileOperators(): Promise<readonly MobileOperator[]>;
+    createMobileOperator(input: CreateMobileOperatorInput): Promise<MobileOperator>;
+    updateMobileOperator(input: UpdateMobileOperatorInput): Promise<MobileOperator>;
+    endMobileOperatorSessions(input: EndMobileOperatorSessionsInput): Promise<OperationResult>;
+    deleteMobileOperator(input: DeleteMobileOperatorInput): Promise<OperationResult>;
   };
   readonly printing: PrintingApi;
   readonly backups: {

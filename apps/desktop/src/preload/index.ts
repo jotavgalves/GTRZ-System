@@ -7,6 +7,11 @@ import {
   changeProductionPasswordInputSchema,
   cloudSyncStatusSchema,
   cloudMonitorSchema,
+  createMobileOperatorInputSchema,
+  deleteMobileOperatorInputSchema,
+  endMobileOperatorSessionsInputSchema,
+  mobileOperatorListSchema,
+  mobileOperatorSchema,
   createEventInputSchema,
   deleteEventInputSchema,
   eventDeletionResultSchema,
@@ -23,6 +28,7 @@ import {
   switchProfileInputSchema,
   systemInfoSchema,
   updatePaymentTerminalSettingsInputSchema,
+  updateMobileOperatorInputSchema,
   verifyBackupInputSchema,
   type BackupRecord,
   type BackupState,
@@ -30,6 +36,10 @@ import {
   type ChangeProductionPasswordInput,
   type CloudSyncStatus,
   type CloudMonitor,
+  type CreateMobileOperatorInput,
+  type DeleteMobileOperatorInput,
+  type EndMobileOperatorSessionsInput,
+  type MobileOperator,
   type CreateEventInput,
   type DeleteEventInput,
   type EventDeletionResult,
@@ -44,6 +54,7 @@ import {
   type SwitchProfileInput,
   type SystemInfo,
   type UpdatePaymentTerminalSettingsInput,
+  type UpdateMobileOperatorInput,
   type VerifyBackupInput,
 } from '@gtrz/contracts';
 
@@ -157,6 +168,38 @@ const api: GtrzDesktopApi = {
     async getCloudMonitor(): Promise<CloudMonitor> {
       const payload: unknown = await ipcRenderer.invoke(IPC_CHANNELS.settingsGetCloudMonitor);
       return cloudMonitorSchema.parse(payload);
+    },
+    async listMobileOperators(): Promise<readonly MobileOperator[]> {
+      const payload: unknown = await ipcRenderer.invoke(IPC_CHANNELS.settingsListMobileOperators);
+      return mobileOperatorListSchema.parse(payload);
+    },
+    async createMobileOperator(input: CreateMobileOperatorInput): Promise<MobileOperator> {
+      const payload: unknown = await ipcRenderer.invoke(
+        IPC_CHANNELS.settingsCreateMobileOperator,
+        createMobileOperatorInputSchema.parse(input),
+      );
+      return mobileOperatorSchema.parse(payload);
+    },
+    async updateMobileOperator(input: UpdateMobileOperatorInput): Promise<MobileOperator> {
+      const payload: unknown = await ipcRenderer.invoke(
+        IPC_CHANNELS.settingsUpdateMobileOperator,
+        updateMobileOperatorInputSchema.parse(input),
+      );
+      return mobileOperatorSchema.parse(payload);
+    },
+    async endMobileOperatorSessions(input: EndMobileOperatorSessionsInput): Promise<OperationResult> {
+      const payload: unknown = await ipcRenderer.invoke(
+        IPC_CHANNELS.settingsEndMobileOperatorSessions,
+        endMobileOperatorSessionsInputSchema.parse(input),
+      );
+      return operationResultSchema.parse(payload);
+    },
+    async deleteMobileOperator(input: DeleteMobileOperatorInput): Promise<OperationResult> {
+      const payload: unknown = await ipcRenderer.invoke(
+        IPC_CHANNELS.settingsDeleteMobileOperator,
+        deleteMobileOperatorInputSchema.parse(input),
+      );
+      return operationResultSchema.parse(payload);
     },
   },
   printing: printingApi,

@@ -3,7 +3,18 @@ import { hostname } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { WebSocket, type RawData } from 'ws';
 
-import { cloudMonitorSchema, type CloudMonitor, type CloudSyncStatus } from '@gtrz/contracts';
+import {
+  mobileOperatorListSchema,
+  mobileOperatorSchema,
+  type CreateMobileOperatorInput,
+  type DeleteMobileOperatorInput,
+  type EndMobileOperatorSessionsInput,
+  type MobileOperator,
+  type UpdateMobileOperatorInput,
+  cloudMonitorSchema,
+  type CloudMonitor,
+  type CloudSyncStatus,
+} from '@gtrz/contracts';
 import type { DatabaseContext } from '@gtrz/database';
 
 const CLOUD_SYNC_ENDPOINT = 'https://gtrz-sync.jvgacontato.workers.dev';
@@ -396,6 +407,44 @@ export class CloudSyncService {
     });
   }
 
+  async listMobileOperators(): Promise<readonly MobileOperator[]> {
+    return this.#mobileOperatorRequest('/v1/mobile/operators', 'GET', undefined, mobileOperatorListSchema);
+  }
+
+  async createMobileOperator(input: CreateMobileOperatorInput): Promise<MobileOperator> {
+    return this.#mobileOperatorRequest('/v1/mobile/operators', 'POST', input, mobileOperatorSchema);
+  }
+
+  async updateMobileOperator(input: UpdateMobileOperatorInput): Promise<MobileOperator> {
+    const { operatorId, ...changes } = input;
+    return this.#mobileOperatorRequest(
+      `/v1/mobile/operators/${encodeURIComponent(operatorId)}`,
+      'PATCH',
+      changes,
+      mobileOperatorSchema,
+    );
+  }
+
+  async endMobileOperatorSessions(input: EndMobileOperatorSessionsInput): Promise<{ readonly success: true }> {
+    await this.#mobileOperatorRequest(
+      `/v1/mobile/operators/${encodeURIComponent(input.operatorId)}/sessions`,
+      'POST',
+      { reason: input.reason },
+      undefined,
+    );
+    return { success: true };
+  }
+
+  async deleteMobileOperator(input: DeleteMobileOperatorInput): Promise<{ readonly success: true }> {
+    await this.#mobileOperatorRequest(
+      `/v1/mobile/operators/${encodeURIComponent(input.operatorId)}`,
+      'DELETE',
+      undefined,
+      undefined,
+    );
+    return { success: true };
+  }
+
   getQueueState(database: DatabaseContext): CloudMonitor['localQueue'] {
     const counts = database.sqlite
       .prepare(
@@ -434,6 +483,35 @@ export class CloudSyncService {
       reason: row.reason,
       createdAt: row.created_at,
     }));
+  }
+
+  async #mobileOperatorRequest<TResult>(
+    path: string,
+    method: 'GET' | 'POST' | 'PATCH' | 'DELETE',
+    body: unknown,
+    schema: { parse(value: unknown): TResult } | undefined,
+  ): Promise<TResult> {
+    const pairingKey = await this.#readPairingKey();
+    if (pairingKey === null) {
+      throw new Error('A chave da nuvem não foi encontrada neste computador.');
+    }
+    const response = await fetch(`${CLOUD_SYNC_ENDPOINT}${path}`, {
+      method,
+      headers: {
+        'Content-Type': 'application/json',
+        'X-GTRZ-Key': pairingKey,
+      },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      signal: AbortSignal.timeout(CONNECTION_TIMEOUT_MS),
+    });
+    const payload: unknown = await response.json().catch(() => null);
+    if (!response.ok) {
+      const message = isRecord(payload) && isRecord(payload.error) && typeof payload.error.message === 'string'
+        ? payload.error.message
+        : 'A central não concluiu a alteração do operador móvel.';
+      throw new Error(message);
+    }
+    return schema === undefined ? (payload as TResult) : schema.parse(payload);
   }
 
   #reportConflict(conflict: {
