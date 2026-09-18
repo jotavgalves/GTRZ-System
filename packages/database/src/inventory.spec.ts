@@ -173,6 +173,32 @@ describe('inventory database', () => {
     database.close();
   });
 
+  it('mostra custo médio e aporte usando os valores reais dos lotes', async () => {
+    const database = await createTemporaryDatabase();
+    createEvent(database, { name: 'Evento de custos reais', startsAt: Date.now() });
+    const { productId } = createCatalog(database);
+    recordStockMovement(database, {
+      productId,
+      type: 'purchase',
+      quantity: 10,
+      purchaseTotalCents: 6_000,
+    });
+    recordStockMovement(database, {
+      productId,
+      type: 'purchase',
+      quantity: 10,
+      purchaseTotalCents: 8_000,
+    });
+
+    expect(getInventoryState(database).products.find((item) => item.id === productId)?.financials).toMatchObject({
+      costCents: 700,
+      currentStockValueCents: 14_000,
+      contributedCostCents: 14_000,
+      grossProfitCents: 300,
+    });
+    database.close();
+  });
+
   it('mantém saldos independentes para o mesmo produto em eventos diferentes', async () => {
     const database = await createTemporaryDatabase();
     const firstEvent = createEvent(database, { name: 'Primeiro evento', startsAt: Date.now() });

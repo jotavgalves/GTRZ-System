@@ -233,15 +233,15 @@ export function ProductCard({
         {product.financials === null ? null : (
           <>
             <div>
-              <span>Custo un.</span>
+              <span>Custo médio comprado</span>
               <strong>{formatMoney(product.financials.costCents)}</strong>
             </div>
             <div>
-              <span>Valor atual estoque</span>
+              <span>Valor estimado do saldo</span>
               <strong>{formatMoney(product.financials.currentStockValueCents)}</strong>
             </div>
             <div>
-              <span>Aporte líquido</span>
+              <span>Comprado no evento</span>
               <strong>{formatMoney(product.financials.contributedCostCents)}</strong>
             </div>
             <div>
