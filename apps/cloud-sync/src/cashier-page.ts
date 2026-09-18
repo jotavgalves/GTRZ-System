@@ -416,7 +416,7 @@ main{max-width:1220px;padding:24px}
   #app{gap:12px}
   .tabs{
     position:sticky;
-    top:8px;
+    top:78px;
     z-index:4;
     width:100%;
     align-self:stretch;
