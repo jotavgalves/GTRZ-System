@@ -40,6 +40,7 @@ export const products = sqliteTable('products', {
   costCents: integer('cost_cents').notNull(),
   salePriceCents: integer('sale_price_cents').notNull(),
   lowStockThreshold: integer('low_stock_threshold').notNull(),
+  comboOnly: integer('combo_only', { mode: 'boolean' }).notNull(),
   active: integer('active', { mode: 'boolean' }).notNull(),
   createdAt: integer('created_at', { mode: 'timestamp_ms' }).notNull(),
   updatedAt: integer('updated_at', { mode: 'timestamp_ms' }).notNull(),

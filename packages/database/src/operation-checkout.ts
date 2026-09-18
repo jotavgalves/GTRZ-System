@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { appendAudit } from './audit';
 import { getOrder, listOrderItems, requireOpenOrderRow } from './operation-core';
 import { deductOrderStock } from './operation-stock';
+import { recordExternalFoodSettlements } from './food';
 import type {
   DatabaseCloseOrderPaymentInput,
   DatabaseOrder,
@@ -84,6 +85,7 @@ export function closeOrder(
   const now = Date.now();
   database.sqlite.transaction(() => {
     deductOrderStock(database, order.event_id, order.id, items, now);
+    recordExternalFoodSettlements(database, order.event_id, order.id, items, now);
     const redemptions = redeemVouchers(database, order.event_id, order.id, voucherUses, now);
     const insertPayment = database.sqlite.prepare(
       `INSERT INTO payments
@@ -92,7 +94,12 @@ export function closeOrder(
     );
 
     for (const payment of payments) {
-      const fee = getPaymentFeeSnapshot(database, order.event_id, payment.method, payment.amountCents);
+      const fee = getPaymentFeeSnapshot(
+        database,
+        order.event_id,
+        payment.method,
+        payment.amountCents,
+      );
       insertPayment.run(
         payment.id,
         order.id,
@@ -146,8 +153,18 @@ export function closeOrder(
           changeCents: payment.changeCents,
           method: payment.method,
           receivedCents: payment.receivedCents,
-          feeRateBasisPoints: getPaymentFeeSnapshot(database, order.event_id, payment.method, payment.amountCents).rateBasisPoints,
-          feeCents: getPaymentFeeSnapshot(database, order.event_id, payment.method, payment.amountCents).feeCents,
+          feeRateBasisPoints: getPaymentFeeSnapshot(
+            database,
+            order.event_id,
+            payment.method,
+            payment.amountCents,
+          ).rateBasisPoints,
+          feeCents: getPaymentFeeSnapshot(
+            database,
+            order.event_id,
+            payment.method,
+            payment.amountCents,
+          ).feeCents,
         })),
         subtotalCents: order.subtotal_cents,
         totalCents,

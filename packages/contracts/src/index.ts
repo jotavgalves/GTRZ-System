@@ -9,10 +9,12 @@ import type { OperationsApi } from './operations';
 import type { PrintingApi } from './printing';
 import type { TicketApi } from './tickets';
 import type { VoucherApi } from './vouchers';
+import type { FoodApi } from './food';
 
 export * from './combos';
 export * from './event-close';
 export * from './finance';
+export * from './food';
 export * from './insights';
 export * from './inventory';
 export * from './operations';
@@ -49,6 +51,10 @@ export const IPC_CHANNELS = {
   backupsImport: 'backups:import',
   backupsVerify: 'backups:verify',
   inventoryGetState: 'inventory:get-state',
+  foodGetState: 'food:get-state',
+  foodConfigure: 'food:configure',
+  foodCreateSupplier: 'food:create-supplier',
+  foodCreateExternalItem: 'food:create-external-item',
   inventoryCreateCategory: 'inventory:create-category',
   inventoryCreateProduct: 'inventory:create-product',
   inventoryUpdateProduct: 'inventory:update-product',
@@ -387,5 +393,6 @@ export interface GtrzDesktopApi {
   readonly cash: CashApi;
   readonly expenses: ExpenseApi;
   readonly capital: CapitalApi;
+  readonly food: FoodApi;
   readonly tickets: TicketApi;
 }

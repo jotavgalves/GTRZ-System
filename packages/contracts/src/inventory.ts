@@ -50,6 +50,7 @@ export const inventoryProductSchema = z.object({
   kind: productKindSchema,
   salePriceCents: z.number().int().nonnegative(),
   lowStockThreshold: z.number().int().nonnegative(),
+  comboOnly: z.boolean(),
   active: z.boolean(),
   quantity: z.number().int().nonnegative(),
   soldQuantity: z.number().int().nonnegative(),
@@ -78,6 +79,7 @@ export const createProductInputSchema = z.object({
   costCents: z.number().int().nonnegative(),
   salePriceCents: z.number().int().nonnegative(),
   lowStockThreshold: z.number().int().nonnegative(),
+  comboOnly: z.boolean().default(false),
   imageDataUrl: productImageDataUrlSchema.optional(),
   fallbackIcon: productFallbackIconSchema.optional(),
 });

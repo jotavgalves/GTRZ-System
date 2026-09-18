@@ -20,6 +20,7 @@ describe('inventory contracts', () => {
         costCents: 600,
         salePriceCents: 1_000,
         lowStockThreshold: 3,
+        comboOnly: false,
       }),
     ).toMatchObject({ name: 'Budweiser lata', costCents: 600, salePriceCents: 1_000 });
   });
@@ -68,6 +69,7 @@ describe('inventory contracts', () => {
         kind: 'drink',
         salePriceCents: 1_000,
         lowStockThreshold: 3,
+        comboOnly: false,
         active: true,
         quantity: 7,
         soldQuantity: 0,

@@ -47,6 +47,7 @@ export interface DatabaseInventoryProduct {
   readonly kind: DatabaseProductKind;
   readonly salePriceCents: number;
   readonly lowStockThreshold: number;
+  readonly comboOnly: boolean;
   readonly active: boolean;
   readonly quantity: number;
   readonly soldQuantity: number;
@@ -92,6 +93,7 @@ interface ProductRow {
   readonly cost_cents: number;
   readonly sale_price_cents: number;
   readonly low_stock_threshold: number;
+  readonly combo_only: number;
   readonly active: number;
   readonly quantity: number;
   readonly sold_quantity: number;
@@ -106,6 +108,7 @@ interface ProductWriteInput {
   readonly costCents: number;
   readonly salePriceCents: number;
   readonly lowStockThreshold: number;
+  readonly comboOnly?: boolean;
   readonly imageDataUrl?: string | null;
   readonly fallbackIcon?: DatabaseProductFallbackIcon;
 }
@@ -177,6 +180,7 @@ function mapProduct(
     kind: row.kind,
     salePriceCents: row.sale_price_cents,
     lowStockThreshold: row.low_stock_threshold,
+    comboOnly: row.combo_only === 1,
     active: row.active === 1,
     quantity: row.quantity,
     soldQuantity: Math.max(row.sold_quantity, 0),
@@ -223,6 +227,7 @@ function listProducts(
          p.cost_cents,
          p.sale_price_cents,
          p.low_stock_threshold,
+         p.combo_only,
          p.active,
          COALESCE(es.quantity, 0) AS quantity,
          CASE
@@ -267,7 +272,7 @@ function requireProductRow(database: DatabaseContext, productId: string): Produc
     .prepare(
       `SELECT
          p.id, p.category_id, c.name AS category_name, p.name, p.kind, p.cost_cents,
-         p.sale_price_cents, p.low_stock_threshold, p.active, 0 AS quantity, 0 AS sold_quantity,
+         p.sale_price_cents, p.low_stock_threshold, p.combo_only, p.active, 0 AS quantity, 0 AS sold_quantity,
          p.created_at, p.updated_at
        FROM products p
        INNER JOIN product_categories c ON c.id = p.category_id
@@ -361,8 +366,8 @@ export function createInventoryProduct(
       .prepare(
         `INSERT INTO products
          (id, category_id, name, kind, cost_cents, sale_price_cents,
-          low_stock_threshold, active, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
+          low_stock_threshold, combo_only, active, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
       )
       .run(
         id,
@@ -372,6 +377,7 @@ export function createInventoryProduct(
         input.costCents,
         input.salePriceCents,
         input.lowStockThreshold,
+        input.comboOnly === true ? 1 : 0,
         now,
         now,
       );
@@ -390,6 +396,7 @@ export function createInventoryProduct(
         hasImage: input.imageDataUrl !== undefined && input.imageDataUrl !== null,
         kind: input.kind,
         lowStockThreshold: input.lowStockThreshold,
+        comboOnly: input.comboOnly === true,
         name,
         salePriceCents: input.salePriceCents,
       },
@@ -416,7 +423,7 @@ export function updateInventoryProduct(
       .prepare(
         `UPDATE products
          SET category_id = ?, name = ?, kind = ?, cost_cents = ?, sale_price_cents = ?,
-             low_stock_threshold = ?, active = ?, updated_at = ?
+             low_stock_threshold = ?, combo_only = ?, active = ?, updated_at = ?
          WHERE id = ?`,
       )
       .run(
@@ -426,6 +433,7 @@ export function updateInventoryProduct(
         input.costCents,
         input.salePriceCents,
         input.lowStockThreshold,
+        input.comboOnly === true ? 1 : 0,
         input.active ? 1 : 0,
         now,
         input.productId,
@@ -445,6 +453,7 @@ export function updateInventoryProduct(
           costCents: current.cost_cents,
           kind: current.kind,
           lowStockThreshold: current.low_stock_threshold,
+          comboOnly: current.combo_only === 1,
           name: current.name,
           salePriceCents: current.sale_price_cents,
         },

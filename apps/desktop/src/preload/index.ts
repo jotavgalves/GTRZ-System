@@ -55,6 +55,7 @@ import { inventoryApi } from './inventory-api';
 import { operationsApi } from './operations-api';
 import { printingApi } from './printing-api';
 import { ticketApi } from './ticket-api';
+import { foodApi } from './food-api';
 import { voucherApi } from './voucher-api';
 
 const api: GtrzDesktopApi = {
@@ -189,6 +190,7 @@ const api: GtrzDesktopApi = {
   cash: cashApi,
   expenses: expenseApi,
   capital: capitalApi,
+  food: foodApi,
   tickets: ticketApi,
 };
 

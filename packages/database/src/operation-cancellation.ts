@@ -3,6 +3,7 @@ import { appendAudit } from './audit';
 import { getSessionState } from './control';
 import { getOrder, requireActiveOperationEvent, requireOrderRow } from './operation-core';
 import { restoreOrderStock } from './operation-stock';
+import { clearExternalFoodSettlements } from './food';
 import type { DatabaseOrder, DatabasePaymentMethod } from './operation-types';
 import { releaseOrderVoucher } from './operation-vouchers';
 import type { DatabaseContext } from './types';
@@ -16,7 +17,14 @@ function requireProduction(database: DatabaseContext): void {
 
 export function cancelOrder(
   database: DatabaseContext,
-  input: { readonly orderId: string; readonly reason: string; readonly refunds?: readonly { readonly method: DatabasePaymentMethod; readonly amountCents: number }[] },
+  input: {
+    readonly orderId: string;
+    readonly reason: string;
+    readonly refunds?: readonly {
+      readonly method: DatabasePaymentMethod;
+      readonly amountCents: number;
+    }[];
+  },
 ): DatabaseOrder {
   requireProduction(database);
   const eventId = requireActiveOperationEvent(database);
@@ -34,21 +42,43 @@ export function cancelOrder(
   const now = Date.now();
   let restoredUnits = 0;
   let refundedVoucherCents = 0;
-  const paymentRows = database.sqlite.prepare('SELECT method, amount_cents FROM payments WHERE order_id = ? ORDER BY created_at, id').all(order.id) as Array<{method:DatabasePaymentMethod;amount_cents:number}>;
-  const refunds = input.refunds ?? paymentRows.map((payment) => ({ method: payment.method, amountCents: payment.amount_cents }));
-  const expectedRefundCents = paymentRows.reduce((total, payment) => total + payment.amount_cents, 0);
+  const paymentRows = database.sqlite
+    .prepare('SELECT method, amount_cents FROM payments WHERE order_id = ? ORDER BY created_at, id')
+    .all(order.id) as Array<{ method: DatabasePaymentMethod; amount_cents: number }>;
+  const refunds =
+    input.refunds ??
+    paymentRows.map((payment) => ({ method: payment.method, amountCents: payment.amount_cents }));
+  const expectedRefundCents = paymentRows.reduce(
+    (total, payment) => total + payment.amount_cents,
+    0,
+  );
   const actualRefundCents = refunds.reduce((total, refund) => total + refund.amountCents, 0);
-  if (order.status === 'paid' && actualRefundCents !== expectedRefundCents) throw new Error('Informe a devolução completa da venda, separada por meio de pagamento.');
+  if (order.status === 'paid' && actualRefundCents !== expectedRefundCents)
+    throw new Error('Informe a devolução completa da venda, separada por meio de pagamento.');
 
   database.sqlite.transaction(() => {
     if (order.status === 'paid') {
       restoredUnits = restoreOrderStock(database, eventId, order.id, now);
+      clearExternalFoodSettlements(database, order.id);
       refundedVoucherCents = refundOrderVouchers(database, eventId, order.id, now);
-      const register = database.sqlite.prepare("SELECT id FROM cash_registers WHERE event_id = ? AND status = 'open'").get(eventId) as {id:string}|undefined;
-      const insertRefund = database.sqlite.prepare('INSERT INTO order_refunds (id, order_id, event_id, method, amount_cents, cash_register_id, note, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)');
+      const register = database.sqlite
+        .prepare("SELECT id FROM cash_registers WHERE event_id = ? AND status = 'open'")
+        .get(eventId) as { id: string } | undefined;
+      const insertRefund = database.sqlite.prepare(
+        'INSERT INTO order_refunds (id, order_id, event_id, method, amount_cents, cash_register_id, note, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+      );
       for (const refund of refunds) {
-        const cashRegisterId = refund.method === 'cash' ? register?.id ?? null : null;
-        insertRefund.run(randomUUID(), order.id, eventId, refund.method, refund.amountCents, cashRegisterId, reason, now);
+        const cashRegisterId = refund.method === 'cash' ? (register?.id ?? null) : null;
+        insertRefund.run(
+          randomUUID(),
+          order.id,
+          eventId,
+          refund.method,
+          refund.amountCents,
+          cashRegisterId,
+          reason,
+          now,
+        );
       }
     } else {
       releaseOrderVoucher(database, order.id);

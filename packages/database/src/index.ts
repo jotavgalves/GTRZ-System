@@ -7,6 +7,8 @@ import { technicalSchema } from './schema';
 import { stockSaleMigration } from './stock-sale-migration';
 import { stockPurchaseLotsMigration } from './stock-purchase-lots-migration';
 import { stockPurchaseLotVoidsMigration } from './stock-purchase-lot-voids-migration';
+import { foodFoundationMigration } from './food-foundation-migration';
+import { foodFinanceMigration } from './food-finance-migration';
 import { syncMigration } from './sync-migration';
 import { syncInboxMigration } from './sync-inbox-migration';
 import { syncConflictMigration } from './sync-conflict-migration';
@@ -311,6 +313,8 @@ const migrations: readonly Migration[] = [
   financeLedgerMigration,
   stockPurchaseLotsMigration,
   stockPurchaseLotVoidsMigration,
+  foodFoundationMigration,
+  foodFinanceMigration,
 ];
 
 function ensureMigrationTable(sqlite: BetterSqlite3.Database): void {
@@ -378,6 +382,7 @@ function repairFinanceLedgerColumns(sqlite: BetterSqlite3.Database): void {
       WHERE method IS NULL OR method = ''
     `);
   }
+  ensureColumn(sqlite, 'products', 'combo_only', 'combo_only INTEGER NOT NULL DEFAULT 0');
 }
 
 export function openDatabase(filePath: string): DatabaseContext {
@@ -418,6 +423,7 @@ export * from './control';
 export * from './event-close';
 export * from './event-deletion';
 export * from './expenses';
+export * from './food';
 export * from './capital';
 export * from './insights';
 export * from './inventory';

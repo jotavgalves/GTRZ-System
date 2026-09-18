@@ -1,6 +1,6 @@
 import {
   ArchiveRestore,
-  BanknoteArrowUp,
+  CookingPot,
   Boxes,
   ClipboardList,
   CreditCard,
@@ -76,10 +76,10 @@ export const navigationModules: readonly NavigationModule[] = [
     profiles: ['production'],
   },
   {
-    key: 'capital',
-    label: 'Aportes',
-    path: '/aportes',
-    icon: BanknoteArrowUp,
+    key: 'food',
+    label: 'Comida',
+    path: '/comida',
+    icon: CookingPot,
     profiles: ['production'],
   },
   {

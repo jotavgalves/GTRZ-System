@@ -121,6 +121,7 @@ export function ProductForm(props: ProductFormProps): React.JSX.Element {
     String(props.product?.lowStockThreshold ?? 0),
   );
   const [active, setActive] = useState(props.product?.active ?? true);
+  const [comboOnly, setComboOnly] = useState(props.product?.comboOnly ?? false);
   const [imageDataUrl, setImageDataUrl] = useState<string | null>(
     props.product?.imageDataUrl ?? null,
   );
@@ -140,6 +141,7 @@ export function ProductForm(props: ProductFormProps): React.JSX.Element {
         costCents: inputToCents(cost),
         salePriceCents: inputToCents(salePrice),
         lowStockThreshold: Number(lowStockThreshold),
+        comboOnly,
         imageDataUrl,
         fallbackIcon,
       };
@@ -152,6 +154,7 @@ export function ProductForm(props: ProductFormProps): React.JSX.Element {
         setCost('');
         setSalePrice('');
         setLowStockThreshold('0');
+        setComboOnly(false);
         setImageDataUrl(null);
         setFallbackIcon('package');
       } else {
@@ -177,6 +180,10 @@ export function ProductForm(props: ProductFormProps): React.JSX.Element {
             required
             value={name}
           />
+        </label>
+        <label className="form-field form-field--checkbox">
+          <span>Venda</span>
+          <span><input checked={comboOnly} onChange={(event) => setComboOnly(event.target.checked)} type="checkbox" /> Vendido apenas em combos</span>
         </label>
         <label className="form-field">
           <span>Categoria</span>

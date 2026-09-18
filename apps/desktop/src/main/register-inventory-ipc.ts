@@ -76,6 +76,7 @@ export function registerInventoryIpcHandlers(options: RegisterInventoryIpcOption
       costCents: input.costCents,
       salePriceCents: input.salePriceCents,
       lowStockThreshold: input.lowStockThreshold,
+      comboOnly: input.comboOnly,
     };
 
     if (input.imageDataUrl !== undefined) {
@@ -100,6 +101,7 @@ export function registerInventoryIpcHandlers(options: RegisterInventoryIpcOption
       costCents: input.costCents,
       salePriceCents: input.salePriceCents,
       lowStockThreshold: input.lowStockThreshold,
+      comboOnly: input.comboOnly,
     };
 
     if (input.imageDataUrl !== undefined) {

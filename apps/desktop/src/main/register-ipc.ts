@@ -46,6 +46,7 @@ import type { BackupService } from './backup-service';
 import type { CloudSyncService } from './cloud-sync-service';
 import { registerComboIpcHandlers } from './register-combo-ipc';
 import { registerEventCloseIpcHandlers } from './register-event-close-ipc';
+import { registerFoodIpcHandlers } from './register-food-ipc';
 import { registerFinanceIpcHandlers } from './register-finance-ipc';
 import { registerInsightsIpcHandlers } from './register-insights-ipc';
 import { registerInventoryIpcHandlers } from './register-inventory-ipc';
@@ -90,6 +91,7 @@ export function registerIpcHandlers(options: RegisterIpcOptions): void {
   }
 
   const printService = new ThermalPrintService({ getDatabase: options.getDatabase });
+  registerFoodIpcHandlers({ getDatabase: options.getDatabase });
 
   ipcMain.handle(IPC_CHANNELS.systemGetInfo, (): SystemInfo => {
     return systemInfoSchema.parse({

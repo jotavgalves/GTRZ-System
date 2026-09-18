@@ -23,7 +23,7 @@ interface ComboComponentRow {
   readonly quantity: number;
 }
 
-interface StockRequirement {
+export interface StockRequirement {
   readonly productId: string;
   readonly productName: string;
   quantity: number;
@@ -69,10 +69,11 @@ export function listOperationCatalog(
                p.name,
                p.sale_price_cents,
                p.active,
+               p.combo_only,
                es.quantity AS available_quantity
              FROM event_stock es
              INNER JOIN products p ON p.id = es.product_id
-             WHERE es.event_id = ?
+             WHERE es.event_id = ? AND p.combo_only = 0
              ORDER BY p.active DESC, p.name COLLATE NOCASE`,
           )
           .all(eventId) as ProductCatalogRow[]);
@@ -154,7 +155,7 @@ function addRequirement(
   current.quantity += quantity;
 }
 
-function buildStockRequirements(
+export function buildStockRequirements(
   database: DatabaseContext,
   items: readonly DatabaseOrderItem[],
 ): readonly StockRequirement[] {
