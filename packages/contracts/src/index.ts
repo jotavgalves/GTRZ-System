@@ -56,6 +56,8 @@ export const IPC_CHANNELS = {
   foodCreateSupplier: 'food:create-supplier',
   foodCreateExternalItem: 'food:create-external-item',
   inventoryCreateCategory: 'inventory:create-category',
+  inventoryUpdateCategory: 'inventory:update-category',
+  inventoryDeleteCategory: 'inventory:delete-category',
   inventoryCreateProduct: 'inventory:create-product',
   inventoryUpdateProduct: 'inventory:update-product',
   inventoryRecordMovement: 'inventory:record-movement',

@@ -59,6 +59,33 @@
   font-size: 0.7rem;
   font-weight: 760;
 }
+.category-manager {
+  display: grid;
+  gap: var(--space-2);
+  margin-top: var(--space-4);
+}
+.category-manager__row,
+.category-manager__edit {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-bg-raised);
+  font-size: 0.76rem;
+}
+.category-manager__row span {
+  flex: 1;
+}
+.category-manager__edit input {
+  min-width: 0;
+  flex: 1;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--color-text);
+}
 .product-form__grid,
 .movement-form__grid {
   display: grid;
@@ -94,6 +121,56 @@
   width: 1rem;
   height: 1rem;
   accent-color: var(--color-brand);
+}
+.switch-field {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--color-text-muted);
+  font-size: 0.72rem;
+  font-weight: 700;
+}
+.switch-field input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+}
+.switch-field__track {
+  position: relative;
+  width: 2rem;
+  height: 1.1rem;
+  flex: 0 0 auto;
+  border: 1px solid var(--color-border-strong);
+  border-radius: 999px;
+  background: var(--color-bg-raised);
+  transition:
+    background var(--transition-fast),
+    border-color var(--transition-fast);
+}
+.switch-field__track::after {
+  position: absolute;
+  top: 0.17rem;
+  left: 0.18rem;
+  width: 0.6rem;
+  height: 0.6rem;
+  border-radius: 50%;
+  background: var(--color-text-subtle);
+  content: '';
+  transition:
+    transform var(--transition-fast),
+    background var(--transition-fast);
+}
+.switch-field input:checked + .switch-field__track {
+  border-color: var(--color-brand);
+  background: var(--color-brand);
+}
+.switch-field input:checked + .switch-field__track::after {
+  transform: translateX(0.88rem);
+  background: #fff;
+}
+.switch-field input:focus-visible + .switch-field__track {
+  box-shadow: 0 0 0 3px var(--color-brand-soft);
 }
 .product-form__actions {
   display: flex;

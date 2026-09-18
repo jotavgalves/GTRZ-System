@@ -25,6 +25,8 @@ export function InventoryPage(): React.JSX.Element {
     message,
     reload,
     createCategory,
+    updateCategory,
+    deleteCategory,
     createProduct,
     updateProduct,
     recordMovement,
@@ -161,12 +163,13 @@ export function InventoryPage(): React.JSX.Element {
                 <p>Organize alimentos e bebidas para o uso nas mesas.</p>
               </div>
             </div>
-            <CategoryForm busy={busy} onSubmit={createCategory} />
-            <div className="category-chips">
-              {categories.map((category) => (
-                <span key={category.id}>{category.name}</span>
-              ))}
-            </div>
+            <CategoryForm
+              busy={busy}
+              categories={categories}
+              onDelete={deleteCategory}
+              onSubmit={createCategory}
+              onUpdate={updateCategory}
+            />
           </article>
         </div>
       ) : null}

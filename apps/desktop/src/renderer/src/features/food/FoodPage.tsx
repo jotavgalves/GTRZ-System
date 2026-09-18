@@ -1,18 +1,10 @@
-import { CookingPot, HandCoins, PackagePlus, RefreshCw, Store, TriangleAlert } from 'lucide-react';
+import { CookingPot, HandCoins, RefreshCw, Store, TriangleAlert } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useState } from 'react';
-
 import type { FoodState, InventoryState } from '@gtrz/contracts';
-
 import { useRealtimeReload } from '../../shared/realtime/useRealtimeReload';
 
 function formatMoney(cents: number): string {
   return new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(cents / 100);
-}
-
-function toCents(value: string): number {
-  const parsed = Number(value.trim().replace(',', '.'));
-  if (!Number.isFinite(parsed) || parsed < 0) throw new Error('Informe um valor monetário válido.');
-  return Math.round(parsed * 100);
 }
 
 export function FoodPage(): React.JSX.Element {
@@ -21,14 +13,6 @@ export function FoodPage(): React.JSX.Element {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [supplier, setSupplier] = useState('');
-  const [categoryId, setCategoryId] = useState('');
-  const [supplierId, setSupplierId] = useState('');
-  const [name, setName] = useState('');
-  const [supplierValue, setSupplierValue] = useState('');
-  const [commissionValue, setCommissionValue] = useState('');
-  const [initialQuantity, setInitialQuantity] = useState('');
-  const [comboOnly, setComboOnly] = useState(false);
-
   const reload = useCallback(async () => {
     try {
       const [food, stock] = await Promise.all([
@@ -37,22 +21,16 @@ export function FoodPage(): React.JSX.Element {
       ]);
       setState(food);
       setInventory(stock);
-      setCategoryId(
-        (current) => current || stock.categories.find((category) => category.active)?.id || '',
-      );
-      setSupplierId((current) => current || food.suppliers.find((item) => item.active)?.id || '');
       setError(null);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : 'Não foi possível carregar Comida.');
     }
   }, []);
-
   useEffect(() => {
     void reload();
   }, [reload]);
   useRealtimeReload(reload);
-
-  const run = async (action: () => Promise<unknown>): Promise<void> => {
+  const run = async (action: () => Promise<unknown>) => {
     setBusy(true);
     try {
       await action();
@@ -63,29 +41,18 @@ export function FoodPage(): React.JSX.Element {
       setBusy(false);
     }
   };
-
   const mode = state?.supplierMode ?? null;
-  const categories = useMemo(
-    () => inventory?.categories.filter((category) => category.active) ?? [],
-    [inventory],
-  );
   const foodProducts = useMemo(
     () => inventory?.products.filter((product) => product.kind === 'food') ?? [],
     [inventory],
   );
-  const canCreateExternalItem =
-    categoryId.length > 0 &&
-    supplierId.length > 0 &&
-    name.trim().length >= 2 &&
-    Number(initialQuantity) > 0;
-
   return (
     <section className="feature-page">
       <header className="feature-header">
         <div>
           <span className="eyebrow">Operação, cozinha e repasses</span>
           <h1>Comida</h1>
-          <p>Controle quem fornece, o que sai da cozinha e o resultado de cada venda.</p>
+          <p>Fornecedores, vendas e repasses. Os itens são cadastrados no Estoque.</p>
         </div>
         <button
           className="button button--secondary"
@@ -130,7 +97,7 @@ export function FoodPage(): React.JSX.Element {
                 <CookingPot size={20} aria-hidden="true" />
                 <div>
                   <h2>Modelo do evento</h2>
-                  <p>Defina uma única vez quem é dono financeiro da comida neste evento.</p>
+                  <p>Define quem é dono financeiro da comida deste evento.</p>
                 </div>
               </div>
               <div className="product-form__actions food-mode-actions">
@@ -159,30 +126,18 @@ export function FoodPage(): React.JSX.Element {
                   Fornecedor externo
                 </button>
               </div>
-              {mode === null ? (
-                <p className="form-hint">Escolha o modelo antes de cadastrar alimentos.</p>
-              ) : null}
-              {mode === 'gtrz' ? (
-                <p className="form-hint">
-                  Cadastre alimentos no Estoque: custos, entradas e saídas entram diretamente no
-                  resultado da GTRZ. Marque “Vendido apenas em combos” para ingredientes que não
-                  aparecem no caixa.
-                </p>
-              ) : null}
-              {mode === 'external' ? (
-                <p className="form-hint">
-                  Cada venda separa automaticamente o valor do parceiro da comissão GTRZ. Itens só
-                  de combo continuam controlando quantidade, mas não aparecem como venda avulsa.
-                </p>
-              ) : null}
+              <p className="form-hint">
+                Cadastre todos os produtos e dê entrada exclusivamente no Estoque. Use “Somente em
+                combos” para ingredientes que não aparecem no caixa.
+              </p>
             </article>
             {mode === 'external' ? (
               <article className="panel form-panel">
                 <div className="panel__heading">
                   <Store size={20} aria-hidden="true" />
                   <div>
-                    <h2>Fornecedor</h2>
-                    <p>Cadastre o parceiro antes de adicionar os pratos dele.</p>
+                    <h2>Fornecedores</h2>
+                    <p>Parceiros que receberão o repasse das vendas.</p>
                   </div>
                 </div>
                 <form
@@ -196,7 +151,7 @@ export function FoodPage(): React.JSX.Element {
                   }}
                 >
                   <label className="form-field">
-                    <span>Nome do fornecedor</span>
+                    <span>Nome</span>
                     <input
                       disabled={busy}
                       maxLength={100}
@@ -221,159 +176,6 @@ export function FoodPage(): React.JSX.Element {
               </article>
             ) : null}
           </div>
-          {mode === 'external' ? (
-            <article className="panel form-panel food-entry-panel">
-              <div className="panel__heading">
-                <PackagePlus size={20} aria-hidden="true" />
-                <div>
-                  <h2>Novo item de fornecedor</h2>
-                  <p>O preço de venda é calculado como valor do fornecedor mais comissão GTRZ.</p>
-                </div>
-              </div>
-              {categories.length === 0 ? (
-                <p className="inventory-helper">
-                  Crie uma categoria no Estoque antes de cadastrar comida.
-                </p>
-              ) : (
-                <form
-                  className="product-form"
-                  onSubmit={(event) => {
-                    event.preventDefault();
-                    void run(async () => {
-                      await window.gtrz.food.createExternalItem({
-                        categoryId,
-                        supplierId,
-                        name,
-                        supplierUnitCents: toCents(supplierValue),
-                        commissionUnitCents: toCents(commissionValue),
-                        initialQuantity: Number(initialQuantity),
-                        comboOnly,
-                      });
-                      setName('');
-                      setSupplierValue('');
-                      setCommissionValue('');
-                      setInitialQuantity('');
-                      setComboOnly(false);
-                    });
-                  }}
-                >
-                  <div className="product-form__grid">
-                    <label className="form-field">
-                      <span>Nome do prato</span>
-                      <input
-                        disabled={busy}
-                        maxLength={100}
-                        minLength={2}
-                        onChange={(event) => setName(event.target.value)}
-                        required
-                        value={name}
-                      />
-                    </label>
-                    <label className="form-field">
-                      <span>Fornecedor</span>
-                      <select
-                        disabled={busy}
-                        onChange={(event) => setSupplierId(event.target.value)}
-                        required
-                        value={supplierId}
-                      >
-                        <option value="">Selecione</option>
-                        {state?.suppliers.map((item) => (
-                          <option key={item.id} value={item.id}>
-                            {item.name}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-                    <label className="form-field">
-                      <span>Categoria</span>
-                      <select
-                        disabled={busy}
-                        onChange={(event) => setCategoryId(event.target.value)}
-                        required
-                        value={categoryId}
-                      >
-                        <option value="">Selecione</option>
-                        {categories.map((item) => (
-                          <option key={item.id} value={item.id}>
-                            {item.name}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-                    <label className="form-field">
-                      <span>Quantidade recebida</span>
-                      <input
-                        disabled={busy}
-                        min="1"
-                        onChange={(event) => setInitialQuantity(event.target.value)}
-                        required
-                        step="1"
-                        type="number"
-                        value={initialQuantity}
-                      />
-                    </label>
-                    <label className="form-field">
-                      <span>Valor do fornecedor por un.</span>
-                      <input
-                        disabled={busy}
-                        inputMode="decimal"
-                        min="0"
-                        onChange={(event) => setSupplierValue(event.target.value)}
-                        placeholder="0,00"
-                        required
-                        step="0.01"
-                        type="number"
-                        value={supplierValue}
-                      />
-                    </label>
-                    <label className="form-field">
-                      <span>Comissão GTRZ por un.</span>
-                      <input
-                        disabled={busy}
-                        inputMode="decimal"
-                        min="0"
-                        onChange={(event) => setCommissionValue(event.target.value)}
-                        placeholder="0,00"
-                        required
-                        step="0.01"
-                        type="number"
-                        value={commissionValue}
-                      />
-                    </label>
-                  </div>
-                  <label className="checkbox-field">
-                    <input
-                      checked={comboOnly}
-                      disabled={busy}
-                      onChange={(event) => setComboOnly(event.target.checked)}
-                      type="checkbox"
-                    />
-                    Vendido apenas em combos
-                  </label>
-                  <div className="food-price-preview">
-                    <span>Preço de venda calculado</span>
-                    <strong>
-                      {formatMoney(
-                        (Number(supplierValue.replace(',', '.')) || 0) * 100 +
-                          (Number(commissionValue.replace(',', '.')) || 0) * 100,
-                      )}
-                    </strong>
-                  </div>
-                  <div className="product-form__actions">
-                    <button
-                      className="button button--primary"
-                      disabled={busy || !canCreateExternalItem}
-                      type="submit"
-                    >
-                      <HandCoins size={17} aria-hidden="true" />
-                      Cadastrar e dar entrada
-                    </button>
-                  </div>
-                </form>
-              )}
-            </article>
-          ) : null}
           <article className="panel form-panel food-results-panel">
             <div className="panel__heading">
               <HandCoins size={20} aria-hidden="true" />
@@ -381,8 +183,8 @@ export function FoodPage(): React.JSX.Element {
                 <h2>{mode === 'external' ? 'Vendas e repasses' : 'Itens de comida no estoque'}</h2>
                 <p>
                   {mode === 'external'
-                    ? 'Valores fechados somente de vendas pagas; cancelamentos são removidos automaticamente.'
-                    : 'As receitas, custos e lucros dos itens próprios permanecem no Estoque e nas Visões gerais.'}
+                    ? 'Vendas pagas, valores de parceiro e comissão GTRZ.'
+                    : 'Custos, entradas e resultados permanecem no Estoque e Visão geral.'}
                 </p>
               </div>
             </div>
@@ -390,7 +192,8 @@ export function FoodPage(): React.JSX.Element {
               <div className="food-result-list">
                 {state?.items.length === 0 ? (
                   <p className="inventory-helper">
-                    Nenhum item externo foi cadastrado neste evento.
+                    Cadastre as comidas pelo Estoque e vincule seus termos de fornecedor antes da
+                    venda.
                   </p>
                 ) : (
                   state?.items.map((item) => (
@@ -418,26 +221,19 @@ export function FoodPage(): React.JSX.Element {
               </div>
             ) : (
               <div className="food-owned-list">
-                {foodProducts.length === 0 ? (
-                  <p className="inventory-helper">
-                    Ainda não há comida cadastrada. Cadastre no Estoque e controle custos por
-                    entrada de lote.
-                  </p>
-                ) : (
-                  foodProducts.map((product) => (
-                    <article className="food-owned-row" key={product.id}>
-                      <div>
-                        <strong>{product.name}</strong>
-                        <small>
-                          {product.comboOnly ? 'Apenas em combos' : 'Disponível no caixa'}
-                        </small>
-                      </div>
-                      <span>{product.quantity} em estoque</span>
-                      <span>Vendido: {product.soldQuantity}</span>
-                      <strong>{formatMoney(product.salePriceCents)}</strong>
-                    </article>
-                  ))
-                )}
+                {foodProducts.map((product) => (
+                  <article className="food-owned-row" key={product.id}>
+                    <div>
+                      <strong>{product.name}</strong>
+                      <small>
+                        {product.comboOnly ? 'Somente em combos' : 'Disponível no caixa'}
+                      </small>
+                    </div>
+                    <span>{product.quantity} em estoque</span>
+                    <span>Vendido: {product.soldQuantity}</span>
+                    <strong>{formatMoney(product.salePriceCents)}</strong>
+                  </article>
+                ))}
               </div>
             )}
           </article>

@@ -83,7 +83,10 @@ async function optimizeImage(file: File): Promise<string> {
   }
   const originalDataUrl = await readFileAsDataUrl(file);
   const image = await loadImage(originalDataUrl);
-  const scale = Math.min(1, MAX_IMAGE_DIMENSION / Math.max(image.naturalWidth, image.naturalHeight));
+  const scale = Math.min(
+    1,
+    MAX_IMAGE_DIMENSION / Math.max(image.naturalWidth, image.naturalHeight),
+  );
   const width = Math.max(1, Math.round(image.naturalWidth * scale));
   const height = Math.max(1, Math.round(image.naturalHeight * scale));
   const canvas = document.createElement('canvas');
@@ -183,7 +186,15 @@ export function ProductForm(props: ProductFormProps): React.JSX.Element {
         </label>
         <label className="form-field form-field--checkbox">
           <span>Venda</span>
-          <span><input checked={comboOnly} onChange={(event) => setComboOnly(event.target.checked)} type="checkbox" /> Vendido apenas em combos</span>
+          <span className="switch-field">
+            <input
+              checked={comboOnly}
+              onChange={(event) => setComboOnly(event.target.checked)}
+              type="checkbox"
+            />
+            <span aria-hidden="true" className="switch-field__track" />
+            <span>Somente em combos</span>
+          </span>
         </label>
         <label className="form-field">
           <span>Categoria</span>
@@ -303,9 +314,7 @@ export function ProductForm(props: ProductFormProps): React.JSX.Element {
                       setImageDataUrl(dataUrl);
                     })
                     .catch((imageError: unknown) => {
-                      setError(
-                        imageError instanceof Error ? imageError.message : 'Foto inválida.',
-                      );
+                      setError(imageError instanceof Error ? imageError.message : 'Foto inválida.');
                     })
                     .finally(() => {
                       input.value = '';

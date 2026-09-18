@@ -188,13 +188,7 @@ function mapProduct(
     imageDataUrl: presentation.imageDataUrl,
     fallbackIcon: presentation.fallbackIcon,
     financials: showFinancials
-      ? calculateFinancials(
-          database,
-          row.id,
-          eventId,
-          row.sale_price_cents,
-          row.quantity,
-        )
+      ? calculateFinancials(database, row.id, eventId, row.sale_price_cents, row.quantity)
       : null,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -348,6 +342,43 @@ export function createProductCategory(
   return requireCategory(database, id);
 }
 
+export function updateProductCategory(
+  database: DatabaseContext,
+  input: { readonly categoryId: string; readonly name: string },
+): DatabaseProductCategory {
+  requireProduction(database);
+  const name = input.name.trim();
+  const current = requireCategory(database, input.categoryId);
+  requireUniqueName(database, 'product_categories', name, current.id);
+  const now = Date.now();
+  database.sqlite
+    .prepare('UPDATE product_categories SET name=?, updated_at=? WHERE id=?')
+    .run(name, now, current.id);
+  appendAudit(database, {
+    action: 'inventory.category-updated',
+    entityType: 'product-category',
+    entityId: current.id,
+    details: { name },
+  });
+  return requireCategory(database, current.id);
+}
+export function deleteProductCategory(database: DatabaseContext, categoryId: string): void {
+  requireProduction(database);
+  const current = requireCategory(database, categoryId);
+  const usage = database.sqlite
+    .prepare('SELECT COUNT(*) AS count FROM products WHERE category_id=?')
+    .get(categoryId) as { count: number };
+  if (usage.count > 0)
+    throw new Error('Mova ou exclua os produtos desta categoria antes de apagá-la.');
+  database.sqlite.prepare('DELETE FROM product_categories WHERE id=?').run(categoryId);
+  appendAudit(database, {
+    action: 'inventory.category-deleted',
+    entityType: 'product-category',
+    entityId: current.id,
+    details: { name: current.name },
+  });
+}
+
 export function createInventoryProduct(
   database: DatabaseContext,
   input: ProductWriteInput,
@@ -491,9 +522,13 @@ export function recordStockMovement(
   const now = Date.now();
   const purchaseTotalCents =
     input.type === 'purchase'
-      ? (input.purchaseTotalCents ?? requireProductRow(database, input.productId).cost_cents * input.quantity)
+      ? (input.purchaseTotalCents ??
+        requireProductRow(database, input.productId).cost_cents * input.quantity)
       : null;
-  if (purchaseTotalCents !== null && (!Number.isInteger(purchaseTotalCents) || purchaseTotalCents <= 0)) {
+  if (
+    purchaseTotalCents !== null &&
+    (!Number.isInteger(purchaseTotalCents) || purchaseTotalCents <= 0)
+  ) {
     throw new Error('O valor total da compra deve ser maior que zero.');
   }
   const trimmedNote = input.note?.trim();
@@ -665,38 +700,71 @@ export function voidStockPurchaseLot(
     )
     .get(input.movementId) as
     | {
-        readonly movement_id: string; readonly event_id: string; readonly product_id: string;
-        readonly quantity: number; readonly total_cost_cents: number; readonly created_at: number;
-        readonly voided_movement_id: string | null; readonly has_later_decrease: number;
+        readonly movement_id: string;
+        readonly event_id: string;
+        readonly product_id: string;
+        readonly quantity: number;
+        readonly total_cost_cents: number;
+        readonly created_at: number;
+        readonly voided_movement_id: string | null;
+        readonly has_later_decrease: number;
       }
     | undefined;
-  if (lot === undefined || lot.event_id !== eventId) throw new Error('O lote não pertence ao evento ativo.');
+  if (lot === undefined || lot.event_id !== eventId)
+    throw new Error('O lote não pertence ao evento ativo.');
   if (lot.voided_movement_id !== null) throw new Error('Esta entrada já foi desfeita.');
   if (lot.has_later_decrease !== 0) {
-    throw new Error('Esta entrada já possui baixas posteriores; corrija o estoque sem apagar o histórico.');
+    throw new Error(
+      'Esta entrada já possui baixas posteriores; corrija o estoque sem apagar o histórico.',
+    );
   }
   const stock = database.sqlite
     .prepare('SELECT quantity FROM event_stock WHERE event_id = ? AND product_id = ?')
     .get(eventId, lot.product_id) as { readonly quantity: number } | undefined;
-  if ((stock?.quantity ?? 0) < lot.quantity) throw new Error('O saldo atual não permite desfazer esta entrada.');
+  if ((stock?.quantity ?? 0) < lot.quantity)
+    throw new Error('O saldo atual não permite desfazer esta entrada.');
   const now = Date.now();
   database.sqlite.transaction(() => {
     database.sqlite
-      .prepare('UPDATE event_stock SET quantity = quantity - ?, updated_at = ? WHERE event_id = ? AND product_id = ?')
+      .prepare(
+        'UPDATE event_stock SET quantity = quantity - ?, updated_at = ? WHERE event_id = ? AND product_id = ?',
+      )
       .run(lot.quantity, now, eventId, lot.product_id);
     database.sqlite
       .prepare(
         `INSERT INTO stock_movements (id, event_id, product_id, type, quantity, delta, note, created_at)
          VALUES (?, ?, ?, 'correction-negative', ?, ?, ?, ?)`,
       )
-      .run(randomUUID(), eventId, lot.product_id, lot.quantity, -lot.quantity, `Desfazer entrada: ${reason}`, now);
+      .run(
+        randomUUID(),
+        eventId,
+        lot.product_id,
+        lot.quantity,
+        -lot.quantity,
+        `Desfazer entrada: ${reason}`,
+        now,
+      );
     database.sqlite
-      .prepare('INSERT INTO stock_purchase_lot_voids (movement_id, event_id, reason, created_at) VALUES (?, ?, ?, ?)')
+      .prepare(
+        'INSERT INTO stock_purchase_lot_voids (movement_id, event_id, reason, created_at) VALUES (?, ?, ?, ?)',
+      )
       .run(lot.movement_id, eventId, reason, now);
     appendAudit(database, {
-      action: 'inventory.purchase-lot-voided', entityType: 'stock-purchase-lot', entityId: lot.movement_id, eventId,
+      action: 'inventory.purchase-lot-voided',
+      entityType: 'stock-purchase-lot',
+      entityId: lot.movement_id,
+      eventId,
       details: { productId: lot.product_id, quantity: lot.quantity, reason },
     });
   })();
-  return { movementId: lot.movement_id, productId: lot.product_id, quantity: lot.quantity, totalCostCents: lot.total_cost_cents, unitCostCents: Math.round(lot.total_cost_cents / lot.quantity), createdAt: lot.created_at, voided: true, canUndo: false };
+  return {
+    movementId: lot.movement_id,
+    productId: lot.product_id,
+    quantity: lot.quantity,
+    totalCostCents: lot.total_cost_cents,
+    unitCostCents: Math.round(lot.total_cost_cents / lot.quantity),
+    createdAt: lot.created_at,
+    voided: true,
+    canUndo: false,
+  };
 }

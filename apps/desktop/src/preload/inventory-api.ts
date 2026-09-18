@@ -2,6 +2,8 @@ import { ipcRenderer } from 'electron';
 
 import {
   createCategoryInputSchema,
+  updateCategoryInputSchema,
+  deleteCategoryInputSchema,
   correctStockPurchaseLotInputSchema,
   createProductInputSchema,
   deleteProductInputSchema,
@@ -20,6 +22,8 @@ import {
   voidStockPurchaseLotInputSchema,
   updateProductInputSchema,
   type CreateCategoryInput,
+  type UpdateCategoryInput,
+  type DeleteCategoryInput,
   type CorrectStockPurchaseLotInput,
   type CreateProductInput,
   type DeleteProductInput,
@@ -50,6 +54,20 @@ export const inventoryApi: InventoryApi = {
     );
     return productCategorySchema.parse(payload);
   },
+  async updateCategory(input: UpdateCategoryInput): Promise<ProductCategory> {
+    return productCategorySchema.parse(
+      await ipcRenderer.invoke(
+        IPC_CHANNELS.inventoryUpdateCategory,
+        updateCategoryInputSchema.parse(input),
+      ),
+    );
+  },
+  async deleteCategory(input: DeleteCategoryInput): Promise<void> {
+    await ipcRenderer.invoke(
+      IPC_CHANNELS.inventoryDeleteCategory,
+      deleteCategoryInputSchema.parse(input),
+    );
+  },
   async createProduct(input: CreateProductInput): Promise<InventoryProduct> {
     const parsedInput = createProductInputSchema.parse(input);
     const payload: unknown = await ipcRenderer.invoke(
@@ -75,7 +93,10 @@ export const inventoryApi: InventoryApi = {
     return inventoryProductSchema.parse(payload);
   },
   async listPurchaseLots(productId: string): Promise<readonly StockPurchaseLot[]> {
-    const payload: unknown = await ipcRenderer.invoke(IPC_CHANNELS.inventoryListPurchaseLots, productId);
+    const payload: unknown = await ipcRenderer.invoke(
+      IPC_CHANNELS.inventoryListPurchaseLots,
+      productId,
+    );
     return stockPurchaseLotListSchema.parse(payload);
   },
   async correctPurchaseLot(input: CorrectStockPurchaseLotInput): Promise<StockPurchaseLot> {

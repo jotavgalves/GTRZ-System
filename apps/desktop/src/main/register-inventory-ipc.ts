@@ -2,6 +2,8 @@ import { ipcMain } from 'electron';
 
 import {
   createCategoryInputSchema,
+  updateCategoryInputSchema,
+  deleteCategoryInputSchema,
   correctStockPurchaseLotInputSchema,
   createProductInputSchema,
   deleteProductInputSchema,
@@ -23,6 +25,8 @@ import {
 import {
   createInventoryProduct,
   createProductCategory,
+  updateProductCategory,
+  deleteProductCategory,
   getInventoryState,
   correctStockPurchaseLot,
   listStockPurchaseLots,
@@ -45,6 +49,8 @@ interface RegisterInventoryIpcOptions {
 const INVENTORY_CHANNELS = [
   IPC_CHANNELS.inventoryGetState,
   IPC_CHANNELS.inventoryCreateCategory,
+  IPC_CHANNELS.inventoryUpdateCategory,
+  IPC_CHANNELS.inventoryDeleteCategory,
   IPC_CHANNELS.inventoryCreateProduct,
   IPC_CHANNELS.inventoryUpdateProduct,
   IPC_CHANNELS.inventoryRecordMovement,
@@ -66,6 +72,17 @@ export function registerInventoryIpcHandlers(options: RegisterInventoryIpcOption
   ipcMain.handle(IPC_CHANNELS.inventoryCreateCategory, (_event, payload: unknown) => {
     const input = createCategoryInputSchema.parse(payload);
     return productCategorySchema.parse(createProductCategory(options.getDatabase(), input.name));
+  });
+  ipcMain.handle(IPC_CHANNELS.inventoryUpdateCategory, (_event, payload: unknown) =>
+    productCategorySchema.parse(
+      updateProductCategory(options.getDatabase(), updateCategoryInputSchema.parse(payload)),
+    ),
+  );
+  ipcMain.handle(IPC_CHANNELS.inventoryDeleteCategory, (_event, payload: unknown) => {
+    deleteProductCategory(
+      options.getDatabase(),
+      deleteCategoryInputSchema.parse(payload).categoryId,
+    );
   });
   ipcMain.handle(IPC_CHANNELS.inventoryCreateProduct, (_event, payload: unknown) => {
     const input = createProductInputSchema.parse(payload);

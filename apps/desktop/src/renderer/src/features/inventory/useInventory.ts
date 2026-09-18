@@ -19,6 +19,8 @@ interface InventoryViewState {
   readonly message: string | null;
   readonly reload: () => Promise<void>;
   readonly createCategory: (name: string) => Promise<void>;
+  readonly updateCategory: (categoryId: string, name: string) => Promise<void>;
+  readonly deleteCategory: (categoryId: string) => Promise<void>;
   readonly createProduct: (input: CreateProductInput) => Promise<void>;
   readonly updateProduct: (input: UpdateProductInput) => Promise<void>;
   readonly recordMovement: (input: RecordStockMovementInput) => Promise<void>;
@@ -86,6 +88,21 @@ export function useInventory(): InventoryViewState {
     },
     [run],
   );
+  const updateCategory = useCallback(
+    async (categoryId: string, name: string): Promise<void> => {
+      await run(
+        () => window.gtrz.inventory.updateCategory({ categoryId, name }),
+        'Categoria atualizada.',
+      );
+    },
+    [run],
+  );
+  const deleteCategory = useCallback(
+    async (categoryId: string): Promise<void> => {
+      await run(() => window.gtrz.inventory.deleteCategory({ categoryId }), 'Categoria excluída.');
+    },
+    [run],
+  );
   const updateProduct = useCallback(
     async (input: UpdateProductInput): Promise<void> => {
       await run(() => window.gtrz.inventory.updateProduct(input), 'Produto atualizado.');
@@ -119,6 +136,8 @@ export function useInventory(): InventoryViewState {
     message,
     reload,
     createCategory,
+    updateCategory,
+    deleteCategory,
     createProduct,
     updateProduct,
     recordMovement,

@@ -71,6 +71,8 @@ export const inventoryStateSchema = z.object({
 export const createCategoryInputSchema = z.object({
   name: z.string().trim().min(2).max(60),
 });
+export const updateCategoryInputSchema = createCategoryInputSchema.extend({ categoryId: z.uuid() });
+export const deleteCategoryInputSchema = z.object({ categoryId: z.uuid() });
 
 export const createProductInputSchema = z.object({
   categoryId: z.uuid(),
@@ -207,6 +209,8 @@ export type ProductFinancials = z.infer<typeof productFinancialsSchema>;
 export type InventoryProduct = z.infer<typeof inventoryProductSchema>;
 export type InventoryState = z.infer<typeof inventoryStateSchema>;
 export type CreateCategoryInput = z.infer<typeof createCategoryInputSchema>;
+export type UpdateCategoryInput = z.infer<typeof updateCategoryInputSchema>;
+export type DeleteCategoryInput = z.infer<typeof deleteCategoryInputSchema>;
 export type CreateProductInput = z.infer<typeof createProductInputSchema>;
 export type UpdateProductInput = z.infer<typeof updateProductInputSchema>;
 export type RecordStockMovementInput = z.infer<typeof recordStockMovementInputSchema>;
@@ -223,6 +227,8 @@ export type ProductDeletionResult = z.infer<typeof productDeletionResultSchema>;
 export interface InventoryApi {
   getState(): Promise<InventoryState>;
   createCategory(input: CreateCategoryInput): Promise<ProductCategory>;
+  updateCategory(input: UpdateCategoryInput): Promise<ProductCategory>;
+  deleteCategory(input: DeleteCategoryInput): Promise<void>;
   createProduct(input: CreateProductInput): Promise<InventoryProduct>;
   updateProduct(input: UpdateProductInput): Promise<InventoryProduct>;
   recordMovement(input: RecordStockMovementInput): Promise<InventoryProduct>;
