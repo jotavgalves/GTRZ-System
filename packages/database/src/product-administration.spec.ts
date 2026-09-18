@@ -77,9 +77,8 @@ describe('product administration', () => {
     recordStockMovement(database, { productId, type: 'correction-negative', quantity: 2 });
 
     expect(getProductEconomics(database, productId, event.id)).toEqual({
-      averagePurchaseCostCents: 500,
       currentStockValueCents: 4000,
-      contributedCostCents: 5000,
+      contributedCostCents: 4000,
     });
     expect(getInventoryState(database).products[0]).toMatchObject({ quantity: 8 });
     database.close();
@@ -93,7 +92,6 @@ describe('product administration', () => {
     recordStockMovement(database, { productId, type: 'loss', quantity: 2 });
 
     expect(getProductEconomics(database, productId, event.id)).toEqual({
-      averagePurchaseCostCents: 500,
       currentStockValueCents: 4000,
       contributedCostCents: 5000,
     });
