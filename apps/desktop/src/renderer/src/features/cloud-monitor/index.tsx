@@ -3,6 +3,8 @@ import { useCallback, useEffect, useState } from 'react';
 
 import type { CloudMonitor } from '@gtrz/contracts';
 
+import { MobileOperatorsPanel } from './MobileOperatorsPanel';
+
 const REFRESH_INTERVAL_MS = 5_000;
 
 function formatTime(timestamp: number): string {
@@ -40,6 +42,7 @@ function commandLabel(action: string): string {
     'inventory.stock-moved': 'Estoque movimentado',
     'inventory.product-created': 'Produto cadastrado',
     'inventory.product-updated': 'Produto atualizado',
+    'inventory.purchase-lot-corrected': 'Custo de lote corrigido',
     'cashier.sale-rejected': 'Venda corrigida',
     'event.created': 'Evento criado',
     'expense.created': 'Despesa registrada',
@@ -63,7 +66,8 @@ interface CommandPresentation {
 function presentCommand(command: CloudMonitor['recentCommands'][number], labels: ReadonlyMap<string, string>): CommandPresentation {
   const details = isRecord(command.payload.details) ? command.payload.details : {};
   const profile = text(command.payload.profile);
-  const source = labels.get(command.deviceId) ?? (profile === 'cashier' ? 'Caixa mobile' : `Dispositivo ${shortDeviceId(command.deviceId)}`);
+  const mobileOperatorName = text(details.operatorName);
+  const source = mobileOperatorName ?? labels.get(command.deviceId) ?? (profile === 'cashier' ? 'Caixa mobile' : `Dispositivo ${shortDeviceId(command.deviceId)}`);
 
   if (command.action === 'inventory.stock-moved') {
     const product = text(details.productLabel) ?? text(details.productName) ?? 'Produto sem identificação';
@@ -75,6 +79,14 @@ function presentCommand(command: CloudMonitor['recentCommands'][number], labels:
       source,
       summary: `${source} ${movement} de ${product}.`,
       chips: [before === null || after === null ? 'Saldo não informado' : `Saldo: ${String(before)} para ${String(after)}`],
+    };
+  }
+
+  if (command.action === 'inventory.purchase-lot-corrected') {
+    return {
+      source,
+      summary: `${source} corrigiu o custo de um lote para ${money(number(details.totalCostCents))}.`,
+      chips: [text(details.reason) ?? 'Motivo não informado'],
     };
   }
 
@@ -276,7 +288,7 @@ export function CloudMonitorPage(): React.JSX.Element {
               <p>Diário central. Repetir o mesmo comando não cria outra alteração.</p>
             </div>
           </div>
-          <div className="cloud-flow-list">
+          <div className="cloud-flow-list cloud-flow-list--scroll">
             {monitor?.recentCommands.map((command) => {
               const presentation = presentCommand(command, deviceLabels);
               return (
@@ -308,6 +320,8 @@ export function CloudMonitorPage(): React.JSX.Element {
         </section>
       </div>
 
+      <MobileOperatorsPanel />
+
       <section className="panel cloud-flow-panel">
         <div className="panel__heading">
           <Activity size={20} aria-hidden="true" />
@@ -316,7 +330,7 @@ export function CloudMonitorPage(): React.JSX.Element {
             <p>Subidas pelo diário e entregas WebSocket registradas pela central.</p>
           </div>
         </div>
-        <div className="cloud-flow-list">
+        <div className="cloud-flow-list cloud-flow-list--scroll">
           {monitor?.recentTransport.map((transport) => (
             <article className="cloud-flow-row" key={transport.sequence}>
               <span className="cloud-flow-row__pulse" aria-hidden="true" />

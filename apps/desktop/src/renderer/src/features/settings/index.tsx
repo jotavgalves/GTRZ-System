@@ -1,7 +1,7 @@
 import { Cloud, CreditCard, KeyRound, RefreshCw, Settings, ShieldCheck } from 'lucide-react';
 import { useCallback, useEffect, useState, type SyntheticEvent } from 'react';
 
-import type { CloudSyncStatus, MobileOperator, MobileOperatorRole } from '@gtrz/contracts';
+import type { CloudSyncStatus } from '@gtrz/contracts';
 
 import { PrintingSettingsPanel } from './PrintingSettingsPanel';
 import { CategoryForm } from '../inventory/CategoryForm';
@@ -43,13 +43,6 @@ export function SettingsPage(): React.JSX.Element {
   const [terminalError, setTerminalError] = useState<string | null>(null);
   const [cloudStatus, setCloudStatus] = useState<CloudSyncStatus | null>(null);
   const [cloudLoading, setCloudLoading] = useState(true);
-  const [mobileOperators, setMobileOperators] = useState<readonly MobileOperator[]>([]);
-  const [mobileLoading, setMobileLoading] = useState(true);
-  const [mobileName, setMobileName] = useState('');
-  const [mobilePassword, setMobilePassword] = useState('');
-  const [mobileRole, setMobileRole] = useState<MobileOperatorRole>('sales');
-  const [mobileMessage, setMobileMessage] = useState<string | null>(null);
-  const [mobileError, setMobileError] = useState<string | null>(null);
 
   const loadCloudStatus = useCallback(async (): Promise<void> => {
     setCloudLoading(true);
@@ -89,21 +82,6 @@ export function SettingsPage(): React.JSX.Element {
   useEffect(() => {
     void loadCloudStatus();
   }, [loadCloudStatus]);
-
-  const loadMobileOperators = useCallback(async (): Promise<void> => {
-    setMobileLoading(true);
-    try {
-      setMobileOperators(await window.gtrz.settings.listMobileOperators());
-    } catch (loadError: unknown) {
-      setMobileError(loadError instanceof Error ? loadError.message : 'Não foi possível carregar os perfis móveis.');
-    } finally {
-      setMobileLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    void loadMobileOperators();
-  }, [loadMobileOperators]);
 
   async function handleSubmit(formEvent: SyntheticEvent<HTMLFormElement>): Promise<void> {
     formEvent.preventDefault();
@@ -158,65 +136,6 @@ export function SettingsPage(): React.JSX.Element {
     }
   }
 
-  async function handleMobileOperatorSubmit(formEvent: SyntheticEvent<HTMLFormElement>): Promise<void> {
-    formEvent.preventDefault();
-    setMobileError(null);
-    setMobileMessage(null);
-    try {
-      await window.gtrz.settings.createMobileOperator({
-        name: mobileName,
-        password: mobilePassword,
-        role: mobileRole,
-      });
-      setMobileName('');
-      setMobilePassword('');
-      setMobileRole('sales');
-      setMobileMessage('Perfil móvel criado e disponível imediatamente.');
-      await loadMobileOperators();
-    } catch (submitError: unknown) {
-      setMobileError(submitError instanceof Error ? submitError.message : 'Não foi possível criar o perfil.');
-    }
-  }
-
-  async function changeMobileOperator(
-    operator: MobileOperator,
-    changes: { readonly role?: MobileOperatorRole; readonly active?: boolean },
-  ): Promise<void> {
-    setMobileError(null);
-    try {
-      await window.gtrz.settings.updateMobileOperator({ operatorId: operator.id, ...changes });
-      await loadMobileOperators();
-    } catch (updateError: unknown) {
-      setMobileError(updateError instanceof Error ? updateError.message : 'Não foi possível atualizar o perfil.');
-    }
-  }
-
-  async function requireMobilePassword(operator: MobileOperator): Promise<void> {
-    setMobileError(null);
-    try {
-      await window.gtrz.settings.endMobileOperatorSessions({
-        operatorId: operator.id,
-        reason: 'password-required',
-      });
-      setMobileMessage(`A senha foi solicitada novamente para ${operator.name}.`);
-      await loadMobileOperators();
-    } catch (sessionError: unknown) {
-      setMobileError(sessionError instanceof Error ? sessionError.message : 'Não foi possível encerrar a sessão.');
-    }
-  }
-
-  async function deleteMobileOperator(operator: MobileOperator): Promise<void> {
-    if (!window.confirm(`Excluir o perfil móvel de ${operator.name}? As sessões dele serão encerradas.`)) return;
-    setMobileError(null);
-    try {
-      await window.gtrz.settings.deleteMobileOperator({ operatorId: operator.id });
-      setMobileMessage(`Perfil de ${operator.name} excluído.`);
-      await loadMobileOperators();
-    } catch (deleteError: unknown) {
-      setMobileError(deleteError instanceof Error ? deleteError.message : 'Não foi possível excluir o perfil.');
-    }
-  }
-
   return (
     <section className="feature-page">
       <header className="feature-header">
@@ -231,24 +150,6 @@ export function SettingsPage(): React.JSX.Element {
       </header>
 
       <div className="settings-grid">
-        <form className="panel form-panel" onSubmit={(formEvent) => void handleMobileOperatorSubmit(formEvent)}>
-          <div className="panel__heading">
-            <ShieldCheck size={20} aria-hidden="true" />
-            <div>
-              <h2>Perfis da operação mobile</h2>
-              <p>O celular entra somente com a senha. Permissões mudam pela nuvem em tempo real.</p>
-            </div>
-          </div>
-          <label className="form-field"><span>Nome da pessoa</span><input value={mobileName} onChange={(event) => setMobileName(event.target.value)} minLength={2} maxLength={60} required /></label>
-          <label className="form-field"><span>Senha de acesso</span><input value={mobilePassword} onChange={(event) => setMobilePassword(event.target.value)} minLength={6} maxLength={128} type="password" required /></label>
-          <label className="form-field"><span>Permissão</span><select value={mobileRole} onChange={(event) => setMobileRole(event.target.value as MobileOperatorRole)}><option value="sales">Venda</option><option value="inventory">Estoque</option><option value="sales-and-inventory">Estoque e venda</option></select></label>
-          {mobileError === null ? null : <p className="form-error">{mobileError}</p>}
-          {mobileMessage === null ? null : <p className="form-success">{mobileMessage}</p>}
-          <button className="button button--primary" disabled={mobileLoading || mobilePassword.length < 6} type="submit"><ShieldCheck size={17} aria-hidden="true" />Criar perfil mobile</button>
-          <div className="mobile-operator-list">
-            {mobileLoading ? <p className="form-muted">Carregando perfis da nuvem...</p> : mobileOperators.length === 0 ? <p className="form-muted">Nenhum perfil móvel criado.</p> : mobileOperators.map((operator) => <article className="mobile-operator" key={operator.id}><div><strong>{operator.name}</strong><span>{operator.role === 'sales' ? 'Venda' : operator.role === 'inventory' ? 'Estoque' : 'Estoque e venda'} · {operator.active ? `${operator.sessionCount} sessão(ões)` : 'Desativado'}</span></div><div className="mobile-operator__actions"><select aria-label={`Permissão de ${operator.name}`} disabled={!operator.active} value={operator.role} onChange={(event) => void changeMobileOperator(operator, { role: event.target.value as MobileOperatorRole })}><option value="sales">Venda</option><option value="inventory">Estoque</option><option value="sales-and-inventory">Ambos</option></select><button className="button button--ghost" onClick={() => void requireMobilePassword(operator)} type="button">Pedir senha</button><button className="button button--ghost" onClick={() => void changeMobileOperator(operator, { active: !operator.active })} type="button">{operator.active ? 'Desativar' : 'Ativar'}</button><button className="button button--ghost" onClick={() => void deleteMobileOperator(operator)} type="button">Excluir</button></div></article>) }
-          </div>
-        </form>
         <article className="panel form-panel">
           <div className="panel__heading">
             <Settings size={20} aria-hidden="true" />

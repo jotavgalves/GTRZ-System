@@ -1340,6 +1340,7 @@ export class EventRoom extends DurableObject<Env> {
           beforeQuantity: product.quantity,
           afterQuantity,
           purchaseTotalCents,
+          purchaseUnitCents: purchaseTotalCents === null ? null : Math.round(purchaseTotalCents / quantity),
           note: note ?? `Movimento móvel por ${deviceLabel}`,
           operatorName: deviceLabel,
         },
