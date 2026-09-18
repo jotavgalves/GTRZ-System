@@ -340,6 +340,25 @@ function applyMigrations(sqlite: BetterSqlite3.Database): void {
   migrate();
 }
 
+function ensureColumn(
+  sqlite: BetterSqlite3.Database,
+  table: string,
+  column: string,
+  definition: string,
+): void {
+  const columns = sqlite.pragma(`table_info(${table})`) as Array<{ readonly name: string }>;
+  if (!columns.some((entry) => entry.name === column)) {
+    sqlite.exec(`ALTER TABLE ${table} ADD COLUMN ${definition}`);
+  }
+}
+
+// A desktop can be interrupted while applying a schema update. These columns are
+// repaired independently so a partially created ledger never blocks startup.
+function repairFinanceLedgerColumns(sqlite: BetterSqlite3.Database): void {
+  ensureColumn(sqlite, 'payments', 'fee_rate_basis_points', 'fee_rate_basis_points INTEGER');
+  ensureColumn(sqlite, 'payments', 'fee_cents', 'fee_cents INTEGER');
+}
+
 export function openDatabase(filePath: string): DatabaseContext {
   const sqlite = new BetterSqlite3(filePath);
 
@@ -349,6 +368,7 @@ export function openDatabase(filePath: string): DatabaseContext {
   sqlite.pragma('synchronous = NORMAL');
 
   applyMigrations(sqlite);
+  repairFinanceLedgerColumns(sqlite);
 
   const orm = drizzle(sqlite, { schema: technicalSchema });
 

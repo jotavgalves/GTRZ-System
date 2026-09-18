@@ -2,10 +2,7 @@ export const financeLedgerMigration = {
   version: 18,
   name: 'finance-ledger-and-capital-recovery',
   sql: `
-    ALTER TABLE payments ADD COLUMN fee_rate_basis_points INTEGER;
-    ALTER TABLE payments ADD COLUMN fee_cents INTEGER;
-
-    CREATE TABLE expense_payments (
+    CREATE TABLE IF NOT EXISTS expense_payments (
       id TEXT PRIMARY KEY NOT NULL,
       expense_id TEXT NOT NULL,
       event_id TEXT NOT NULL,
@@ -18,10 +15,10 @@ export const financeLedgerMigration = {
       FOREIGN KEY (event_id) REFERENCES events(id) ON UPDATE CASCADE ON DELETE RESTRICT,
       FOREIGN KEY (cash_register_id) REFERENCES cash_registers(id) ON UPDATE CASCADE ON DELETE RESTRICT
     );
-    CREATE INDEX expense_payments_expense_created_idx ON expense_payments (expense_id, created_at);
-    CREATE INDEX expense_payments_event_created_idx ON expense_payments (event_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS expense_payments_expense_created_idx ON expense_payments (expense_id, created_at);
+    CREATE INDEX IF NOT EXISTS expense_payments_event_created_idx ON expense_payments (event_id, created_at DESC);
 
-    CREATE TABLE capital_contributions (
+    CREATE TABLE IF NOT EXISTS capital_contributions (
       id TEXT PRIMARY KEY NOT NULL,
       event_id TEXT NOT NULL,
       contributor_name TEXT NOT NULL,
@@ -35,9 +32,9 @@ export const financeLedgerMigration = {
       updated_at INTEGER NOT NULL,
       FOREIGN KEY (event_id) REFERENCES events(id) ON UPDATE CASCADE ON DELETE RESTRICT
     );
-    CREATE INDEX capital_contributions_event_created_idx ON capital_contributions (event_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS capital_contributions_event_created_idx ON capital_contributions (event_id, created_at DESC);
 
-    CREATE TABLE capital_reimbursements (
+    CREATE TABLE IF NOT EXISTS capital_reimbursements (
       id TEXT PRIMARY KEY NOT NULL,
       contribution_id TEXT NOT NULL,
       event_id TEXT NOT NULL,
@@ -50,10 +47,10 @@ export const financeLedgerMigration = {
       FOREIGN KEY (event_id) REFERENCES events(id) ON UPDATE CASCADE ON DELETE RESTRICT,
       FOREIGN KEY (cash_register_id) REFERENCES cash_registers(id) ON UPDATE CASCADE ON DELETE RESTRICT
     );
-    CREATE INDEX capital_reimbursements_contribution_created_idx ON capital_reimbursements (contribution_id, created_at);
-    CREATE INDEX capital_reimbursements_event_created_idx ON capital_reimbursements (event_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS capital_reimbursements_contribution_created_idx ON capital_reimbursements (contribution_id, created_at);
+    CREATE INDEX IF NOT EXISTS capital_reimbursements_event_created_idx ON capital_reimbursements (event_id, created_at DESC);
 
-    CREATE TABLE order_refunds (
+    CREATE TABLE IF NOT EXISTS order_refunds (
       id TEXT PRIMARY KEY NOT NULL,
       order_id TEXT NOT NULL,
       event_id TEXT NOT NULL,
@@ -66,7 +63,7 @@ export const financeLedgerMigration = {
       FOREIGN KEY (event_id) REFERENCES events(id) ON UPDATE CASCADE ON DELETE RESTRICT,
       FOREIGN KEY (cash_register_id) REFERENCES cash_registers(id) ON UPDATE CASCADE ON DELETE RESTRICT
     );
-    CREATE INDEX order_refunds_order_created_idx ON order_refunds (order_id, created_at);
-    CREATE INDEX order_refunds_event_created_idx ON order_refunds (event_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS order_refunds_order_created_idx ON order_refunds (order_id, created_at);
+    CREATE INDEX IF NOT EXISTS order_refunds_event_created_idx ON order_refunds (event_id, created_at DESC);
   `,
 } as const;
