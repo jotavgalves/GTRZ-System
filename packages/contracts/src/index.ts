@@ -24,6 +24,7 @@ export * from './vouchers';
 
 export const IPC_CHANNELS = {
   systemGetInfo: 'system:get-info',
+  systemSwitchEnvironment: 'system:switch-environment',
   dashboardGetState: 'dashboard:get-state',
   auditList: 'audit:list',
   eventsList: 'events:list',
@@ -132,6 +133,11 @@ export const systemInfoSchema = z.object({
   platform: z.enum(['win32', 'linux', 'darwin']),
   databaseReady: z.boolean(),
   environment: z.enum(['production', 'test']),
+});
+
+export const runtimeEnvironmentSchema = z.enum(['production', 'test']);
+export const switchRuntimeEnvironmentInputSchema = z.object({
+  environment: runtimeEnvironmentSchema,
 });
 
 export const userProfileSchema = z.enum(['production', 'cashier']);
@@ -362,6 +368,8 @@ export const restoreBackupResultSchema = z.discriminatedUnion('status', [
 ]);
 
 export type SystemInfo = z.infer<typeof systemInfoSchema>;
+export type RuntimeEnvironment = z.infer<typeof runtimeEnvironmentSchema>;
+export type SwitchRuntimeEnvironmentInput = z.infer<typeof switchRuntimeEnvironmentInputSchema>;
 export type UserProfile = z.infer<typeof userProfileSchema>;
 export type EventStatus = z.infer<typeof eventStatusSchema>;
 export type GtrzEvent = z.infer<typeof eventSchema>;
@@ -396,6 +404,7 @@ export type RestoreBackupResult = z.infer<typeof restoreBackupResultSchema>;
 export interface GtrzDesktopApi {
   readonly system: {
     getInfo(): Promise<SystemInfo>;
+    switchEnvironment(input: SwitchRuntimeEnvironmentInput): Promise<void>;
   };
   readonly realtime: {
     onDataChanged(listener: () => void): () => void;

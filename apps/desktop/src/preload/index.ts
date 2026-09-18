@@ -26,6 +26,7 @@ import {
   sessionStateSchema,
   setActiveEventInputSchema,
   switchProfileInputSchema,
+  switchRuntimeEnvironmentInputSchema,
   systemInfoSchema,
   updatePaymentTerminalSettingsInputSchema,
   updateMobileOperatorInputSchema,
@@ -52,6 +53,7 @@ import {
   type SessionState,
   type SetActiveEventInput,
   type SwitchProfileInput,
+  type SwitchRuntimeEnvironmentInput,
   type SystemInfo,
   type UpdatePaymentTerminalSettingsInput,
   type UpdateMobileOperatorInput,
@@ -74,6 +76,12 @@ const api: GtrzDesktopApi = {
     async getInfo(): Promise<SystemInfo> {
       const payload: unknown = await ipcRenderer.invoke(IPC_CHANNELS.systemGetInfo);
       return systemInfoSchema.parse(payload);
+    },
+    async switchEnvironment(input: SwitchRuntimeEnvironmentInput): Promise<void> {
+      await ipcRenderer.invoke(
+        IPC_CHANNELS.systemSwitchEnvironment,
+        switchRuntimeEnvironmentInputSchema.parse(input),
+      );
     },
   },
   realtime: {

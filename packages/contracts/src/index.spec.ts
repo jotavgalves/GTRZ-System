@@ -7,6 +7,7 @@ import {
   eventSchema,
   restoreBackupResultSchema,
   sessionStateSchema,
+  switchRuntimeEnvironmentInputSchema,
   switchProfileInputSchema,
   systemInfoSchema,
 } from './index';
@@ -34,6 +35,15 @@ describe('systemInfoSchema', () => {
         environment: 'production',
       }),
     ).toThrow();
+  });
+});
+
+describe('troca de ambiente', () => {
+  it('aceita somente os ambientes isolados conhecidos', () => {
+    expect(switchRuntimeEnvironmentInputSchema.parse({ environment: 'test' })).toEqual({
+      environment: 'test',
+    });
+    expect(() => switchRuntimeEnvironmentInputSchema.parse({ environment: 'homologation' })).toThrow();
   });
 });
 

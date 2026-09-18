@@ -23,6 +23,7 @@ import {
   sessionStateSchema,
   setActiveEventInputSchema,
   switchProfileInputSchema,
+  switchRuntimeEnvironmentInputSchema,
   systemInfoSchema,
   updatePaymentTerminalSettingsInputSchema,
   updateMobileOperatorInputSchema,
@@ -71,6 +72,7 @@ interface RegisterIpcOptions {
 
 const CONTROL_CHANNELS = [
   IPC_CHANNELS.systemGetInfo,
+  IPC_CHANNELS.systemSwitchEnvironment,
   IPC_CHANNELS.eventsList,
   IPC_CHANNELS.eventsCreate,
   IPC_CHANNELS.eventsRename,
@@ -112,6 +114,16 @@ export function registerIpcHandlers(options: RegisterIpcOptions): void {
       databaseReady: options.databaseReady(),
       environment: options.runtimeEnvironment,
     });
+  });
+
+  ipcMain.handle(IPC_CHANNELS.systemSwitchEnvironment, (_event, payload: unknown): void => {
+    const input = switchRuntimeEnvironmentInputSchema.parse(payload);
+    if (input.environment === options.runtimeEnvironment) return;
+
+    app.relaunch({
+      args: input.environment === 'test' ? ['--gtrz-environment=test'] : [],
+    });
+    app.quit();
   });
 
   ipcMain.handle(IPC_CHANNELS.eventsList, () => {

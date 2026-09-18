@@ -2,6 +2,82 @@
   gap: var(--space-5);
 }
 
+.cloud-environment {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-5);
+  padding: var(--space-5);
+}
+
+.cloud-environment__heading h2 {
+  margin: var(--space-1) 0;
+  font-size: 1rem;
+}
+
+.cloud-environment__heading p {
+  color: var(--color-text-muted);
+  font-size: 0.78rem;
+}
+
+.cloud-environment__choices {
+  display: grid;
+  min-width: min(100%, 31rem);
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-2);
+}
+
+.cloud-environment__choice {
+  display: flex;
+  min-height: 3.45rem;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-bg-raised);
+  color: var(--color-text-muted);
+  text-align: left;
+}
+
+.cloud-environment__choice:hover:not(:disabled) {
+  border-color: rgb(242 13 50 / 46%);
+  color: var(--color-text);
+}
+
+.cloud-environment__choice--selected {
+  border-color: rgb(242 13 50 / 52%);
+  background: var(--color-brand-soft);
+  color: var(--color-text);
+}
+
+.cloud-environment__choice svg {
+  color: var(--color-brand-hover);
+}
+
+.cloud-environment__choice span {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.cloud-environment__choice strong,
+.cloud-environment__choice small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cloud-environment__choice strong {
+  font-size: 0.78rem;
+}
+
+.cloud-environment__choice small {
+  color: var(--color-text-subtle);
+  font-size: 0.68rem;
+}
+
 .cloud-monitor-summary,
 .cloud-monitor-grid {
   display: grid;

@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from 'react';
 import type { CloudMonitor } from '@gtrz/contracts';
 
 import { MobileOperatorsPanel } from './MobileOperatorsPanel';
+import { EnvironmentSelector } from './EnvironmentSelector';
 
 const REFRESH_INTERVAL_MS = 5_000;
 
@@ -179,6 +180,8 @@ export function CloudMonitorPage(): React.JSX.Element {
       </header>
 
       {error === null ? null : <p className="form-error">{error}</p>}
+
+      <EnvironmentSelector />
 
       <div className="cloud-monitor-summary">
         <article className="panel cloud-metric">
