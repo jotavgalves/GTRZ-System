@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - 'apps/cloud-sync/**'
+      - '.github/workflows/deploy-cloud-sync.yml'
       - 'packages/contracts/**'
       - 'package-lock.json'
       - 'package.json'
