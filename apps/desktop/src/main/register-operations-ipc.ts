@@ -159,6 +159,6 @@ export function registerOperationsIpcHandlers(options: RegisterOperationsIpcOpti
 
   ipcMain.handle(IPC_CHANNELS.operationsCancelOrder, (_event, payload: unknown) => {
     const input = cancelOrderInputSchema.parse(payload);
-    return orderSchema.parse(cancelOrder(options.getDatabase(), input));
+    return orderSchema.parse(cancelOrder(options.getDatabase(), { orderId: input.orderId, reason: input.reason, ...(input.refunds === undefined ? {} : { refunds: input.refunds }) }));
   });
 }

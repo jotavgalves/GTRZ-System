@@ -11,6 +11,7 @@ import type {
 import { releaseOrderVoucher, validateOrderVoucherUses } from './operation-vouchers';
 import type { DatabaseContext } from './types';
 import { redeemVouchers, type DatabaseVoucherUseInput } from './vouchers';
+import { getPaymentFeeSnapshot } from './payment-terminal';
 
 function normalizePayments(
   payments: readonly DatabaseCloseOrderPaymentInput[],
@@ -38,6 +39,8 @@ function normalizePayments(
       amountCents: payment.amountCents,
       receivedCents,
       changeCents: receivedCents === null ? 0 : receivedCents - payment.amountCents,
+      feeRateBasisPoints: null,
+      feeCents: null,
       createdAt: 0,
     };
   });
@@ -84,11 +87,12 @@ export function closeOrder(
     const redemptions = redeemVouchers(database, order.event_id, order.id, voucherUses, now);
     const insertPayment = database.sqlite.prepare(
       `INSERT INTO payments
-       (id, order_id, method, amount_cents, received_cents, change_cents, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+       (id, order_id, method, amount_cents, received_cents, change_cents, fee_rate_basis_points, fee_cents, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
 
     for (const payment of payments) {
+      const fee = getPaymentFeeSnapshot(database, order.event_id, payment.method, payment.amountCents);
       insertPayment.run(
         payment.id,
         order.id,
@@ -96,6 +100,8 @@ export function closeOrder(
         payment.amountCents,
         payment.receivedCents,
         payment.changeCents,
+        fee.rateBasisPoints,
+        fee.feeCents,
         now,
       );
     }
@@ -140,6 +146,8 @@ export function closeOrder(
           changeCents: payment.changeCents,
           method: payment.method,
           receivedCents: payment.receivedCents,
+          feeRateBasisPoints: getPaymentFeeSnapshot(database, order.event_id, payment.method, payment.amountCents).rateBasisPoints,
+          feeCents: getPaymentFeeSnapshot(database, order.event_id, payment.method, payment.amountCents).feeCents,
         })),
         subtotalCents: order.subtotal_cents,
         totalCents,

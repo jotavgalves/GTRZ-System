@@ -43,6 +43,11 @@ function commandLabel(action: string): string {
     'cashier.sale-rejected': 'Venda corrigida',
     'event.created': 'Evento criado',
     'expense.created': 'Despesa registrada',
+    'expense.payment-recorded': 'Pagamento de despesa',
+    'operations.order-cancelled': 'Venda estornada',
+    'capital.contribution-created': 'Aporte registrado',
+    'capital.contribution-updated': 'Estoque remanescente atualizado',
+    'capital.reimbursed': 'Reembolso de aporte',
     'cash.opened': 'Caixa aberto',
     'cash.closed': 'Caixa fechado',
   };
@@ -91,6 +96,22 @@ function presentCommand(command: CloudMonitor['recentCommands'][number], labels:
 
   if (command.action === 'cashier.sale-rejected') {
     return { source, summary: 'A central corrigiu uma venda que não foi aplicada na cópia local.', chips: [] };
+  }
+
+  if (command.action === 'expense.payment-recorded') {
+    return { source, summary: `${source} pagou ${text(details.description) ?? 'uma despesa'} em ${money(number(details.amountCents))}.`, chips: [text(details.method) ?? 'Meio não informado'] };
+  }
+
+  if (command.action === 'capital.contribution-created') {
+    return { source, summary: `${source} registrou o aporte de ${text(details.contributorName) ?? 'responsável'}: ${money(number(details.amountCents))}.`, chips: [text(details.kind) === 'inventory' ? `Estoque remanescente: ${money(number(details.remainingStockValueCents))}` : 'Aporte em dinheiro'] };
+  }
+
+  if (command.action === 'capital.reimbursed') {
+    return { source, summary: `${source} registrou reembolso prioritário de ${money(number(details.amountCents))}.`, chips: [text(details.contributorName) ?? 'Responsável do aporte'] };
+  }
+
+  if (command.action === 'operations.order-cancelled') {
+    return { source, summary: `${source} estornou uma venda e devolveu o estoque correspondente.`, chips: [`Devolução: ${money(number(details.totalCents))}`] };
   }
 
   return { source, summary: `${source} registrou ${commandLabel(command.action).toLowerCase()}.`, chips: [] };

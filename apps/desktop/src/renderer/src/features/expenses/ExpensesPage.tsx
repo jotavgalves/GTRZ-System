@@ -21,7 +21,7 @@ export function ExpensesPage(): React.JSX.Element {
     reload,
     createExpense,
     updateExpense,
-    updatePaymentStatus,
+    recordPayment,
     cancelExpense,
     deleteExpense,
   } = useExpenses();
@@ -41,8 +41,7 @@ export function ExpensesPage(): React.JSX.Element {
           <span className="eyebrow">Compromissos financeiros do evento</span>
           <h1>Despesas</h1>
           <p>
-            Controle o pagamento como em aberto, parcial ou pago. Toda despesa não cancelada reduz o
-            resultado, independentemente dessa situação.
+            Compromissos reduzem o resultado; somente pagamentos reais entram na conciliação física do caixa.
           </p>
         </div>
         <button
@@ -108,7 +107,7 @@ export function ExpensesPage(): React.JSX.Element {
                 key={expense.id}
                 onCancel={cancelExpense}
                 onDelete={deleteExpense}
-                onPaymentStatusChange={updatePaymentStatus}
+                onRecordPayment={recordPayment}
                 onUpdate={updateExpense}
               />
             ))}

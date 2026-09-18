@@ -1,0 +1,1 @@
+export { CapitalPage } from './CapitalPage';

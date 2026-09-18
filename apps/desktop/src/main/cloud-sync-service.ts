@@ -87,10 +87,15 @@ const SYNCHRONIZED_ACTIONS = new Set([
   'inventory.stock-moved',
   'operations.service-point-created',
   'operations.order-paid',
+  'operations.order-cancelled',
   'expense.created',
   'expense.updated',
   'expense.payment-status-changed',
+  'expense.payment-recorded',
   'expense.cancelled',
+  'capital.contribution-created',
+  'capital.contribution-updated',
+  'capital.reimbursed',
   'cash.opened',
   'cash.supply',
   'cash.withdrawal',
@@ -979,6 +984,11 @@ export class CloudSyncService {
       return;
     }
 
+    if (payload.action === 'operations.order-cancelled') {
+      this.#applyRemoteOrderCancellation(database, eventId, payload);
+      return;
+    }
+
     if (payload.action === 'cashier.sale-rejected') {
       const originalCommandId = stringField(payload.details, 'originalCommandId');
       if (originalCommandId === null) throw new Error('A rejeição remota não identifica a venda original.');
@@ -995,6 +1005,11 @@ export class CloudSyncService {
 
     if (payload.action.startsWith('cash.')) {
       this.#applyRemoteCash(database, eventId, payload);
+      return;
+    }
+
+    if (payload.action.startsWith('capital.')) {
+      this.#applyRemoteCapital(database, eventId, payload);
       return;
     }
 
@@ -1106,8 +1121,8 @@ export class CloudSyncService {
       insertItem.run(id, orderId, itemKind, itemId, itemName, quantity, unitPriceCents, itemTotal, payload.createdAt);
     }
     const insertPayment = database.sqlite.prepare(
-      `INSERT INTO payments (id, order_id, method, amount_cents, received_cents, change_cents, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO payments (id, order_id, method, amount_cents, received_cents, change_cents, fee_rate_basis_points, fee_cents, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
     for (const raw of payments) {
       if (!isRecord(raw)) throw new Error('Pagamento remoto inválido.');
@@ -1116,6 +1131,8 @@ export class CloudSyncService {
       const amount = integerField(raw, 'amountCents');
       const change = integerField(raw, 'changeCents');
       const received = raw.receivedCents === null ? null : integerField(raw, 'receivedCents');
+      const feeRateBasisPoints = raw.feeRateBasisPoints === null ? null : integerField(raw, 'feeRateBasisPoints');
+      const feeCents = raw.feeCents === null ? null : integerField(raw, 'feeCents');
       const hasValidReceived = raw.receivedCents === null || received !== null;
       if (
         id === null ||
@@ -1126,7 +1143,7 @@ export class CloudSyncService {
       ) {
         throw new Error('Pagamento remoto incompleto.');
       }
-      insertPayment.run(id, orderId, method, amount, received, change, payload.createdAt);
+      insertPayment.run(id, orderId, method, amount, received, change, feeRateBasisPoints, feeCents, payload.createdAt);
     }
     for (const movement of parsedMovements) {
       // A sale has a negative delta. SQLite validates an INSERT value before
@@ -1181,6 +1198,15 @@ export class CloudSyncService {
       ).run(payload.entityId, eventId, category, description, amountCents, paymentMethod, note, paymentStatus, payload.createdAt, payload.createdAt);
       return;
     }
+    if (payload.action === 'expense.payment-recorded') {
+      const expenseId = stringField(payload.details, 'expenseId'); const method = stringField(payload.details, 'method'); const amount = integerField(payload.details, 'amountCents');
+      const note = payload.details.note === null ? null : stringField(payload.details, 'note');
+      if (expenseId === null || amount === null || amount <= 0 || !['cash','pix','credit-card','debit-card'].includes(method ?? '')) throw new Error('Pagamento remoto de despesa inválido.');
+      database.sqlite.prepare('INSERT OR IGNORE INTO expense_payments (id, expense_id, event_id, method, amount_cents, cash_register_id, note, created_at) VALUES (?, ?, ?, ?, ?, NULL, ?, ?)').run(payload.entityId,eventId,expenseId,method,amount,note,payload.createdAt);
+      const expense = database.sqlite.prepare('SELECT amount_cents FROM expenses WHERE id = ?').get(expenseId) as {amount_cents:number}|undefined;
+      if (expense !== undefined) { const paid=(database.sqlite.prepare('SELECT COALESCE(SUM(amount_cents), 0) AS value FROM expense_payments WHERE expense_id = ?').get(expenseId) as {value:number}).value; database.sqlite.prepare('UPDATE expenses SET payment_status = ?, updated_at = ? WHERE id = ?').run(paid >= expense.amount_cents ? 'paid' : paid > 0 ? 'partial' : 'open',payload.createdAt,expenseId); }
+      return;
+    }
     const exists = database.sqlite.prepare('SELECT id FROM expenses WHERE id = ?').get(payload.entityId);
     if (exists === undefined) throw new Error('A despesa remota ainda não existe neste computador.');
     if (payload.action === 'expense.updated') {
@@ -1209,6 +1235,29 @@ export class CloudSyncService {
       return;
     }
     throw new Error(`Ação de despesa sem aplicador: ${payload.action}.`);
+  }
+
+  #applyRemoteCapital(database: DatabaseContext, eventId: string, payload: JournalPayload): void {
+    if (payload.entityId === null) throw new Error('O lançamento de aporte remoto não possui identificador.');
+    if (payload.action === 'capital.contribution-created') {
+      const contributorName=stringField(payload.details,'contributorName'); const kind=stringField(payload.details,'kind'); const amount=integerField(payload.details,'amountCents'); const remaining=integerField(payload.details,'remainingStockValueCents'); const priority=integerField(payload.details,'recoveryPriority'); const note=payload.details.note === null ? null : stringField(payload.details,'note');
+      if (contributorName===null || amount===null || remaining===null || priority===null || (kind!=='cash' && kind!=='inventory')) throw new Error('Aporte remoto inválido.');
+      database.sqlite.prepare("INSERT OR IGNORE INTO capital_contributions (id,event_id,contributor_name,kind,amount_cents,remaining_stock_value_cents,recovery_priority,note,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,'active',?,?)").run(payload.entityId,eventId,contributorName,kind,amount,remaining,priority,note,payload.createdAt,payload.createdAt); return;
+    }
+    if (payload.action === 'capital.contribution-updated') { const remaining=integerField(payload.details,'remainingStockValueCents'); if (remaining===null) throw new Error('Atualização de aporte remoto inválida.'); database.sqlite.prepare('UPDATE capital_contributions SET remaining_stock_value_cents = ?, updated_at = ? WHERE id = ?').run(remaining,payload.createdAt,payload.entityId); return; }
+    if (payload.action === 'capital.reimbursed') { const contributionId=stringField(payload.details,'contributionId'); const method=stringField(payload.details,'method'); const amount=integerField(payload.details,'amountCents'); const note=payload.details.note === null ? null : stringField(payload.details,'note'); if (contributionId===null || amount===null || (method!=='cash' && method!=='pix' && method!=='credit-card' && method!=='debit-card')) throw new Error('Reembolso remoto inválido.'); database.sqlite.prepare('INSERT OR IGNORE INTO capital_reimbursements (id,contribution_id,event_id,method,amount_cents,cash_register_id,note,created_at) VALUES (?,?,?,?,?,NULL,?,?)').run(payload.entityId,contributionId,eventId,method,amount,note,payload.createdAt); return; }
+    throw new Error(`Ação de aporte sem aplicador: ${payload.action}.`);
+  }
+
+  #applyRemoteOrderCancellation(database: DatabaseContext, eventId: string, payload: JournalPayload): void {
+    if (payload.entityId === null) throw new Error('Cancelamento remoto sem comanda.');
+    const order=database.sqlite.prepare('SELECT status FROM orders WHERE id = ? AND event_id = ?').get(payload.entityId,eventId) as {status:string}|undefined;
+    if (order === undefined || order.status === 'cancelled') return;
+    const rows=database.sqlite.prepare("SELECT product_id, SUM(quantity) AS quantity FROM stock_movements WHERE event_id = ? AND type = 'sale' AND note = ? GROUP BY product_id").all(eventId,`Venda da comanda ${payload.entityId}`) as Array<{product_id:string;quantity:number}>;
+    for (const row of rows) { database.sqlite.prepare('UPDATE event_stock SET quantity = quantity + ?, updated_at = ? WHERE event_id = ? AND product_id = ?').run(row.quantity,payload.createdAt,eventId,row.product_id); database.sqlite.prepare("INSERT INTO stock_movements (id,event_id,product_id,type,quantity,delta,note,created_at) VALUES (?,?,?,?,?,?,?,?)").run(randomUUID(),eventId,row.product_id,'return',row.quantity,row.quantity,`Estorno da comanda ${payload.entityId}`,payload.createdAt); }
+    const refunds=Array.isArray(payload.details.refunds)?payload.details.refunds:[];
+    for (const raw of refunds) { if (!isRecord(raw)) continue; const method=stringField(raw,'method'); const amount=integerField(raw,'amountCents'); if (amount===null || (method!=='cash'&&method!=='pix'&&method!=='credit-card'&&method!=='debit-card')) continue; database.sqlite.prepare('INSERT INTO order_refunds (id,order_id,event_id,method,amount_cents,cash_register_id,note,created_at) VALUES (?,?,?,?,?,NULL,?,?)').run(randomUUID(),payload.entityId,eventId,method,amount,stringField(payload.details,'reason'),payload.createdAt); }
+    database.sqlite.prepare("UPDATE orders SET status = 'cancelled', closed_at = ?, updated_at = ? WHERE id = ?").run(payload.createdAt,payload.createdAt,payload.entityId);
   }
 
   #applyRemoteCash(database: DatabaseContext, eventId: string, payload: JournalPayload): void {

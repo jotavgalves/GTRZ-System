@@ -63,6 +63,8 @@ interface PaymentRow {
   readonly amount_cents: number;
   readonly received_cents: number | null;
   readonly change_cents: number;
+  readonly fee_rate_basis_points: number | null;
+  readonly fee_cents: number | null;
   readonly created_at: number;
 }
 
@@ -119,6 +121,8 @@ function mapPayment(row: PaymentRow): DatabasePayment {
     amountCents: row.amount_cents,
     receivedCents: row.received_cents,
     changeCents: row.change_cents,
+    feeRateBasisPoints: row.fee_rate_basis_points,
+    feeCents: row.fee_cents,
     createdAt: row.created_at,
   };
 }
@@ -142,7 +146,7 @@ export function listOrderItems(
 function listPayments(database: DatabaseContext, orderId: string): readonly DatabasePayment[] {
   const rows = database.sqlite
     .prepare(
-      `SELECT id, order_id, method, amount_cents, received_cents, change_cents, created_at
+      `SELECT id, order_id, method, amount_cents, received_cents, change_cents, fee_rate_basis_points, fee_cents, created_at
        FROM payments
        WHERE order_id = ?
        ORDER BY created_at, id`,

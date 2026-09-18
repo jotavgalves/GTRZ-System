@@ -2,8 +2,8 @@ import { useCallback, useEffect, useState } from 'react';
 
 import type {
   CreateExpenseInput,
-  ExpensePaymentStatus,
   ExpenseState,
+  RecordExpensePaymentInput,
   UpdateExpenseInput,
 } from '@gtrz/contracts';
 
@@ -18,10 +18,7 @@ interface ExpenseViewState {
   readonly reload: () => Promise<void>;
   readonly createExpense: (input: CreateExpenseInput) => Promise<void>;
   readonly updateExpense: (input: UpdateExpenseInput) => Promise<void>;
-  readonly updatePaymentStatus: (
-    expenseId: string,
-    paymentStatus: ExpensePaymentStatus,
-  ) => Promise<void>;
+  readonly recordPayment: (input: RecordExpensePaymentInput) => Promise<void>;
   readonly cancelExpense: (expenseId: string, reason: string) => Promise<void>;
   readonly deleteExpense: (expenseId: string, reason: string) => Promise<void>;
 }
@@ -81,15 +78,9 @@ export function useExpenses(): ExpenseViewState {
     [run],
   );
 
-  const updatePaymentStatus = useCallback(
-    async (expenseId: string, paymentStatus: ExpensePaymentStatus): Promise<void> => {
-      await run(
-        () => window.gtrz.expenses.updatePaymentStatus({ expenseId, paymentStatus }),
-        'Situação da despesa atualizada.',
-      );
-    },
-    [run],
-  );
+  const recordPayment = useCallback(async (input: RecordExpensePaymentInput): Promise<void> => {
+    await run(() => window.gtrz.expenses.recordPayment(input), 'Pagamento registrado no livro financeiro.');
+  }, [run]);
 
   const updateExpense = useCallback(
     async (input: UpdateExpenseInput): Promise<void> => {
@@ -124,7 +115,7 @@ export function useExpenses(): ExpenseViewState {
     reload,
     createExpense,
     updateExpense,
-    updatePaymentStatus,
+    recordPayment,
     cancelExpense,
     deleteExpense,
   };

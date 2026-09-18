@@ -21,6 +21,8 @@ export interface DatabaseExpense {
   readonly createdAt: number;
   readonly cancelledAt: number | null;
   readonly updatedAt: number;
+  readonly paidCents: number;
+  readonly outstandingCents: number;
 }
 
 export interface DatabaseExpenseState {
@@ -64,7 +66,17 @@ function normalizeOptionalText(value?: string): string | null {
   return normalized === undefined || normalized.length === 0 ? null : normalized;
 }
 
-function mapExpense(row: ExpenseRow): DatabaseExpense {
+function paidCents(database: DatabaseContext, expenseId: string): number {
+  const row = database.sqlite.prepare('SELECT COALESCE(SUM(amount_cents), 0) AS value FROM expense_payments WHERE expense_id = ?').get(expenseId) as { value: number };
+  return row.value;
+}
+
+function derivedStatus(amountCents: number, paid: number): DatabaseExpensePaymentStatus {
+  return paid <= 0 ? 'open' : paid >= amountCents ? 'paid' : 'partial';
+}
+
+function mapExpense(database: DatabaseContext, row: ExpenseRow): DatabaseExpense {
+  const paid = paidCents(database, row.id);
   return {
     id: row.id,
     eventId: row.event_id,
@@ -74,10 +86,12 @@ function mapExpense(row: ExpenseRow): DatabaseExpense {
     paymentMethod: row.payment_method,
     note: row.note,
     status: row.status,
-    paymentStatus: row.payment_status,
+    paymentStatus: derivedStatus(row.amount_cents, paid),
     createdAt: row.created_at,
     cancelledAt: row.cancelled_at,
     updatedAt: row.updated_at,
+    paidCents: paid,
+    outstandingCents: Math.max(row.amount_cents - paid, 0),
   };
 }
 
@@ -115,7 +129,7 @@ export function getExpenseState(database: DatabaseContext): DatabaseExpenseState
                 updated_at DESC`,
     )
     .all(eventId) as ExpenseRow[];
-  return { activeEventId: eventId, expenses: rows.map(mapExpense) };
+  return { activeEventId: eventId, expenses: rows.map((row) => mapExpense(database, row)) };
 }
 
 export function createExpense(
@@ -140,7 +154,7 @@ export function createExpense(
   const category = input.category.trim();
   const description = input.description.trim();
   const note = normalizeOptionalText(input.note);
-  const paymentStatus = input.paymentStatus ?? 'open';
+  const paymentStatus = 'open';
   const now = Date.now();
 
   database.sqlite.transaction(() => {
@@ -179,7 +193,7 @@ export function createExpense(
     });
   })();
 
-  return mapExpense(requireExpense(database, expenseId));
+  return mapExpense(database, requireExpense(database, expenseId));
 }
 
 export function updateExpensePaymentStatus(
@@ -198,30 +212,26 @@ export function updateExpensePaymentStatus(
     throw new Error('Não é possível alterar o pagamento de uma despesa cancelada.');
   }
 
-  if (expense.payment_status === input.paymentStatus) {
-    return mapExpense(expense);
-  }
+  const actual = derivedStatus(expense.amount_cents, paidCents(database, expense.id));
+  if (actual !== input.paymentStatus) throw new Error('A situação é calculada pelos pagamentos registrados. Registre um pagamento real para alterá-la.');
+  return mapExpense(database, expense);
+}
 
-  const now = Date.now();
+export function recordExpensePayment(database: DatabaseContext, input: { readonly expenseId: string; readonly method: DatabasePaymentMethod; readonly amountCents: number; readonly note?: string }): DatabaseExpense {
+  requireProduction(database); const eventId = requireActiveEvent(database); const expense = requireExpense(database, input.expenseId);
+  if (expense.event_id !== eventId || expense.status === 'cancelled') throw new Error('A despesa informada não está disponível para pagamento.');
+  if (!Number.isInteger(input.amountCents) || input.amountCents <= 0) throw new Error('O pagamento deve ser positivo.');
+  const current = paidCents(database, expense.id); if (current + input.amountCents > expense.amount_cents) throw new Error('O pagamento não pode superar o valor pendente da despesa.');
+  const register = input.method === 'cash' ? database.sqlite.prepare("SELECT id FROM cash_registers WHERE event_id = ? AND status = 'open'").get(eventId) as { id: string } | undefined : undefined;
+  if (input.method === 'cash' && register === undefined) throw new Error('Abra o caixa antes de registrar uma despesa em dinheiro.');
+  const id=randomUUID(), now=Date.now(), normalizedNote=normalizeOptionalText(input.note);
   database.sqlite.transaction(() => {
-    database.sqlite
-      .prepare('UPDATE expenses SET payment_status = ?, updated_at = ? WHERE id = ?')
-      .run(input.paymentStatus, now, expense.id);
-    appendAudit(database, {
-      action: 'expense.payment-status-changed',
-      entityType: 'expense',
-      entityId: expense.id,
-      eventId,
-      details: {
-        after: input.paymentStatus,
-        before: expense.payment_status,
-        amountCents: expense.amount_cents,
-        description: expense.description,
-      },
-    });
+    database.sqlite.prepare('INSERT INTO expense_payments (id, expense_id, event_id, method, amount_cents, cash_register_id, note, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(id,expense.id,eventId,input.method,input.amountCents,register?.id ?? null,normalizedNote,now);
+    const after=derivedStatus(expense.amount_cents,current + input.amountCents);
+    database.sqlite.prepare('UPDATE expenses SET payment_status = ?, updated_at = ? WHERE id = ?').run(after,now,expense.id);
+    appendAudit(database,{action:'expense.payment-recorded',entityType:'expense-payment',entityId:id,eventId,details:{expenseId:expense.id,description:expense.description,method:input.method,amountCents:input.amountCents,note:normalizedNote,cashRegisterId:register?.id ?? null,paymentStatus:after}});
   })();
-
-  return mapExpense(requireExpense(database, expense.id));
+  return mapExpense(database, requireExpense(database, expense.id));
 }
 
 export function updateExpense(
@@ -301,7 +311,7 @@ export function updateExpense(
     });
   })();
 
-  return mapExpense(requireExpense(database, expense.id));
+  return mapExpense(database, requireExpense(database, expense.id));
 }
 
 export function cancelExpense(
@@ -343,7 +353,7 @@ export function cancelExpense(
     });
   })();
 
-  return mapExpense(requireExpense(database, expense.id));
+  return mapExpense(database, requireExpense(database, expense.id));
 }
 
 export function deleteExpense(

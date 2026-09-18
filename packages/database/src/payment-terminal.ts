@@ -55,6 +55,12 @@ function calculateFee(amountCents: number, rateBasisPoints: number): number {
   return Math.round((amountCents * rateBasisPoints) / 10_000);
 }
 
+export function getPaymentFeeSnapshot(database: DatabaseContext, eventId: string, method: 'cash' | 'pix' | 'credit-card' | 'debit-card', amountCents: number): { readonly rateBasisPoints: number | null; readonly feeCents: number | null } {
+  if (method !== 'credit-card' && method !== 'debit-card') return { rateBasisPoints: null, feeCents: null };
+  const rateBasisPoints = readRate(database, eventId, method === 'credit-card' ? 'credit' : 'debit');
+  return { rateBasisPoints, feeCents: calculateFee(amountCents, rateBasisPoints) };
+}
+
 export function calculatePaymentTerminalFees(
   database: DatabaseContext,
   eventId: string,

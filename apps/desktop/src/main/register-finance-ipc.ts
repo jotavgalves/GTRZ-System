@@ -14,6 +14,12 @@ import {
   recordCashMovementInputSchema,
   updateExpenseInputSchema,
   updateExpensePaymentStatusInputSchema,
+  recordExpensePaymentInputSchema,
+  capitalContributionSchema,
+  capitalStateSchema,
+  createCapitalContributionInputSchema,
+  updateCapitalContributionInputSchema,
+  recordCapitalReimbursementInputSchema,
 } from '@gtrz/contracts';
 import {
   cancelExpense,
@@ -26,6 +32,11 @@ import {
   recordCashMovement,
   updateExpense,
   updateExpensePaymentStatus,
+  recordExpensePayment,
+  getCapitalState,
+  createCapitalContribution,
+  updateCapitalContribution,
+  recordCapitalReimbursement,
   type DatabaseContext,
 } from '@gtrz/database';
 
@@ -42,8 +53,13 @@ const FINANCE_CHANNELS = [
   IPC_CHANNELS.expensesCreate,
   IPC_CHANNELS.expensesUpdate,
   IPC_CHANNELS.expensesUpdatePaymentStatus,
+  IPC_CHANNELS.expensesRecordPayment,
   IPC_CHANNELS.expensesCancel,
   IPC_CHANNELS.expensesDelete,
+  IPC_CHANNELS.capitalGetState,
+  IPC_CHANNELS.capitalCreate,
+  IPC_CHANNELS.capitalUpdate,
+  IPC_CHANNELS.capitalReimburse,
 ] as const;
 
 export function registerFinanceIpcHandlers(options: RegisterFinanceIpcOptions): void {
@@ -112,6 +128,11 @@ export function registerFinanceIpcHandlers(options: RegisterFinanceIpcOptions): 
     return expenseSchema.parse(updateExpensePaymentStatus(options.getDatabase(), input));
   });
 
+  ipcMain.handle(IPC_CHANNELS.expensesRecordPayment, (_event, payload: unknown) => {
+    const input = recordExpensePaymentInputSchema.parse(payload);
+    return expenseSchema.parse(recordExpensePayment(options.getDatabase(), { expenseId: input.expenseId, method: input.method, amountCents: input.amountCents, ...(input.note === undefined ? {} : { note: input.note }) }));
+  });
+
   ipcMain.handle(IPC_CHANNELS.expensesCancel, (_event, payload: unknown) => {
     const input = cancelExpenseInputSchema.parse(payload);
     return expenseSchema.parse(cancelExpense(options.getDatabase(), input));
@@ -121,4 +142,9 @@ export function registerFinanceIpcHandlers(options: RegisterFinanceIpcOptions): 
     const input = deleteExpenseInputSchema.parse(payload);
     return expenseDeletionResultSchema.parse(deleteExpense(options.getDatabase(), input));
   });
+
+  ipcMain.handle(IPC_CHANNELS.capitalGetState, () => capitalStateSchema.parse(getCapitalState(options.getDatabase())));
+  ipcMain.handle(IPC_CHANNELS.capitalCreate, (_event, payload: unknown) => { const input=createCapitalContributionInputSchema.parse(payload); return capitalContributionSchema.parse(createCapitalContribution(options.getDatabase(), { contributorName:input.contributorName, kind:input.kind, amountCents:input.amountCents, ...(input.remainingStockValueCents === undefined ? {} : {remainingStockValueCents:input.remainingStockValueCents}), ...(input.recoveryPriority === undefined ? {} : {recoveryPriority:input.recoveryPriority}), ...(input.note === undefined ? {} : {note:input.note}) })); });
+  ipcMain.handle(IPC_CHANNELS.capitalUpdate, (_event, payload: unknown) => { const input=updateCapitalContributionInputSchema.parse(payload); return capitalContributionSchema.parse(updateCapitalContribution(options.getDatabase(), { contributionId:input.contributionId, remainingStockValueCents:input.remainingStockValueCents, ...(input.note === undefined ? {} : {note:input.note}) })); });
+  ipcMain.handle(IPC_CHANNELS.capitalReimburse, (_event, payload: unknown) => { const input=recordCapitalReimbursementInputSchema.parse(payload); return capitalStateSchema.parse(recordCapitalReimbursement(options.getDatabase(), { contributionId:input.contributionId, method:input.method, amountCents:input.amountCents, ...(input.note === undefined ? {} : {note:input.note}) })); });
 }

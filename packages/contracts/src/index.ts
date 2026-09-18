@@ -2,7 +2,7 @@ import { z } from 'zod';
 
 import type { ComboApi } from './combos';
 import type { EventCloseApi } from './event-close';
-import type { CashApi, ExpenseApi } from './finance';
+import type { CapitalApi, CashApi, ExpenseApi } from './finance';
 import type { AuditApi, DashboardApi } from './insights';
 import type { InventoryApi } from './inventory';
 import type { OperationsApi } from './operations';
@@ -88,8 +88,13 @@ export const IPC_CHANNELS = {
   expensesCreate: 'expenses:create',
   expensesUpdate: 'expenses:update',
   expensesUpdatePaymentStatus: 'expenses:update-payment-status',
+  expensesRecordPayment: 'expenses:record-payment',
   expensesCancel: 'expenses:cancel',
   expensesDelete: 'expenses:delete',
+  capitalGetState: 'capital:get-state',
+  capitalCreate: 'capital:create',
+  capitalUpdate: 'capital:update',
+  capitalReimburse: 'capital:reimburse',
   ticketsGetState: 'tickets:get-state',
   ticketsCreateLot: 'tickets:create-lot',
   ticketsUpdateLot: 'tickets:update-lot',
@@ -378,5 +383,6 @@ export interface GtrzDesktopApi {
   readonly vouchers: VoucherApi;
   readonly cash: CashApi;
   readonly expenses: ExpenseApi;
+  readonly capital: CapitalApi;
   readonly tickets: TicketApi;
 }

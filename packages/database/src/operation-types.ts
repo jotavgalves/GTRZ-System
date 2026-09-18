@@ -40,6 +40,8 @@ export interface DatabasePayment {
   readonly amountCents: number;
   readonly receivedCents: number | null;
   readonly changeCents: number;
+  readonly feeRateBasisPoints: number | null;
+  readonly feeCents: number | null;
   readonly createdAt: number;
 }
 

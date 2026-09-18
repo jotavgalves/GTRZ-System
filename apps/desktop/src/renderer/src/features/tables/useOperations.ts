@@ -246,8 +246,12 @@ export function useOperations(): OperationsViewState {
 
   const cancelOrder = useCallback(
     async (orderId: string, reason: string): Promise<void> => {
+      const paidOrder = state?.recentOrders.find((candidate) => candidate.id === orderId);
+      const refunds = paidOrder?.status === 'paid'
+        ? paidOrder.payments.map((payment) => ({ method: payment.method, amountCents: payment.amountCents }))
+        : undefined;
       await run(
-        () => window.gtrz.operations.cancelOrder({ orderId, reason }),
+        () => window.gtrz.operations.cancelOrder({ orderId, reason, ...(refunds === undefined ? {} : { refunds }) }),
         'Comanda cancelada e operação auditada.',
       );
 
@@ -256,7 +260,7 @@ export function useOperations(): OperationsViewState {
         setSelectedServicePoint(null);
       }
     },
-    [order?.id, run],
+    [order?.id, run, state?.recentOrders],
   );
 
   const reprintOrder = useCallback(async (orderId: string): Promise<void> => {

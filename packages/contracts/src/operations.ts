@@ -40,6 +40,8 @@ export const paymentSchema = z.object({
   amountCents: z.number().int().positive(),
   receivedCents: z.number().int().positive().nullable(),
   changeCents: z.number().int().nonnegative(),
+  feeRateBasisPoints: z.number().int().nonnegative().nullable(),
+  feeCents: z.number().int().nonnegative().nullable(),
   createdAt: z.number().int().nonnegative(),
 });
 
@@ -195,6 +197,7 @@ export const closeOrderInputSchema = z
 export const cancelOrderInputSchema = z.object({
   orderId: z.uuid(),
   reason: z.string().trim().min(3).max(240),
+  refunds: z.array(z.object({ method: paymentMethodSchema, amountCents: z.number().int().positive() })).optional(),
 });
 
 export type ServicePointType = z.infer<typeof servicePointTypeSchema>;

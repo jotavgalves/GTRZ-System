@@ -49,7 +49,7 @@ import {
 
 import { comboApi } from './combo-api';
 import { eventCloseApi } from './event-close-api';
-import { cashApi, expenseApi } from './finance-api';
+import { capitalApi, cashApi, expenseApi } from './finance-api';
 import { auditApi, dashboardApi } from './insights-api';
 import { inventoryApi } from './inventory-api';
 import { operationsApi } from './operations-api';
@@ -188,6 +188,7 @@ const api: GtrzDesktopApi = {
   vouchers: voucherApi,
   cash: cashApi,
   expenses: expenseApi,
+  capital: capitalApi,
   tickets: ticketApi,
 };
 

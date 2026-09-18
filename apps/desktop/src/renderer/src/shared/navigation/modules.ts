@@ -1,5 +1,6 @@
 import {
   ArchiveRestore,
+  BanknoteArrowUp,
   Boxes,
   ClipboardList,
   CreditCard,
@@ -72,6 +73,13 @@ export const navigationModules: readonly NavigationModule[] = [
     label: 'Despesas',
     path: '/despesas',
     icon: ReceiptText,
+    profiles: ['production'],
+  },
+  {
+    key: 'capital',
+    label: 'Aportes',
+    path: '/aportes',
+    icon: BanknoteArrowUp,
     profiles: ['production'],
   },
   {

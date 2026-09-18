@@ -8,6 +8,7 @@ import { stockSaleMigration } from './stock-sale-migration';
 import { syncMigration } from './sync-migration';
 import { syncInboxMigration } from './sync-inbox-migration';
 import { syncConflictMigration } from './sync-conflict-migration';
+import { financeLedgerMigration } from './finance-ledger-migration';
 import { syncRepairMigration } from './sync-repair-migration';
 import { ticketMigration } from './ticket-migration';
 import type { DatabaseContext } from './types';
@@ -305,6 +306,7 @@ const migrations: readonly Migration[] = [
   syncInboxMigration,
   syncRepairMigration,
   syncConflictMigration,
+  financeLedgerMigration,
 ];
 
 function ensureMigrationTable(sqlite: BetterSqlite3.Database): void {
@@ -375,6 +377,7 @@ export * from './control';
 export * from './event-close';
 export * from './event-deletion';
 export * from './expenses';
+export * from './capital';
 export * from './insights';
 export * from './inventory';
 export * from './operations';

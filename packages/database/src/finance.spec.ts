@@ -22,10 +22,10 @@ import {
   openDatabase,
   openOrder,
   recordCashMovement,
+  recordExpensePayment,
   recordStockMovement,
   switchProfile,
   updateExpense,
-  updateExpensePaymentStatus,
   type DatabaseContext,
 } from './index';
 import { createManagedVoucher } from './voucher-management';
@@ -111,6 +111,9 @@ describe('cash and expenses database', () => {
       amountCents: 300,
       paymentMethod: 'cash',
     });
+    const cashExpense = getExpenseState(database).expenses.find((expense) => expense.description === 'Gelo emergencial');
+    if (cashExpense === undefined) throw new Error('Despesa não criada.');
+    recordExpensePayment(database, { expenseId: cashExpense.id, method: 'cash', amountCents: 300 });
     createExpense(database, {
       category: 'Mídia',
       description: 'Impulsionamento',
@@ -138,7 +141,7 @@ describe('cash and expenses database', () => {
     database.close();
   });
 
-  it('mantém a despesa no resultado ao alternar entre aberto, parcial e pago', async () => {
+  it('mantém a despesa no resultado ao registrar pagamentos parciais e totais', async () => {
     const database = await createTemporaryDatabase();
     createEvent(database, { name: 'Evento situação despesa', startsAt: Date.now() });
     const expense = createExpense(database, {
@@ -151,17 +154,11 @@ describe('cash and expenses database', () => {
     expect(expense.paymentStatus).toBe('open');
     expect(getCashState(database).projectedResultCents).toBe(-1200);
 
-    const partial = updateExpensePaymentStatus(database, {
-      expenseId: expense.id,
-      paymentStatus: 'partial',
-    });
+    const partial = recordExpensePayment(database, { expenseId: expense.id, method: 'pix', amountCents: 400 });
     expect(partial.paymentStatus).toBe('partial');
     expect(getCashState(database).projectedResultCents).toBe(-1200);
 
-    const paid = updateExpensePaymentStatus(database, {
-      expenseId: expense.id,
-      paymentStatus: 'paid',
-    });
+    const paid = recordExpensePayment(database, { expenseId: expense.id, method: 'pix', amountCents: 800 });
     expect(paid.paymentStatus).toBe('paid');
     expect(getCashState(database).projectedResultCents).toBe(-1200);
     database.close();
@@ -184,7 +181,7 @@ describe('cash and expenses database', () => {
       description: 'Locação de gerador',
       amountCents: 1800,
       paymentMethod: 'credit-card',
-      paymentStatus: 'partial',
+      paymentStatus: 'open',
       note: 'Valor revisado',
     });
 
@@ -194,7 +191,7 @@ describe('cash and expenses database', () => {
       description: 'Locação de gerador',
       amountCents: 1800,
       paymentMethod: 'credit-card',
-      paymentStatus: 'partial',
+      paymentStatus: 'open',
       note: 'Valor revisado',
       status: 'active',
     });

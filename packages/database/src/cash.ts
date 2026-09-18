@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 
 import { appendAudit } from './audit';
+import { getCapitalState } from './capital';
 import { getSessionState } from './control';
 import { getTicketSalesByMethod } from './ticket-finance';
 import type { DatabaseContext } from './types';
@@ -46,7 +47,13 @@ export interface DatabaseCashState {
   readonly salesByMethod: DatabaseSalesByMethod;
   readonly grossSalesCents: number;
   readonly activeExpensesCents: number;
+  readonly paidExpensesCents: number;
+  readonly outstandingExpensesCents: number;
   readonly cashExpensesCents: number;
+  readonly cashRefundsCents: number;
+  readonly cashCapitalReimbursementsCents: number;
+  readonly recoverableCapitalCents: number;
+  readonly remainingStockAssetCents: number;
   readonly expectedCashCents: number;
   readonly projectedResultCents: number;
 }
@@ -190,19 +197,22 @@ function getExpenseTotals(
     .prepare(
       `SELECT
          COALESCE(SUM(amount_cents), 0) AS active_expenses_cents,
-         COALESCE(SUM(CASE WHEN payment_method = 'cash' THEN amount_cents ELSE 0 END), 0)
-           AS cash_expenses_cents
-       FROM expenses
-       WHERE event_id = ? AND status = 'active'`,
+         COALESCE(SUM((SELECT SUM(ep.amount_cents) FROM expense_payments ep WHERE ep.expense_id = expenses.id)), 0) AS paid_expenses_cents,
+         COALESCE(SUM((SELECT SUM(ep.amount_cents) FROM expense_payments ep WHERE ep.expense_id = expenses.id AND ep.method = 'cash')), 0) AS cash_expenses_cents
+       FROM expenses WHERE event_id = ? AND status = 'active'`,
     )
     .get(eventId) as {
     readonly active_expenses_cents: number;
-    readonly cash_expenses_cents: number;
+    readonly paid_expenses_cents: number; readonly cash_expenses_cents: number;
   };
   return {
     activeExpensesCents: row.active_expenses_cents,
     cashExpensesCents: row.cash_expenses_cents,
   };
+}
+
+function getCashRefundsCents(database: DatabaseContext, eventId: string): number {
+  return (database.sqlite.prepare("SELECT COALESCE(SUM(amount_cents), 0) AS value FROM order_refunds WHERE event_id = ? AND method = 'cash'").get(eventId) as { value: number }).value;
 }
 
 function getMovementTotals(
@@ -244,6 +254,9 @@ function calculateState(database: DatabaseContext, eventId: string): DatabaseCas
         ).map(mapMovement);
   const salesByMethod = getSalesByMethod(database, eventId);
   const expenses = getExpenseTotals(database, eventId);
+  const capital = getCapitalState(database);
+  const cashRefundsCents = getCashRefundsCents(database, eventId);
+  const paidExpensesCents = (database.sqlite.prepare(`SELECT COALESCE(SUM(ep.amount_cents), 0) AS value FROM expense_payments ep INNER JOIN expenses e ON e.id = ep.expense_id WHERE e.event_id = ? AND e.status = 'active'`).get(eventId) as {value:number}).value;
   const movementTotals = getMovementTotals(database, registerRow?.id ?? null);
   const openingCashCents = registerRow?.opening_cash_cents ?? 0;
   const expectedCashCents =
@@ -251,7 +264,7 @@ function calculateState(database: DatabaseContext, eventId: string): DatabaseCas
     salesByMethod.cashCents +
     movementTotals.supplyCents -
     movementTotals.withdrawalCents -
-    expenses.cashExpensesCents;
+    expenses.cashExpensesCents - capital.cashReimbursementsCents;
   const grossSalesCents =
     salesByMethod.cashCents +
     salesByMethod.pixCents +
@@ -282,7 +295,13 @@ function calculateState(database: DatabaseContext, eventId: string): DatabaseCas
     salesByMethod,
     grossSalesCents,
     activeExpensesCents: expenses.activeExpensesCents,
+    paidExpensesCents,
+    outstandingExpensesCents: Math.max(expenses.activeExpensesCents - paidExpensesCents, 0),
     cashExpensesCents: expenses.cashExpensesCents,
+    cashRefundsCents,
+    cashCapitalReimbursementsCents: capital.cashReimbursementsCents,
+    recoverableCapitalCents: capital.recoverableCents,
+    remainingStockAssetCents: capital.remainingStockAssetCents,
     expectedCashCents,
     projectedResultCents: grossSalesCents - expenses.activeExpensesCents,
   };
@@ -305,7 +324,13 @@ export function getCashState(database: DatabaseContext): DatabaseCashState {
       },
       grossSalesCents: 0,
       activeExpensesCents: 0,
+      paidExpensesCents: 0,
+      outstandingExpensesCents: 0,
       cashExpensesCents: 0,
+      cashRefundsCents: 0,
+      cashCapitalReimbursementsCents: 0,
+      recoverableCapitalCents: 0,
+      remainingStockAssetCents: 0,
       expectedCashCents: 0,
       projectedResultCents: 0,
     };
