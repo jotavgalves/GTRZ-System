@@ -1,0 +1,46 @@
+name: Publicar sincronizacao Cloudflare
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'apps/cloud-sync/**'
+      - 'packages/contracts/**'
+      - 'package-lock.json'
+      - 'package.json'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cloud-sync-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Validar e publicar Worker
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '22.23.1'
+          cache: npm
+
+      - name: Instalar dependencias
+        run: npm ci --ignore-scripts
+
+      - name: Validar Worker
+        run: npm run cloud:check
+
+      - name: Publicar Worker
+        run: npm run cloud:deploy
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
