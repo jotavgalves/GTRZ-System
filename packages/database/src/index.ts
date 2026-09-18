@@ -352,11 +352,28 @@ function ensureColumn(
   }
 }
 
+function tableColumns(sqlite: BetterSqlite3.Database, table: string): readonly string[] {
+  return (sqlite.pragma(`table_info(${table})`) as Array<{ readonly name: string }>).map(
+    (entry) => entry.name,
+  );
+}
+
 // A desktop can be interrupted while applying a schema update. These columns are
 // repaired independently so a partially created ledger never blocks startup.
 function repairFinanceLedgerColumns(sqlite: BetterSqlite3.Database): void {
   ensureColumn(sqlite, 'payments', 'fee_rate_basis_points', 'fee_rate_basis_points INTEGER');
   ensureColumn(sqlite, 'payments', 'fee_cents', 'fee_cents INTEGER');
+  ensureColumn(sqlite, 'expense_payments', 'method', 'method TEXT');
+  ensureColumn(sqlite, 'expense_payments', 'cash_register_id', 'cash_register_id TEXT');
+
+  const expensePaymentColumns = tableColumns(sqlite, 'expense_payments');
+  if (expensePaymentColumns.includes('payment_method')) {
+    sqlite.exec(`
+      UPDATE expense_payments
+      SET method = payment_method
+      WHERE method IS NULL OR method = ''
+    `);
+  }
 }
 
 export function openDatabase(filePath: string): DatabaseContext {

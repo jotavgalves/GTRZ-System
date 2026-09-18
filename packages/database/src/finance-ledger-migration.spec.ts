@@ -32,4 +32,36 @@ describe('finance ledger migration recovery', () => {
     expect(columns.map((column) => column.name)).toContain('fee_rate_basis_points');
     recovered.close();
   });
+
+  it('upgrades the first expense payment layout without losing its payment method', async () => {
+    directory = await mkdtemp(path.join(tmpdir(), 'gtrz-ledger-legacy-'));
+    const filePath = path.join(directory, 'legacy.sqlite');
+    const first = openDatabase(filePath);
+    first.sqlite.exec('DROP TABLE expense_payments');
+    first.sqlite.exec(`
+      CREATE TABLE expense_payments (
+        id TEXT PRIMARY KEY NOT NULL,
+        event_id TEXT NOT NULL,
+        expense_id TEXT NOT NULL,
+        payment_method TEXT NOT NULL,
+        amount_cents INTEGER NOT NULL,
+        note TEXT,
+        status TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        refunded_at INTEGER
+      );
+      INSERT INTO expense_payments
+      (id, event_id, expense_id, payment_method, amount_cents, note, status, created_at, refunded_at)
+      VALUES ('legacy-payment', 'event', 'expense', 'pix', 1250, NULL, 'confirmed', 1, NULL);
+    `);
+    first.close();
+
+    const recovered = openDatabase(filePath);
+    const payment = recovered.sqlite
+      .prepare('SELECT method, cash_register_id FROM expense_payments WHERE id = ?')
+      .get('legacy-payment') as { readonly method: string; readonly cash_register_id: string | null };
+
+    expect(payment).toEqual({ method: 'pix', cash_register_id: null });
+    recovered.close();
+  });
 });
