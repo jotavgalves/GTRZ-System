@@ -148,7 +148,15 @@ export function InventoryPage(): React.JSX.Element {
             {categories.length === 0 ? (
               <p className="inventory-helper">Crie uma categoria antes de cadastrar produtos.</p>
             ) : (
-              <ProductForm busy={busy} categories={categories} onSubmit={createProduct} />
+              <ProductForm
+                busy={busy}
+                categories={categories}
+                onExternalFoodSubmit={async (input) => {
+                  await window.gtrz.food.createExternalItem(input);
+                  await reload();
+                }}
+                onSubmit={createProduct}
+              />
             )}
           </article>
         </div>

@@ -1,8 +1,10 @@
 import { ImagePlus, PackagePlus, Save, X } from 'lucide-react';
-import { useState, type SyntheticEvent } from 'react';
+import { useEffect, useState, type SyntheticEvent } from 'react';
 
 import type {
   CreateProductInput,
+  CreateExternalFoodItemInput,
+  FoodState,
   InventoryProduct,
   ProductCategory,
   ProductFallbackIcon,
@@ -21,6 +23,7 @@ interface CreateProductFormProps extends ProductFormBaseProps {
   readonly product?: undefined;
   readonly onSubmit: (input: CreateProductInput) => Promise<void>;
   readonly onCancel?: undefined;
+  readonly onExternalFoodSubmit?: (input: CreateExternalFoodItemInput) => Promise<void>;
 }
 
 interface UpdateProductFormProps extends ProductFormBaseProps {
@@ -130,13 +133,60 @@ export function ProductForm(props: ProductFormProps): React.JSX.Element {
     props.product?.fallbackIcon ?? 'package',
   );
   const [error, setError] = useState<string | null>(null);
+  const [foodState, setFoodState] = useState<FoodState | null>(null);
+  const [supplierId, setSupplierId] = useState('');
+  const [supplierUnit, setSupplierUnit] = useState('');
+  const [commissionUnit, setCommissionUnit] = useState('');
+  const [initialQuantity, setInitialQuantity] = useState('');
   const selectedCategory = props.categories.find((category) => category.id === categoryId);
   const usesFoodEngine = selectedCategory?.engine === 'food';
+  const externalFood = usesFoodEngine && foodState?.supplierMode === 'external';
+
+  useEffect(() => {
+    if (!usesFoodEngine || props.product !== undefined) return;
+    void window.gtrz.food
+      .getState()
+      .then((next) => {
+        setFoodState(next);
+        setSupplierId(
+          (current) => current || next.suppliers.find((supplier) => supplier.active)?.id || '',
+        );
+      })
+      .catch(() => setFoodState(null));
+  }, [props.product, usesFoodEngine]);
 
   async function handleSubmit(event: SyntheticEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
     setError(null);
     try {
+      if (externalFood) {
+        if (props.product !== undefined || props.onExternalFoodSubmit === undefined)
+          throw new Error('Este item externo deve ser cadastrado pelo fluxo de estoque.');
+        const supplierUnitCents = inputToCents(supplierUnit);
+        const commissionUnitCents = inputToCents(commissionUnit);
+        const quantity = Number(initialQuantity);
+        if (!Number.isInteger(quantity) || quantity <= 0)
+          throw new Error('Informe a quantidade recebida.');
+        await props.onExternalFoodSubmit({
+          categoryId,
+          supplierId,
+          name,
+          supplierUnitCents,
+          commissionUnitCents,
+          initialQuantity: quantity,
+          comboOnly,
+        });
+        setName('');
+        setSupplierUnit('');
+        setCommissionUnit('');
+        setInitialQuantity('');
+        setComboOnly(false);
+        return;
+      }
+      if (usesFoodEngine && foodState?.supplierMode === null)
+        throw new Error(
+          'Configure na aba Comida se a GTRZ ou um parceiro fornece este evento antes de cadastrar o item.',
+        );
       const baseInput: CreateProductInput = {
         categoryId,
         name,
@@ -216,65 +266,131 @@ export function ProductForm(props: ProductFormProps): React.JSX.Element {
               ))}
           </select>
         </label>
-        <label className="form-field">
-          <span>Ícone sem foto</span>
-          <select
-            aria-label="Ícone do produto"
-            onChange={(event) => {
-              setFallbackIcon(event.target.value as ProductFallbackIcon);
-            }}
-            value={fallbackIcon}
-          >
-            {PRODUCT_ICON_OPTIONS.map((option) => (
-              <option key={option.value} value={option.value}>
-                {option.label}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label className="form-field">
-          <span>Preço de custo</span>
-          <input
-            inputMode="decimal"
-            min="0"
-            onChange={(event) => {
-              setCost(event.target.value);
-            }}
-            placeholder="0,00"
-            required
-            step="0.01"
-            type="number"
-            value={cost}
-          />
-        </label>
-        <label className="form-field">
-          <span>Preço de venda</span>
-          <input
-            inputMode="decimal"
-            min="0"
-            onChange={(event) => {
-              setSalePrice(event.target.value);
-            }}
-            placeholder="0,00"
-            required
-            step="0.01"
-            type="number"
-            value={salePrice}
-          />
-        </label>
-        <label className="form-field">
-          <span>Aviso de estoque baixo</span>
-          <input
-            min="0"
-            onChange={(event) => {
-              setLowStockThreshold(event.target.value);
-            }}
-            required
-            step="1"
-            type="number"
-            value={lowStockThreshold}
-          />
-        </label>
+        {externalFood ? (
+          <label className="form-field">
+            <span>Fornecedor</span>
+            <select
+              onChange={(event) => setSupplierId(event.target.value)}
+              required
+              value={supplierId}
+            >
+              <option value="">Selecione</option>
+              {foodState?.suppliers
+                .filter((supplier) => supplier.active)
+                .map((supplier) => (
+                  <option key={supplier.id} value={supplier.id}>
+                    {supplier.name}
+                  </option>
+                ))}
+            </select>
+          </label>
+        ) : (
+          <label className="form-field">
+            <span>Ícone sem foto</span>
+            <select
+              aria-label="Ícone do produto"
+              onChange={(event) => {
+                setFallbackIcon(event.target.value as ProductFallbackIcon);
+              }}
+              value={fallbackIcon}
+            >
+              {PRODUCT_ICON_OPTIONS.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
+        {externalFood ? (
+          <label className="form-field">
+            <span>Quantidade recebida</span>
+            <input
+              min="1"
+              onChange={(event) => setInitialQuantity(event.target.value)}
+              required
+              step="1"
+              type="number"
+              value={initialQuantity}
+            />
+          </label>
+        ) : (
+          <label className="form-field">
+            <span>Preço de custo</span>
+            <input
+              inputMode="decimal"
+              min="0"
+              onChange={(event) => {
+                setCost(event.target.value);
+              }}
+              placeholder="0,00"
+              required
+              step="0.01"
+              type="number"
+              value={cost}
+            />
+          </label>
+        )}
+        {externalFood ? (
+          <label className="form-field">
+            <span>Valor do fornecedor por un.</span>
+            <input
+              inputMode="decimal"
+              min="0"
+              onChange={(event) => setSupplierUnit(event.target.value)}
+              placeholder="0,00"
+              required
+              step="0.01"
+              type="number"
+              value={supplierUnit}
+            />
+          </label>
+        ) : (
+          <label className="form-field">
+            <span>Preço de venda</span>
+            <input
+              inputMode="decimal"
+              min="0"
+              onChange={(event) => {
+                setSalePrice(event.target.value);
+              }}
+              placeholder="0,00"
+              required
+              step="0.01"
+              type="number"
+              value={salePrice}
+            />
+          </label>
+        )}
+        {externalFood ? (
+          <label className="form-field">
+            <span>Comissão GTRZ por un.</span>
+            <input
+              inputMode="decimal"
+              min="0"
+              onChange={(event) => setCommissionUnit(event.target.value)}
+              placeholder="0,00"
+              required
+              step="0.01"
+              type="number"
+              value={commissionUnit}
+            />
+          </label>
+        ) : (
+          <label className="form-field">
+            <span>Aviso de estoque baixo</span>
+            <input
+              min="0"
+              onChange={(event) => {
+                setLowStockThreshold(event.target.value);
+              }}
+              required
+              step="1"
+              type="number"
+              value={lowStockThreshold}
+            />
+          </label>
+        )}
       </div>
 
       <div className="product-media-editor">
@@ -354,7 +470,13 @@ export function ProductForm(props: ProductFormProps): React.JSX.Element {
         )}
         <button
           className="button button--primary"
-          disabled={props.busy || categoryId.length === 0 || name.trim().length < 2}
+          disabled={
+            props.busy ||
+            categoryId.length === 0 ||
+            name.trim().length < 2 ||
+            (usesFoodEngine && foodState === null) ||
+            (externalFood && (supplierId.length === 0 || initialQuantity.length === 0))
+          }
           type="submit"
         >
           {props.product === undefined ? (
@@ -362,7 +484,11 @@ export function ProductForm(props: ProductFormProps): React.JSX.Element {
           ) : (
             <Save size={17} aria-hidden="true" />
           )}
-          {props.product === undefined ? 'Cadastrar produto' : 'Salvar alterações'}
+          {props.product === undefined
+            ? externalFood
+              ? 'Cadastrar comida e dar entrada'
+              : 'Cadastrar produto'
+            : 'Salvar alterações'}
         </button>
       </div>
     </form>
