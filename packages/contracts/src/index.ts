@@ -131,6 +131,7 @@ export const systemInfoSchema = z.object({
   version: z.string().min(1),
   platform: z.enum(['win32', 'linux', 'darwin']),
   databaseReady: z.boolean(),
+  environment: z.enum(['production', 'test']),
 });
 
 export const userProfileSchema = z.enum(['production', 'cashier']);

@@ -6,29 +6,64 @@
   "r2_buckets": [
     {
       "binding": "SYNC_AUDIT_ARCHIVE",
-      "bucket_name": "gtrz-sync-audit"
-    }
+      "bucket_name": "gtrz-sync-audit",
+    },
   ],
   "durable_objects": {
     "bindings": [
       {
         "name": "EVENT_ROOM",
-        "class_name": "EventRoom"
+        "class_name": "EventRoom",
       },
       {
         "name": "MONITOR_ROOM",
-        "class_name": "MonitorRoom"
-      }
-    ]
+        "class_name": "MonitorRoom",
+      },
+    ],
   },
   "migrations": [
     {
       "tag": "v1",
-      "new_sqlite_classes": ["EventRoom"]
+      "new_sqlite_classes": ["EventRoom"],
     },
     {
       "tag": "v2",
-      "new_sqlite_classes": ["MonitorRoom"]
-    }
-  ]
+      "new_sqlite_classes": ["MonitorRoom"],
+    },
+  ],
+  "env": {
+    "test": {
+      "r2_buckets": [
+        {
+          "binding": "SYNC_AUDIT_ARCHIVE",
+          "bucket_name": "gtrz-sync-test-audit",
+        },
+      ],
+      "durable_objects": {
+        "bindings": [
+          {
+            "name": "EVENT_ROOM",
+            "class_name": "EventRoom",
+          },
+          {
+            "name": "MONITOR_ROOM",
+            "class_name": "MonitorRoom",
+          },
+        ],
+      },
+      "migrations": [
+        {
+          "tag": "v1",
+          "new_sqlite_classes": ["EventRoom"],
+        },
+        {
+          "tag": "v2",
+          "new_sqlite_classes": ["MonitorRoom"],
+        },
+      ],
+      "vars": {
+        "GTRZ_ENVIRONMENT": "test",
+      },
+    },
+  },
 }

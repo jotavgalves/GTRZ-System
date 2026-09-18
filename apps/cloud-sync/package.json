@@ -4,8 +4,10 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "check": "tsc -b --pretty false && wrangler deploy --dry-run",
-    "deploy": "wrangler deploy"
+    "check": "tsc -b --pretty false && wrangler deploy --env= --dry-run",
+    "check:test": "tsc -b --pretty false && wrangler deploy --env test --dry-run",
+    "deploy": "wrangler deploy --env=",
+    "deploy:test": "wrangler deploy --env test"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "5.20260917.1",

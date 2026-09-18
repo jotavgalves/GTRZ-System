@@ -132,18 +132,29 @@ export function AppShell(): React.JSX.Element {
       <div className="workspace">
         <header className="topbar">
           <div>
-            <strong>{cloudStatus?.connection === 'connected' ? 'Operação conectada' : 'Operação local'}</strong>
+            <strong>
+              {systemInfo?.environment === 'test'
+                ? 'AMBIENTE DE TESTE'
+                : cloudStatus?.connection === 'connected'
+                  ? 'Operação conectada'
+                  : 'Operação local'}
+            </strong>
             <span>
-              {sessionLoading
-                ? 'Carregando sessão local'
-                : (sessionError ??
-                  (cloudStatus?.connection === 'connected'
-                    ? 'Canal Cloudflare autenticado'
-                    : 'Dados armazenados neste computador'))}
+              {systemInfo?.environment === 'test'
+                ? 'Banco, fila e nuvem isolados da operação oficial'
+                : sessionLoading
+                  ? 'Carregando sessão local'
+                  : (sessionError ??
+                    (cloudStatus?.connection === 'connected'
+                      ? 'Canal Cloudflare autenticado'
+                      : 'Dados armazenados neste computador'))}
             </span>
           </div>
 
           <div className="topbar-status" aria-live="polite">
+            {systemInfo?.environment === 'test' ? (
+              <span className="status-pill status-pill--test">Teste isolado</span>
+            ) : null}
             <span
               className={
                 cloudStatus?.connection === 'connected'

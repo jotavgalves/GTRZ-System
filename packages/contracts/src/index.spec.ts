@@ -18,6 +18,7 @@ describe('systemInfoSchema', () => {
       version: '0.1.0',
       platform: 'win32',
       databaseReady: true,
+      environment: 'production',
     });
 
     expect(result.databaseReady).toBe(true);
@@ -30,6 +31,7 @@ describe('systemInfoSchema', () => {
         version: '0.1.0',
         platform: 'android',
         databaseReady: true,
+        environment: 'production',
       }),
     ).toThrow();
   });

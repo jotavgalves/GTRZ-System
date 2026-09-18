@@ -17,7 +17,6 @@ import {
 } from '@gtrz/contracts';
 import type { DatabaseContext } from '@gtrz/database';
 
-const CLOUD_SYNC_ENDPOINT = 'https://gtrz-sync.jvgacontato.workers.dev';
 const CONNECTION_TIMEOUT_MS = 5_000;
 const HEARTBEAT_INTERVAL_MS = 15_000;
 const OUTBOX_INTERVAL_MS = 3_000;
@@ -165,6 +164,7 @@ export class CloudSyncService {
   readonly #pairingKeyPath: string;
   readonly #deviceIdPath: string;
   readonly #onDataChanged: () => void;
+  readonly #endpoint: string;
   #heartbeatTimer: NodeJS.Timeout | null = null;
   #outboxTimer: NodeJS.Timeout | null = null;
   #stream: WebSocket | null = null;
@@ -175,10 +175,12 @@ export class CloudSyncService {
     pairingKeyPath: string,
     deviceIdPath: string,
     onDataChanged: () => void = () => undefined,
+    endpoint = 'https://gtrz-sync.jvgacontato.workers.dev',
   ) {
     this.#pairingKeyPath = pairingKeyPath;
     this.#deviceIdPath = deviceIdPath;
     this.#onDataChanged = onDataChanged;
+    this.#endpoint = endpoint;
   }
 
   start(getActiveEventId: () => string | null): void {
@@ -239,7 +241,7 @@ export class CloudSyncService {
     for (const item of pending) {
       try {
         const response = await fetch(
-          `${CLOUD_SYNC_ENDPOINT}/v1/events/${encodeURIComponent(item.event_id)}/journal`,
+          `${this.#endpoint}/v1/events/${encodeURIComponent(item.event_id)}/journal`,
           {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', 'X-GTRZ-Key': pairingKey },
@@ -281,7 +283,7 @@ export class CloudSyncService {
     const pairingKey = await this.#readPairingKey();
 
     try {
-      const health = await fetch(`${CLOUD_SYNC_ENDPOINT}/health`, {
+      const health = await fetch(`${this.#endpoint}/health`, {
         signal: AbortSignal.timeout(CONNECTION_TIMEOUT_MS),
       });
 
@@ -318,7 +320,7 @@ export class CloudSyncService {
     }
 
     try {
-      const verification = await fetch(`${CLOUD_SYNC_ENDPOINT}/v1/verify`, {
+      const verification = await fetch(`${this.#endpoint}/v1/verify`, {
         headers: { 'X-GTRZ-Key': pairingKey },
         signal: AbortSignal.timeout(CONNECTION_TIMEOUT_MS),
       });
@@ -362,7 +364,7 @@ export class CloudSyncService {
 
     const deviceId = await this.#readOrCreateDeviceId();
     const startedAt = performance.now();
-    const heartbeat = await fetch(`${CLOUD_SYNC_ENDPOINT}/v1/monitor/heartbeat`, {
+    const heartbeat = await fetch(`${this.#endpoint}/v1/monitor/heartbeat`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-GTRZ-Key': pairingKey },
       body: JSON.stringify({
@@ -379,7 +381,7 @@ export class CloudSyncService {
       throw new Error('A API recusou o sinal deste computador.');
     }
 
-    const snapshot = await fetch(`${CLOUD_SYNC_ENDPOINT}/v1/monitor/snapshot`, {
+    const snapshot = await fetch(`${this.#endpoint}/v1/monitor/snapshot`, {
       headers: { 'X-GTRZ-Key': pairingKey },
       signal: AbortSignal.timeout(CONNECTION_TIMEOUT_MS),
     });
@@ -390,7 +392,7 @@ export class CloudSyncService {
 
     const payload: unknown = await snapshot.json();
     return cloudMonitorSchema.parse({
-      endpoint: CLOUD_SYNC_ENDPOINT,
+      endpoint: this.#endpoint,
       localQueue: {
         outboxPending: 0,
         outboxAccepted: 0,
@@ -408,7 +410,12 @@ export class CloudSyncService {
   }
 
   async listMobileOperators(): Promise<readonly MobileOperator[]> {
-    return this.#mobileOperatorRequest('/v1/mobile/operators', 'GET', undefined, mobileOperatorListSchema);
+    return this.#mobileOperatorRequest(
+      '/v1/mobile/operators',
+      'GET',
+      undefined,
+      mobileOperatorListSchema,
+    );
   }
 
   async createMobileOperator(input: CreateMobileOperatorInput): Promise<MobileOperator> {
@@ -425,7 +432,9 @@ export class CloudSyncService {
     );
   }
 
-  async endMobileOperatorSessions(input: EndMobileOperatorSessionsInput): Promise<{ readonly success: true }> {
+  async endMobileOperatorSessions(
+    input: EndMobileOperatorSessionsInput,
+  ): Promise<{ readonly success: true }> {
     await this.#mobileOperatorRequest(
       `/v1/mobile/operators/${encodeURIComponent(input.operatorId)}/sessions`,
       'POST',
@@ -435,7 +444,9 @@ export class CloudSyncService {
     return { success: true };
   }
 
-  async deleteMobileOperator(input: DeleteMobileOperatorInput): Promise<{ readonly success: true }> {
+  async deleteMobileOperator(
+    input: DeleteMobileOperatorInput,
+  ): Promise<{ readonly success: true }> {
     await this.#mobileOperatorRequest(
       `/v1/mobile/operators/${encodeURIComponent(input.operatorId)}`,
       'DELETE',
@@ -495,7 +506,7 @@ export class CloudSyncService {
     if (pairingKey === null) {
       throw new Error('A chave da nuvem não foi encontrada neste computador.');
     }
-    const response = await fetch(`${CLOUD_SYNC_ENDPOINT}${path}`, {
+    const response = await fetch(`${this.#endpoint}${path}`, {
       method,
       headers: {
         'Content-Type': 'application/json',
@@ -506,9 +517,10 @@ export class CloudSyncService {
     });
     const payload: unknown = await response.json().catch(() => null);
     if (!response.ok) {
-      const message = isRecord(payload) && isRecord(payload.error) && typeof payload.error.message === 'string'
-        ? payload.error.message
-        : 'A central não concluiu a alteração do operador móvel.';
+      const message =
+        isRecord(payload) && isRecord(payload.error) && typeof payload.error.message === 'string'
+          ? payload.error.message
+          : 'A central não concluiu a alteração do operador móvel.';
       throw new Error(message);
     }
     return schema === undefined ? (payload as TResult) : schema.parse(payload);
@@ -537,7 +549,7 @@ export class CloudSyncService {
     if (pairingKey === null) return;
 
     try {
-      await fetch(`${CLOUD_SYNC_ENDPOINT}/v1/monitor/conflict`, {
+      await fetch(`${this.#endpoint}/v1/monitor/conflict`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-GTRZ-Key': pairingKey },
         body: JSON.stringify({ ...conflict, createdAt: Date.now() }),
@@ -597,7 +609,7 @@ export class CloudSyncService {
     if (current?.value === fingerprint) return;
 
     const response = await fetch(
-      `${CLOUD_SYNC_ENDPOINT}/v1/events/${encodeURIComponent(activeEventId)}/cashier/catalog`,
+      `${this.#endpoint}/v1/events/${encodeURIComponent(activeEventId)}/cashier/catalog`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-GTRZ-Key': pairingKey },
@@ -702,7 +714,7 @@ export class CloudSyncService {
     }
 
     const cursor = this.#getInboxCursor(database, activeEventId);
-    const streamUrl = `${CLOUD_SYNC_ENDPOINT.replace(/^https:/u, 'wss:').replace(/^http:/u, 'ws:')}/v1/events/${encodeURIComponent(activeEventId)}/stream?after=${String(cursor)}`;
+    const streamUrl = `${this.#endpoint.replace(/^https:/u, 'wss:').replace(/^http:/u, 'ws:')}/v1/events/${encodeURIComponent(activeEventId)}/stream?after=${String(cursor)}`;
     const stream = new WebSocket(streamUrl, {
       headers: { 'X-GTRZ-Key': pairingKey, 'X-GTRZ-Device-Id': deviceId },
       handshakeTimeout: CONNECTION_TIMEOUT_MS,
@@ -798,7 +810,7 @@ export class CloudSyncService {
     for (const eventId of eventIds) {
       const after = this.#getInboxCursor(database, eventId);
       const response = await fetch(
-        `${CLOUD_SYNC_ENDPOINT}/v1/events/${encodeURIComponent(eventId)}/snapshot?after=${String(after)}`,
+        `${this.#endpoint}/v1/events/${encodeURIComponent(eventId)}/snapshot?after=${String(after)}`,
         {
           headers: { 'X-GTRZ-Key': pairingKey },
           signal: AbortSignal.timeout(CONNECTION_TIMEOUT_MS),
@@ -2018,6 +2030,6 @@ export class CloudSyncService {
   }
 
   #status(status: Omit<CloudSyncStatus, 'endpoint'>): CloudSyncStatus {
-    return { endpoint: CLOUD_SYNC_ENDPOINT, ...status };
+    return { endpoint: this.#endpoint, ...status };
   }
 }

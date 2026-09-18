@@ -48,6 +48,7 @@ import {
 
 import type { BackupService } from './backup-service';
 import type { CloudSyncService } from './cloud-sync-service';
+import type { RuntimeEnvironment } from './runtime-environment';
 import { registerComboIpcHandlers } from './register-combo-ipc';
 import { registerEventCloseIpcHandlers } from './register-event-close-ipc';
 import { registerFoodIpcHandlers } from './register-food-ipc';
@@ -65,6 +66,7 @@ interface RegisterIpcOptions {
   readonly databaseReady: () => boolean;
   readonly backupService: BackupService;
   readonly cloudSyncService: CloudSyncService;
+  readonly runtimeEnvironment: RuntimeEnvironment;
 }
 
 const CONTROL_CHANNELS = [
@@ -108,6 +110,7 @@ export function registerIpcHandlers(options: RegisterIpcOptions): void {
       version: app.getVersion(),
       platform: process.platform,
       databaseReady: options.databaseReady(),
+      environment: options.runtimeEnvironment,
     });
   });
 
@@ -204,15 +207,20 @@ export function registerIpcHandlers(options: RegisterIpcOptions): void {
     options.cloudSyncService.updateMobileOperator(updateMobileOperatorInputSchema.parse(payload)),
   );
 
-  ipcMain.handle(IPC_CHANNELS.settingsEndMobileOperatorSessions, async (_event, payload: unknown) => {
-    await options.cloudSyncService.endMobileOperatorSessions(
-      endMobileOperatorSessionsInputSchema.parse(payload),
-    );
-    return operationResultSchema.parse({ success: true });
-  });
+  ipcMain.handle(
+    IPC_CHANNELS.settingsEndMobileOperatorSessions,
+    async (_event, payload: unknown) => {
+      await options.cloudSyncService.endMobileOperatorSessions(
+        endMobileOperatorSessionsInputSchema.parse(payload),
+      );
+      return operationResultSchema.parse({ success: true });
+    },
+  );
 
   ipcMain.handle(IPC_CHANNELS.settingsDeleteMobileOperator, async (_event, payload: unknown) => {
-    await options.cloudSyncService.deleteMobileOperator(deleteMobileOperatorInputSchema.parse(payload));
+    await options.cloudSyncService.deleteMobileOperator(
+      deleteMobileOperatorInputSchema.parse(payload),
+    );
     return operationResultSchema.parse({ success: true });
   });
 

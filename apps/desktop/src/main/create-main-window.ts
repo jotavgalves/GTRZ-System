@@ -10,7 +10,13 @@ function getWindowIconPath(): string {
     : path.join(mainDirectory, '../../resources/icon.png');
 }
 
-export function createMainWindow(): BrowserWindow {
+interface CreateMainWindowOptions {
+  readonly title?: string;
+}
+
+export function createMainWindow({
+  title = 'GTRZ System',
+}: CreateMainWindowOptions = {}): BrowserWindow {
   const window = new BrowserWindow({
     width: 1440,
     height: 900,
@@ -19,7 +25,7 @@ export function createMainWindow(): BrowserWindow {
     show: false,
     backgroundColor: '#09090b',
     autoHideMenuBar: true,
-    title: 'GTRZ System',
+    title,
     icon: getWindowIconPath(),
     webPreferences: {
       preload: path.join(mainDirectory, '../preload/index.cjs'),
