@@ -1,45 +1,20 @@
 import type { DatabaseContext } from './types';
 
 interface StockCostRow {
-  readonly cost_cents: number;
-  readonly current_units: number;
-  readonly consumed_units: number;
+  readonly total_cost_cents: number;
 }
 
 export function getEventStockCostCents(database: DatabaseContext, eventId: string): number {
   const rows = database.sqlite
     .prepare(
-      `SELECT
-         p.cost_cents,
-         COALESCE((
-           SELECT es.quantity
-           FROM event_stock es
-           WHERE es.event_id = ? AND es.product_id = p.id
-         ), 0) AS current_units,
-         COALESCE((
-           SELECT SUM(
-             CASE sm.type
-               WHEN 'sale' THEN sm.quantity
-               WHEN 'return' THEN -sm.quantity
-               ELSE 0
-             END
-           )
-           FROM stock_movements sm
-           WHERE sm.event_id = ? AND sm.product_id = p.id
-         ), 0) AS consumed_units
-       FROM products p
-       WHERE EXISTS (
-         SELECT 1 FROM event_stock es
-         WHERE es.event_id = ? AND es.product_id = p.id
-       ) OR EXISTS (
-         SELECT 1 FROM stock_movements sm
-         WHERE sm.event_id = ? AND sm.product_id = p.id
-       )`,
+      `SELECT COALESCE(SUM(COALESCE(lot.total_cost_cents, sm.quantity * p.cost_cents)), 0)
+         AS total_cost_cents
+       FROM stock_movements sm
+       INNER JOIN products p ON p.id = sm.product_id
+       LEFT JOIN stock_purchase_lots lot ON lot.movement_id = sm.id
+       WHERE sm.event_id = ? AND sm.type = 'purchase'`,
     )
-    .all(eventId, eventId, eventId, eventId) as StockCostRow[];
+    .all(eventId) as StockCostRow[];
 
-  return rows.reduce((total, row) => {
-    const assignedUnits = Math.max(row.current_units + row.consumed_units, 0);
-    return total + assignedUnits * row.cost_cents;
-  }, 0);
+  return rows.reduce((total, row) => total + row.total_cost_cents, 0);
 }

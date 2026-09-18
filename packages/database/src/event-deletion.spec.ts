@@ -112,7 +112,7 @@ describe('permanent event deletion', () => {
     database.close();
   });
 
-  it('preserva custo do estoque recebido por outro evento ao excluir a origem', async () => {
+  it('mantém o custo da compra no evento de origem após transferir o estoque', async () => {
     const database = await createTemporaryDatabase();
     const source = createEvent(database, { name: 'Origem removível', startsAt: Date.now() });
     const category = createProductCategory(database, 'Transferência preservada');
@@ -136,8 +136,8 @@ describe('permanent event deletion', () => {
       quantity: 4,
     });
 
-    expect(getEventStockCostCents(database, source.id)).toBe(1200);
-    expect(getEventStockCostCents(database, destination.id)).toBe(800);
+    expect(getEventStockCostCents(database, source.id)).toBe(2000);
+    expect(getEventStockCostCents(database, destination.id)).toBe(0);
 
     deleteEventPermanently(database, {
       eventId: source.id,
@@ -151,7 +151,7 @@ describe('permanent event deletion', () => {
         .prepare('SELECT quantity FROM event_stock WHERE event_id = ? AND product_id = ?')
         .get(destination.id, product.id),
     ).toEqual({ quantity: 4 });
-    expect(getEventStockCostCents(database, destination.id)).toBe(800);
+    expect(getEventStockCostCents(database, destination.id)).toBe(0);
     expect(verifyDatabaseIntegrity(database)).toBe(true);
     database.close();
   });

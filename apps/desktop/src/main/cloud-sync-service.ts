@@ -914,6 +914,7 @@ export class CloudSyncService {
       const type = stringField(payload.details, 'type');
       const quantity = integerField(payload.details, 'quantity');
       const delta = integerField(payload.details, 'delta');
+      const purchaseTotalCents = integerField(payload.details, 'purchaseTotalCents');
       const note = payload.details.note === null ? null : stringField(payload.details, 'note');
       if (
         payload.entityId === null ||
@@ -957,6 +958,19 @@ export class CloudSyncService {
            VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(payload.entityId, eventId, productId, type, quantity, delta, note, payload.createdAt);
+      if (type === 'purchase') {
+        const product = database.sqlite
+          .prepare('SELECT cost_cents FROM products WHERE id = ?')
+          .get(productId) as { readonly cost_cents: number };
+        const totalCostCents = purchaseTotalCents ?? product.cost_cents * quantity;
+        database.sqlite
+          .prepare(
+            `INSERT OR IGNORE INTO stock_purchase_lots
+             (movement_id, event_id, product_id, quantity, total_cost_cents, created_at)
+             VALUES (?, ?, ?, ?, ?, ?)`,
+          )
+          .run(payload.entityId, eventId, productId, quantity, totalCostCents, payload.createdAt);
+      }
       return;
     }
 

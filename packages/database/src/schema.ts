@@ -87,6 +87,21 @@ export const stockMovements = sqliteTable('stock_movements', {
   createdAt: integer('created_at', { mode: 'timestamp_ms' }).notNull(),
 });
 
+export const stockPurchaseLots = sqliteTable('stock_purchase_lots', {
+  movementId: text('movement_id')
+    .primaryKey()
+    .references(() => stockMovements.id, { onDelete: 'cascade', onUpdate: 'cascade' }),
+  eventId: text('event_id')
+    .notNull()
+    .references(() => events.id, { onDelete: 'restrict', onUpdate: 'cascade' }),
+  productId: text('product_id')
+    .notNull()
+    .references(() => products.id, { onDelete: 'restrict', onUpdate: 'cascade' }),
+  quantity: integer('quantity').notNull(),
+  totalCostCents: integer('total_cost_cents').notNull(),
+  createdAt: integer('created_at', { mode: 'timestamp_ms' }).notNull(),
+});
+
 export const stockTransfers = sqliteTable('stock_transfers', {
   id: text('id').primaryKey(),
   productId: text('product_id')

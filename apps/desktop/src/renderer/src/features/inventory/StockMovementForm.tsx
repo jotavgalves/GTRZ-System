@@ -7,6 +7,15 @@ import type {
   StockMovementType,
 } from '@gtrz/contracts';
 
+function parseMoney(value: string): number {
+  const amount = Number(value.trim().replace(',', '.'));
+  return Number.isFinite(amount) ? Math.round(amount * 100) : 0;
+}
+
+function formatMoney(cents: number): string {
+  return new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(cents / 100);
+}
+
 interface StockMovementFormProps {
   readonly product: InventoryProduct;
   readonly intent: 'entry' | 'decrease';
@@ -39,6 +48,7 @@ export function StockMovementForm({
   const movements = intent === 'entry' ? ENTRY_MOVEMENTS : DECREASE_MOVEMENTS;
   const [type, setType] = useState<StockMovementType>(movements[0]?.value ?? 'purchase');
   const [quantity, setQuantity] = useState('1');
+  const [purchaseTotal, setPurchaseTotal] = useState('');
   const [note, setNote] = useState('');
   const [error, setError] = useState<string | null>(null);
   const parsedQuantity = Number(quantity);
@@ -61,10 +71,15 @@ export function StockMovementForm({
           `A baixa não pode ultrapassar o saldo atual de ${String(product.quantity)} unidades.`,
         );
       }
+      const purchaseTotalCents = parseMoney(purchaseTotal);
+      if (type === 'purchase' && purchaseTotalCents <= 0) {
+        throw new Error('Informe o valor total pago nesta compra.');
+      }
       const input: RecordStockMovementInput = {
         productId: product.id,
         type,
         quantity: parsedQuantity,
+        ...(type === 'purchase' ? { purchaseTotalCents } : {}),
         ...(note.trim().length === 0 ? {} : { note: note.trim() }),
       };
       await onSubmit(input);
@@ -123,7 +138,26 @@ export function StockMovementForm({
             value={quantity}
           />
         </label>
+        {type === 'purchase' ? (
+          <label className="form-field">
+            <span>Valor total pago</span>
+            <input
+              inputMode="decimal"
+              onChange={(event) => {
+                setPurchaseTotal(event.target.value);
+              }}
+              placeholder="0,00"
+              required
+              value={purchaseTotal}
+            />
+          </label>
+        ) : null}
       </div>
+      {type === 'purchase' && Number.isInteger(parsedQuantity) && parsedQuantity > 0 && parseMoney(purchaseTotal) > 0 ? (
+        <p className="form-hint">
+          Lote criado automaticamente: {formatMoney(parseMoney(purchaseTotal) / parsedQuantity)} por unidade.
+        </p>
+      ) : null}
       {type === 'correction-negative' ? (
         <p className="form-hint">
           Correção negativa desfaz uma entrada lançada a maior e também reduz o aporte líquido

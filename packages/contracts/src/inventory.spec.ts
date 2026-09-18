@@ -44,6 +44,20 @@ describe('inventory contracts', () => {
     ).toThrow();
   });
 
+  it('exige o valor total quando a entrada é uma compra', () => {
+    const base = {
+      productId: '85ffbb3f-6d4c-43d3-b615-e437fd5d88f4',
+      type: 'purchase' as const,
+      quantity: 12,
+    };
+    expect(() => recordStockMovementInputSchema.parse(base)).toThrow(
+      'Informe o valor total pago nesta compra.',
+    );
+    expect(recordStockMovementInputSchema.parse({ ...base, purchaseTotalCents: 3_600 })).toMatchObject({
+      purchaseTotalCents: 3_600,
+    });
+  });
+
   it('aceita visão de Caixa sem informações financeiras', () => {
     expect(
       inventoryProductSchema.parse({

@@ -451,6 +451,7 @@ export function recordStockMovement(
     readonly productId: string;
     readonly type: DatabaseStockMovementType;
     readonly quantity: number;
+    readonly purchaseTotalCents?: number;
     readonly note?: string;
   },
 ): DatabaseInventoryProduct {
@@ -469,6 +470,13 @@ export function recordStockMovement(
 
   const movementId = randomUUID();
   const now = Date.now();
+  const purchaseTotalCents =
+    input.type === 'purchase'
+      ? (input.purchaseTotalCents ?? requireProductRow(database, input.productId).cost_cents * input.quantity)
+      : null;
+  if (purchaseTotalCents !== null && (!Number.isInteger(purchaseTotalCents) || purchaseTotalCents <= 0)) {
+    throw new Error('O valor total da compra deve ser maior que zero.');
+  }
   const trimmedNote = input.note?.trim();
   const note = trimmedNote === undefined || trimmedNote.length === 0 ? null : trimmedNote;
   database.sqlite.transaction(() => {
@@ -487,6 +495,15 @@ export function recordStockMovement(
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(movementId, eventId, input.productId, input.type, input.quantity, delta, note, now);
+    if (purchaseTotalCents !== null) {
+      database.sqlite
+        .prepare(
+          `INSERT INTO stock_purchase_lots
+           (movement_id, event_id, product_id, quantity, total_cost_cents, created_at)
+           VALUES (?, ?, ?, ?, ?, ?)`,
+        )
+        .run(movementId, eventId, input.productId, input.quantity, purchaseTotalCents, now);
+    }
     appendAudit(database, {
       action: 'inventory.stock-moved',
       entityType: 'stock-movement',
@@ -498,6 +515,7 @@ export function recordStockMovement(
         delta,
         note,
         productId: input.productId,
+        purchaseTotalCents,
         type: input.type,
       },
     });

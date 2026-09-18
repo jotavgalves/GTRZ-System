@@ -200,7 +200,7 @@ describe('cash and expenses database', () => {
     database.close();
   });
 
-  it('não trata baixa excepcional de estoque como venda ou custo financeiro vendido', async () => {
+  it('mantém o custo integral da compra mesmo após baixas excepcionais', async () => {
     const database = await createTemporaryDatabase();
     createEvent(database, { name: 'Evento exceções de estoque', startsAt: Date.now() });
     const productId = seedProduct(database);
@@ -212,8 +212,8 @@ describe('cash and expenses database', () => {
 
     expect(getCashState(database)).toMatchObject({
       grossSalesCents: 0,
-      stockCostCents: 1000,
-      projectedResultCents: -1000,
+      stockCostCents: 2000,
+      projectedResultCents: -2000,
     });
     database.close();
   });

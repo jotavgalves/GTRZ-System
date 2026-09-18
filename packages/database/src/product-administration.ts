@@ -207,6 +207,7 @@ export function deleteInventoryProduct(
 
     database.sqlite.prepare('DELETE FROM combo_components WHERE product_id = ?').run(product.id);
     database.sqlite.prepare('DELETE FROM stock_transfers WHERE product_id = ?').run(product.id);
+    database.sqlite.prepare('DELETE FROM stock_purchase_lots WHERE product_id = ?').run(product.id);
     database.sqlite.prepare('DELETE FROM stock_movements WHERE product_id = ?').run(product.id);
     database.sqlite.prepare('DELETE FROM event_stock WHERE product_id = ?').run(product.id);
     clearProductPresentation(database, product.id);

@@ -105,19 +105,15 @@ export function registerInventoryIpcHandlers(options: RegisterInventoryIpcOption
   });
   ipcMain.handle(IPC_CHANNELS.inventoryRecordMovement, (_event, payload: unknown) => {
     const input = recordStockMovementInputSchema.parse(payload);
-    const movementInput =
-      input.note === undefined
-        ? {
-            productId: input.productId,
-            type: input.type,
-            quantity: input.quantity,
-          }
-        : {
-            productId: input.productId,
-            type: input.type,
-            quantity: input.quantity,
-            note: input.note,
-          };
+    const movementInput = {
+      productId: input.productId,
+      type: input.type,
+      quantity: input.quantity,
+      ...(input.purchaseTotalCents === undefined
+        ? {}
+        : { purchaseTotalCents: input.purchaseTotalCents }),
+      ...(input.note === undefined ? {} : { note: input.note }),
+    };
     return inventoryProductSchema.parse(recordStockMovement(options.getDatabase(), movementInput));
   });
   ipcMain.handle(IPC_CHANNELS.inventoryListTransfers, () => {

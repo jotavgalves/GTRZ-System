@@ -87,12 +87,30 @@ export const updateProductInputSchema = createProductInputSchema.extend({
   active: z.boolean(),
 });
 
-export const recordStockMovementInputSchema = z.object({
-  productId: z.uuid(),
-  type: stockMovementTypeSchema,
-  quantity: z.number().int().positive(),
-  note: z.string().trim().max(240).optional(),
-});
+export const recordStockMovementInputSchema = z
+  .object({
+    productId: z.uuid(),
+    type: stockMovementTypeSchema,
+    quantity: z.number().int().positive(),
+    purchaseTotalCents: z.number().int().positive().optional(),
+    note: z.string().trim().max(240).optional(),
+  })
+  .superRefine((input, context) => {
+    if (input.type === 'purchase' && input.purchaseTotalCents === undefined) {
+      context.addIssue({
+        code: 'custom',
+        message: 'Informe o valor total pago nesta compra.',
+        path: ['purchaseTotalCents'],
+      });
+    }
+    if (input.type !== 'purchase' && input.purchaseTotalCents !== undefined) {
+      context.addIssue({
+        code: 'custom',
+        message: 'O valor da compra só pode ser informado em entradas por compra.',
+        path: ['purchaseTotalCents'],
+      });
+    }
+  });
 
 export const transferStockInputSchema = z
   .object({

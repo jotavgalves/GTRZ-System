@@ -150,6 +150,29 @@ describe('inventory database', () => {
     database.close();
   });
 
+  it('cria automaticamente um lote com o valor pago em cada compra', async () => {
+    const database = await createTemporaryDatabase();
+    const event = createEvent(database, { name: 'Evento dos lotes', startsAt: Date.now() });
+    const { productId } = createCatalog(database);
+
+    recordStockMovement(database, {
+      productId,
+      type: 'purchase',
+      quantity: 50,
+      purchaseTotalCents: 45_000,
+    });
+
+    expect(
+      database.sqlite
+        .prepare(
+          `SELECT quantity, total_cost_cents
+           FROM stock_purchase_lots WHERE event_id = ? AND product_id = ?`,
+        )
+        .get(event.id, productId),
+    ).toEqual({ quantity: 50, total_cost_cents: 45_000 });
+    database.close();
+  });
+
   it('mantém saldos independentes para o mesmo produto em eventos diferentes', async () => {
     const database = await createTemporaryDatabase();
     const firstEvent = createEvent(database, { name: 'Primeiro evento', startsAt: Date.now() });
