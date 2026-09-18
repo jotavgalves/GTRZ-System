@@ -39,7 +39,24 @@ jobs:
       - name: Validar Worker
         run: npm run cloud:check
 
+      - name: Verificar credencial de publicacao
+        id: cloudflare
+        shell: bash
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          if [ -n "$CLOUDFLARE_API_TOKEN" ]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publicacao aguardando token Cloudflare
+        if: steps.cloudflare.outputs.ready != 'true'
+        run: echo "Adicione o secret CLOUDFLARE_API_TOKEN para habilitar a publicacao automatica."
+
       - name: Publicar Worker
+        if: steps.cloudflare.outputs.ready == 'true'
         run: npm run cloud:deploy
         env:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
