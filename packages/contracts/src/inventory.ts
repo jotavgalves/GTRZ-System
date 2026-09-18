@@ -28,6 +28,7 @@ export const productCategorySchema = z.object({
   id: z.uuid(),
   name: z.string().trim().min(2).max(60),
   active: z.boolean(),
+  engine: z.enum(['catalog', 'food']),
   createdAt: z.number().int().nonnegative(),
   updatedAt: z.number().int().nonnegative(),
 });
@@ -70,8 +71,12 @@ export const inventoryStateSchema = z.object({
 
 export const createCategoryInputSchema = z.object({
   name: z.string().trim().min(2).max(60),
+  engine: z.enum(['catalog', 'food']).default('catalog'),
 });
-export const updateCategoryInputSchema = createCategoryInputSchema.extend({ categoryId: z.uuid() });
+export const updateCategoryInputSchema = z.object({
+  categoryId: z.uuid(),
+  name: z.string().trim().min(2).max(60),
+});
 export const deleteCategoryInputSchema = z.object({ categoryId: z.uuid() });
 
 export const createProductInputSchema = z.object({

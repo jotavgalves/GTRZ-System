@@ -10,7 +10,7 @@ import {
 describe('inventory contracts', () => {
   it('normaliza categoria e produto antes de atravessar o IPC', () => {
     expect(createCategoryInputSchema.parse({ name: '  Cervejas  ' })).toEqual({
-      name: 'Cervejas',
+      name: 'Cervejas', engine: 'catalog',
     });
     expect(
       createProductInputSchema.parse({

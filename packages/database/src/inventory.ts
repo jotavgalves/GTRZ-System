@@ -25,6 +25,7 @@ export interface DatabaseProductCategory {
   readonly id: string;
   readonly name: string;
   readonly active: boolean;
+  readonly engine: 'catalog' | 'food';
   readonly createdAt: number;
   readonly updatedAt: number;
 }
@@ -80,6 +81,7 @@ interface CategoryRow {
   readonly id: string;
   readonly name: string;
   readonly active: number;
+  readonly engine: 'catalog' | 'food';
   readonly created_at: number;
   readonly updated_at: number;
 }
@@ -160,6 +162,7 @@ function mapCategory(row: CategoryRow): DatabaseProductCategory {
     id: row.id,
     name: row.name,
     active: row.active === 1,
+    engine: row.engine,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -198,7 +201,7 @@ function mapProduct(
 function listCategories(database: DatabaseContext): readonly DatabaseProductCategory[] {
   const rows = database.sqlite
     .prepare(
-      `SELECT id, name, active, created_at, updated_at
+      `SELECT id, name, active, engine, created_at, updated_at
        FROM product_categories
        ORDER BY active DESC, name COLLATE NOCASE`,
     )
@@ -253,7 +256,7 @@ function listProducts(
 function requireCategory(database: DatabaseContext, categoryId: string): DatabaseProductCategory {
   const row = database.sqlite
     .prepare(
-      `SELECT id, name, active, created_at, updated_at
+      `SELECT id, name, active, engine, created_at, updated_at
        FROM product_categories WHERE id = ?`,
     )
     .get(categoryId) as CategoryRow | undefined;
@@ -319,6 +322,7 @@ export function getInventoryState(database: DatabaseContext): DatabaseInventoryS
 export function createProductCategory(
   database: DatabaseContext,
   nameInput: string,
+  engine: 'catalog' | 'food' = 'catalog',
 ): DatabaseProductCategory {
   requireProduction(database);
   const name = nameInput.trim();
@@ -328,15 +332,15 @@ export function createProductCategory(
   database.sqlite.transaction(() => {
     database.sqlite
       .prepare(
-        `INSERT INTO product_categories (id, name, active, created_at, updated_at)
-         VALUES (?, ?, 1, ?, ?)`,
+        `INSERT INTO product_categories (id, name, active, engine, created_at, updated_at)
+         VALUES (?, ?, 1, ?, ?, ?)`,
       )
-      .run(id, name, now, now);
+      .run(id, name, engine, now, now);
     appendAudit(database, {
       action: 'inventory.category-created',
       entityType: 'product-category',
       entityId: id,
-      details: { name },
+      details: { name, engine },
     });
   })();
   return requireCategory(database, id);

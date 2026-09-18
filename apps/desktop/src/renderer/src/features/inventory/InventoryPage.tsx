@@ -4,7 +4,6 @@ import { useMemo, useState } from 'react';
 import type { ProductKind } from '@gtrz/contracts';
 
 import { useSession } from '../../shared/session/session-context';
-import { CategoryForm } from './CategoryForm';
 import { ComboSection } from './ComboSection';
 import { ProductCard } from './ProductCard';
 import { ProductForm } from './ProductForm';
@@ -24,9 +23,6 @@ export function InventoryPage(): React.JSX.Element {
     error,
     message,
     reload,
-    createCategory,
-    updateCategory,
-    deleteCategory,
     createProduct,
     updateProduct,
     recordMovement,
@@ -154,22 +150,6 @@ export function InventoryPage(): React.JSX.Element {
             ) : (
               <ProductForm busy={busy} categories={categories} onSubmit={createProduct} />
             )}
-          </article>
-          <article className="panel form-panel">
-            <div className="panel__heading">
-              <Boxes size={20} aria-hidden="true" />
-              <div>
-                <h2>Categorias</h2>
-                <p>Organize alimentos e bebidas para o uso nas mesas.</p>
-              </div>
-            </div>
-            <CategoryForm
-              busy={busy}
-              categories={categories}
-              onDelete={deleteCategory}
-              onSubmit={createCategory}
-              onUpdate={updateCategory}
-            />
           </article>
         </div>
       ) : null}

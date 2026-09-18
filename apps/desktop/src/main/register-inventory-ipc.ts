@@ -71,7 +71,9 @@ export function registerInventoryIpcHandlers(options: RegisterInventoryIpcOption
   });
   ipcMain.handle(IPC_CHANNELS.inventoryCreateCategory, (_event, payload: unknown) => {
     const input = createCategoryInputSchema.parse(payload);
-    return productCategorySchema.parse(createProductCategory(options.getDatabase(), input.name));
+    return productCategorySchema.parse(
+      createProductCategory(options.getDatabase(), input.name, input.engine),
+    );
   });
   ipcMain.handle(IPC_CHANNELS.inventoryUpdateCategory, (_event, payload: unknown) =>
     productCategorySchema.parse(

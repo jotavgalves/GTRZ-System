@@ -178,6 +178,9 @@ export function createFoodSupplier(
   return listSuppliers(database, eventId).find((supplier) => supplier.id === id)!;
 }
 
+export function updateFoodSupplier(database: DatabaseContext, input: { readonly supplierId: string; readonly name: string }): DatabaseFoodSupplier { requireProduction(database); const eventId=requireEvent(database); const current=database.sqlite.prepare('SELECT id FROM food_suppliers WHERE id=? AND event_id=?').get(input.supplierId,eventId); if(current===undefined) throw new Error('Fornecedor não encontrado neste evento.'); const now=Date.now(); const name=input.name.trim(); database.sqlite.prepare('UPDATE food_suppliers SET name=?, updated_at=? WHERE id=?').run(name,now,input.supplierId); appendAudit(database,{action:'food.supplier-updated',entityType:'food-supplier',entityId:input.supplierId,eventId,details:{name}}); return listSuppliers(database,eventId).find(item=>item.id===input.supplierId)!; }
+export function archiveFoodSupplier(database: DatabaseContext, supplierId: string): void { requireProduction(database); const eventId=requireEvent(database); const current=database.sqlite.prepare('SELECT id FROM food_suppliers WHERE id=? AND event_id=?').get(supplierId,eventId); if(current===undefined) throw new Error('Fornecedor não encontrado neste evento.'); database.sqlite.prepare('UPDATE food_suppliers SET active=0, updated_at=? WHERE id=?').run(Date.now(),supplierId); appendAudit(database,{action:'food.supplier-archived',entityType:'food-supplier',entityId:supplierId,eventId,details:{}}); }
+
 export function createExternalFoodItem(
   database: DatabaseContext,
   input: {

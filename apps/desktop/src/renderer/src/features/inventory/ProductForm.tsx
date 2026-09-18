@@ -132,6 +132,8 @@ export function ProductForm(props: ProductFormProps): React.JSX.Element {
     props.product?.fallbackIcon ?? 'package',
   );
   const [error, setError] = useState<string | null>(null);
+  const selectedCategory = props.categories.find((category) => category.id === categoryId);
+  const usesFoodEngine = selectedCategory?.engine === 'food';
 
   async function handleSubmit(event: SyntheticEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
@@ -140,7 +142,7 @@ export function ProductForm(props: ProductFormProps): React.JSX.Element {
       const baseInput: CreateProductInput = {
         categoryId,
         name,
-        kind,
+        kind: usesFoodEngine ? 'food' : kind,
         costCents: inputToCents(cost),
         salePriceCents: inputToCents(salePrice),
         lowStockThreshold: Number(lowStockThreshold),
@@ -202,6 +204,11 @@ export function ProductForm(props: ProductFormProps): React.JSX.Element {
             aria-label="Categoria"
             onChange={(event) => {
               setCategoryId(event.target.value);
+              if (
+                props.categories.find((category) => category.id === event.target.value)?.engine ===
+                'food'
+              )
+                setKind('food');
             }}
             required
             value={categoryId}
@@ -216,18 +223,25 @@ export function ProductForm(props: ProductFormProps): React.JSX.Element {
               ))}
           </select>
         </label>
-        <label className="form-field">
-          <span>Tipo</span>
-          <select
-            onChange={(event) => {
-              setKind(event.target.value as ProductKind);
-            }}
-            value={kind}
-          >
-            <option value="drink">Bebida</option>
-            <option value="food">Comida</option>
-          </select>
-        </label>
+        {usesFoodEngine ? (
+          <div className="form-field">
+            <span>Motor</span>
+            <strong className="form-field__value">Comida</strong>
+          </div>
+        ) : (
+          <label className="form-field">
+            <span>Tipo</span>
+            <select
+              onChange={(event) => {
+                setKind(event.target.value as ProductKind);
+              }}
+              value={kind}
+            >
+              <option value="drink">Bebida</option>
+              <option value="food">Comida</option>
+            </select>
+          </label>
+        )}
         <label className="form-field">
           <span>Ícone sem foto</span>
           <select

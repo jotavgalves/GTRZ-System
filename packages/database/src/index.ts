@@ -10,6 +10,7 @@ import { stockPurchaseLotVoidsMigration } from './stock-purchase-lot-voids-migra
 import { foodFoundationMigration } from './food-foundation-migration';
 import { foodFinanceMigration } from './food-finance-migration';
 import { foodCategoryMigration } from './food-category-migration';
+import { categoryEngineMigration } from './category-engine-migration';
 import { syncMigration } from './sync-migration';
 import { syncInboxMigration } from './sync-inbox-migration';
 import { syncConflictMigration } from './sync-conflict-migration';
@@ -317,6 +318,7 @@ const migrations: readonly Migration[] = [
   foodFoundationMigration,
   foodFinanceMigration,
   foodCategoryMigration,
+  categoryEngineMigration,
 ];
 
 function ensureMigrationTable(sqlite: BetterSqlite3.Database): void {

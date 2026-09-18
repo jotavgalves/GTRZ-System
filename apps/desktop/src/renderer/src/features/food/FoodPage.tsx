@@ -1,4 +1,12 @@
-import { CookingPot, HandCoins, RefreshCw, Store, TriangleAlert } from 'lucide-react';
+import {
+  Archive,
+  CookingPot,
+  HandCoins,
+  Pencil,
+  RefreshCw,
+  Store,
+  TriangleAlert,
+} from 'lucide-react';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { FoodState, InventoryState } from '@gtrz/contracts';
 import { useRealtimeReload } from '../../shared/realtime/useRealtimeReload';
@@ -13,6 +21,8 @@ export function FoodPage(): React.JSX.Element {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [supplier, setSupplier] = useState('');
+  const [editingSupplier, setEditingSupplier] = useState<string | null>(null);
+  const [supplierDraft, setSupplierDraft] = useState('');
   const reload = useCallback(async () => {
     try {
       const [food, stock] = await Promise.all([
@@ -168,10 +178,75 @@ export function FoodPage(): React.JSX.Element {
                     Adicionar
                   </button>
                 </form>
-                <div className="category-chips">
-                  {state?.suppliers.map((item) => (
-                    <span key={item.id}>{item.name}</span>
-                  ))}
+                <div className="category-manager">
+                  {state?.suppliers.map((item) =>
+                    editingSupplier === item.id ? (
+                      <form
+                        className="category-manager__edit"
+                        key={item.id}
+                        onSubmit={(event) => {
+                          event.preventDefault();
+                          void run(async () => {
+                            await window.gtrz.food.updateSupplier({
+                              supplierId: item.id,
+                              name: supplierDraft,
+                            });
+                            setEditingSupplier(null);
+                          });
+                        }}
+                      >
+                        <input
+                          autoFocus
+                          onChange={(event) => setSupplierDraft(event.target.value)}
+                          value={supplierDraft}
+                        />
+                        <button
+                          className="button button--compact"
+                          disabled={busy || supplierDraft.trim().length < 2}
+                          type="submit"
+                        >
+                          Salvar
+                        </button>
+                      </form>
+                    ) : (
+                      <div className="category-manager__row" key={item.id}>
+                        <span>
+                          {item.name}
+                          {item.active ? '' : ' (arquivado)'}
+                        </span>
+                        <button
+                          className="icon-button"
+                          disabled={busy}
+                          onClick={() => {
+                            setEditingSupplier(item.id);
+                            setSupplierDraft(item.name);
+                          }}
+                          type="button"
+                        >
+                          <Pencil size={14} />
+                        </button>
+                        {item.active ? (
+                          <button
+                            className="icon-button"
+                            disabled={busy}
+                            onClick={() => {
+                              if (
+                                window.confirm(
+                                  `Arquivar ${item.name}? O histórico será preservado.`,
+                                )
+                              )
+                                void run(() =>
+                                  window.gtrz.food.archiveSupplier({ supplierId: item.id }),
+                                );
+                            }}
+                            type="button"
+                          >
+                            <Archive size={14} />
+                          </button>
+                        ) : null}
+                      </div>
+                    ),
+                  )}
                 </div>
               </article>
             ) : null}

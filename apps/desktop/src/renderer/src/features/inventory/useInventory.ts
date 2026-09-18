@@ -78,7 +78,7 @@ export function useInventory(): InventoryViewState {
 
   const createCategory = useCallback(
     async (name: string): Promise<void> => {
-      await run(() => window.gtrz.inventory.createCategory({ name }), 'Categoria criada.');
+      await run(() => window.gtrz.inventory.createCategory({ name, engine: 'catalog' }), 'Categoria criada.');
     },
     [run],
   );

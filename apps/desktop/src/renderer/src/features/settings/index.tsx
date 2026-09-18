@@ -4,6 +4,8 @@ import { useCallback, useEffect, useState, type SyntheticEvent } from 'react';
 import type { CloudSyncStatus } from '@gtrz/contracts';
 
 import { PrintingSettingsPanel } from './PrintingSettingsPanel';
+import { CategoryForm } from '../inventory/CategoryForm';
+import { useInventory } from '../inventory/useInventory';
 
 function basisPointsToInput(value: number): string {
   return (value / 100).toFixed(2);
@@ -18,6 +20,13 @@ function inputToBasisPoints(value: string): number {
 }
 
 export function SettingsPage(): React.JSX.Element {
+  const {
+    state: inventoryState,
+    busy: inventoryBusy,
+    createCategory,
+    updateCategory,
+    deleteCategory,
+  } = useInventory();
   const [currentPassword, setCurrentPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
   const [confirmation, setConfirmation] = useState('');
@@ -141,6 +150,22 @@ export function SettingsPage(): React.JSX.Element {
       </header>
 
       <div className="settings-grid">
+        <article className="panel form-panel">
+          <div className="panel__heading">
+            <Settings size={20} aria-hidden="true" />
+            <div>
+              <h2>Categorias de estoque</h2>
+              <p>A categoria Comida aciona o motor próprio de comida.</p>
+            </div>
+          </div>
+          <CategoryForm
+            busy={inventoryBusy}
+            categories={inventoryState?.categories ?? []}
+            onDelete={deleteCategory}
+            onSubmit={createCategory}
+            onUpdate={updateCategory}
+          />
+        </article>
         <article className="panel security-summary">
           <span className="security-summary__icon" aria-hidden="true">
             <ShieldCheck size={28} />
@@ -316,7 +341,9 @@ export function SettingsPage(): React.JSX.Element {
           </dl>
 
           <p className={cloudStatus?.connection === 'connected' ? 'form-success' : 'form-error'}>
-            {cloudLoading ? 'Consultando a API segura...' : (cloudStatus?.message ?? 'Teste indisponível.')}
+            {cloudLoading
+              ? 'Consultando a API segura...'
+              : (cloudStatus?.message ?? 'Teste indisponível.')}
           </p>
 
           <button
