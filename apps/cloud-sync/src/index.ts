@@ -1255,6 +1255,9 @@ export class MonitorRoom extends DurableObject<Env> {
         )
         .toArray();
     });
+    for (const socket of this.ctx.getWebSockets('mobile')) {
+      sendSocket(socket, { type: 'mobile.event-changed', eventId, eventName });
+    }
     return this.#globalControl(0);
   }
 
