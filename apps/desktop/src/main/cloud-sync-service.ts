@@ -15,7 +15,13 @@ import {
   type CloudMonitor,
   type CloudSyncStatus,
 } from '@gtrz/contracts';
-import { listCombos, resetEventData, setActiveEvent, type DatabaseContext } from '@gtrz/database';
+import {
+  getSessionState,
+  listCombos,
+  resetEventData,
+  setActiveEvent,
+  type DatabaseContext,
+} from '@gtrz/database';
 import { getProductPresentation } from '@gtrz/database/product-presentation';
 import { getPrintingSettings } from '@gtrz/database/printing';
 
@@ -290,10 +296,14 @@ export class CloudSyncService {
 
     if (pairingKey === null) return;
 
+    // A reset must be applied before this machine has a chance to replay offline commands.
+    await this.#pullGlobalControl(database, pairingKey, deviceId);
+    const effectiveActiveEventId = getSessionState(database).activeEvent?.id ?? activeEventId;
+
     this.#retryRecoverablePaidOrders(database);
-    await this.#publishCashierCatalog(database, activeEventId, pairingKey);
-    await this.#publishMobileContext(database, activeEventId, pairingKey);
-    this.#ensureStream(database, activeEventId, deviceId, pairingKey);
+    await this.#publishCashierCatalog(database, effectiveActiveEventId, pairingKey);
+    await this.#publishMobileContext(database, effectiveActiveEventId, pairingKey);
+    this.#ensureStream(database, effectiveActiveEventId, deviceId, pairingKey);
 
     const pending = database.sqlite
       .prepare(
@@ -340,9 +350,8 @@ export class CloudSyncService {
       }
     }
 
-    await this.#pullRemoteJournal(database, pairingKey, activeEventId, deviceId);
-    await this.#processPrintQueue(database, activeEventId, deviceId, pairingKey);
-    await this.#pullGlobalControl(database, pairingKey, deviceId);
+    await this.#pullRemoteJournal(database, pairingKey, effectiveActiveEventId, deviceId);
+    await this.#processPrintQueue(database, effectiveActiveEventId, deviceId, pairingKey);
   }
 
   async setGlobalEvent(database: DatabaseContext, eventId: string): Promise<void> {
