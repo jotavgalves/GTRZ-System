@@ -2994,12 +2994,30 @@ export class EventRoom extends DurableObject<Env> {
         orderId,
       )
       .toArray()[0] as { readonly stock_movements_json: string; readonly status: string } | undefined;
-    if (row === undefined || row.status === 'cancelled') return null;
-    let storedMovements: unknown;
-    try {
-      storedMovements = JSON.parse(row.stock_movements_json) as unknown;
-    } catch {
-      return 'A venda central possui movimentos de estoque ilegíveis.';
+    if (row?.status === 'cancelled') return null;
+    let storedMovements: unknown = null;
+    if (row !== undefined) {
+      try {
+        storedMovements = JSON.parse(row.stock_movements_json) as unknown;
+      } catch {
+        return 'A venda central possui movimentos de estoque ilegíveis.';
+      }
+    } else {
+      const legacyRows = this.ctx.storage.sql
+        .exec('SELECT payload_json FROM event_log ORDER BY sequence DESC LIMIT 5000')
+        .toArray() as unknown as readonly { readonly payload_json: string }[];
+      for (const legacyRow of legacyRows) {
+        const legacy = parseStoredJson(legacyRow.payload_json);
+        if (
+          legacy.action === 'operations.order-paid' &&
+          legacy.entityId === orderId &&
+          isRecord(legacy.details)
+        ) {
+          storedMovements = legacy.details.stockMovements;
+          break;
+        }
+      }
+      if (storedMovements === null) return null;
     }
     const movements = this.#readJournalStockMovements({ stockMovements: storedMovements });
     if (movements === null) return 'A venda central não possui movimentos de estoque restauráveis.';
@@ -3008,9 +3026,28 @@ export class EventRoom extends DurableObject<Env> {
       now,
     );
     if (restoreError !== null) return restoreError;
-    this.ctx.storage.sql
-      .exec('UPDATE accepted_orders SET status = \'cancelled\', cancelled_at = ? WHERE order_id = ?', now, orderId)
-      .toArray();
+    if (row === undefined) {
+      this.ctx.storage.sql
+        .exec(
+          `INSERT INTO accepted_orders
+           (order_id, command_id, stock_movements_json, status, created_at, cancelled_at)
+           VALUES (?, ?, ?, 'cancelled', ?, ?)`,
+          orderId,
+          `legacy:${orderId}`,
+          JSON.stringify(movements),
+          now,
+          now,
+        )
+        .toArray();
+    } else {
+      this.ctx.storage.sql
+        .exec(
+          'UPDATE accepted_orders SET status = \'cancelled\', cancelled_at = ? WHERE order_id = ?',
+          now,
+          orderId,
+        )
+        .toArray();
+    }
     return null;
   }
 
