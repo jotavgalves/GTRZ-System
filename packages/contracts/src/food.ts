@@ -37,6 +37,11 @@ export const updateFoodSupplierInputSchema = createFoodSupplierInputSchema.exten
   supplierId: z.uuid(),
 });
 export const archiveFoodSupplierInputSchema = z.object({ supplierId: z.uuid() });
+export const deleteFoodSupplierInputSchema = z.object({
+  supplierId: z.uuid(),
+  deleteLinkedSales: z.boolean(),
+  reason: z.string().trim().min(3).max(240),
+});
 export const createExternalFoodItemInputSchema = z
   .object({
     categoryId: z.uuid(),
@@ -62,6 +67,7 @@ export type ConfigureFoodInput = z.infer<typeof configureFoodInputSchema>;
 export type CreateFoodSupplierInput = z.infer<typeof createFoodSupplierInputSchema>;
 export type UpdateFoodSupplierInput = z.infer<typeof updateFoodSupplierInputSchema>;
 export type ArchiveFoodSupplierInput = z.infer<typeof archiveFoodSupplierInputSchema>;
+export type DeleteFoodSupplierInput = z.infer<typeof deleteFoodSupplierInputSchema>;
 export type CreateExternalFoodItemInput = z.infer<typeof createExternalFoodItemInputSchema>;
 export interface FoodApi {
   getState(): Promise<FoodState>;
@@ -69,5 +75,6 @@ export interface FoodApi {
   createSupplier(input: CreateFoodSupplierInput): Promise<FoodSupplier>;
   updateSupplier(input: UpdateFoodSupplierInput): Promise<FoodSupplier>;
   archiveSupplier(input: ArchiveFoodSupplierInput): Promise<void>;
+  deleteSupplier(input: DeleteFoodSupplierInput): Promise<void>;
   createExternalItem(input: CreateExternalFoodItemInput): Promise<FoodState>;
 }

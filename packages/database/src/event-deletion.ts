@@ -109,6 +109,15 @@ export function resetEventData(
     database.sqlite.prepare('DELETE FROM ticket_codes WHERE event_id = ?').run(event.id);
     database.sqlite.prepare('DELETE FROM ticket_sales WHERE event_id = ?').run(event.id);
     database.sqlite.prepare('DELETE FROM ticket_lots WHERE event_id = ?').run(event.id);
+    database.sqlite.prepare('DELETE FROM food_sale_settlements WHERE event_id = ?').run(event.id);
+    database.sqlite
+      .prepare(
+        `DELETE FROM app_meta
+         WHERE key IN (SELECT 'voucher.service-point:' || id FROM vouchers WHERE event_id = ?)
+            OR key IN (SELECT 'voucher.deleted-at:' || id FROM vouchers WHERE event_id = ?)
+            OR key IN (SELECT 'service-point.pinned:' || id FROM service_points WHERE event_id = ?)`,
+      )
+      .run(event.id, event.id, event.id);
     database.sqlite
       .prepare('DELETE FROM order_voucher_allocations WHERE event_id = ?')
       .run(event.id);
@@ -129,7 +138,6 @@ export function resetEventData(
     database.sqlite.prepare('DELETE FROM expenses WHERE event_id = ?').run(event.id);
     database.sqlite.prepare('DELETE FROM capital_reimbursements WHERE event_id = ?').run(event.id);
     database.sqlite.prepare('DELETE FROM capital_contributions WHERE event_id = ?').run(event.id);
-    database.sqlite.prepare('DELETE FROM food_sale_settlements WHERE event_id = ?').run(event.id);
     database.sqlite.prepare('DELETE FROM food_product_terms WHERE event_id = ?').run(event.id);
     database.sqlite.prepare('DELETE FROM food_suppliers WHERE event_id = ?').run(event.id);
     database.sqlite.prepare('DELETE FROM food_event_settings WHERE event_id = ?').run(event.id);
@@ -233,12 +241,23 @@ export function deleteEventPermanently(
     database.sqlite.prepare('DELETE FROM ticket_sales WHERE event_id = ?').run(event.id);
     database.sqlite.prepare('DELETE FROM ticket_lots WHERE event_id = ?').run(event.id);
 
+    database.sqlite.prepare('DELETE FROM food_sale_settlements WHERE event_id = ?').run(event.id);
+    database.sqlite
+      .prepare(
+        `DELETE FROM app_meta
+         WHERE key IN (SELECT 'voucher.service-point:' || id FROM vouchers WHERE event_id = ?)
+            OR key IN (SELECT 'voucher.deleted-at:' || id FROM vouchers WHERE event_id = ?)
+            OR key IN (SELECT 'service-point.pinned:' || id FROM service_points WHERE event_id = ?)`,
+      )
+      .run(event.id, event.id, event.id);
+
     database.sqlite
       .prepare('DELETE FROM order_voucher_allocations WHERE event_id = ?')
       .run(event.id);
     database.sqlite.prepare('DELETE FROM voucher_transactions WHERE event_id = ?').run(event.id);
     database.sqlite.prepare('DELETE FROM vouchers WHERE event_id = ?').run(event.id);
 
+    database.sqlite.prepare('DELETE FROM order_refunds WHERE event_id = ?').run(event.id);
     database.sqlite
       .prepare('DELETE FROM payments WHERE order_id IN (SELECT id FROM orders WHERE event_id = ?)')
       .run(event.id);
@@ -252,7 +271,13 @@ export function deleteEventPermanently(
 
     database.sqlite.prepare('DELETE FROM cash_movements WHERE event_id = ?').run(event.id);
     database.sqlite.prepare('DELETE FROM cash_registers WHERE event_id = ?').run(event.id);
+    database.sqlite.prepare('DELETE FROM expense_payments WHERE event_id = ?').run(event.id);
     database.sqlite.prepare('DELETE FROM expenses WHERE event_id = ?').run(event.id);
+    database.sqlite.prepare('DELETE FROM capital_reimbursements WHERE event_id = ?').run(event.id);
+    database.sqlite.prepare('DELETE FROM capital_contributions WHERE event_id = ?').run(event.id);
+    database.sqlite.prepare('DELETE FROM food_product_terms WHERE event_id = ?').run(event.id);
+    database.sqlite.prepare('DELETE FROM food_suppliers WHERE event_id = ?').run(event.id);
+    database.sqlite.prepare('DELETE FROM food_event_settings WHERE event_id = ?').run(event.id);
 
     database.sqlite
       .prepare('DELETE FROM stock_purchase_lot_voids WHERE event_id = ?')
@@ -263,6 +288,13 @@ export function deleteEventPermanently(
     database.sqlite
       .prepare('DELETE FROM stock_transfers WHERE source_event_id = ? OR destination_event_id = ?')
       .run(event.id, event.id);
+
+    database.sqlite.prepare('DELETE FROM sync_outbox WHERE event_id = ?').run(event.id);
+    database.sqlite.prepare('DELETE FROM sync_inbox WHERE event_id = ?').run(event.id);
+    database.sqlite.prepare('DELETE FROM sync_conflicts WHERE event_id = ?').run(event.id);
+    database.sqlite
+      .prepare('DELETE FROM sync_state WHERE key LIKE ? OR key LIKE ?')
+      .run(`%:${event.id}`, `inbox.cursor:${event.id}`);
 
     database.sqlite.prepare('DELETE FROM audit_log WHERE event_id = ?').run(event.id);
     database.sqlite

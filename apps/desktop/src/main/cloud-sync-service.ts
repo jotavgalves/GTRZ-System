@@ -160,14 +160,24 @@ const CATALOG_EVENT_ID = '_catalog';
 const SYNCHRONIZED_ACTIONS = new Set([
   'event.created',
   'inventory.category-created',
+  'inventory.category-updated',
+  'inventory.category-deleted',
   'inventory.product-created',
+  'inventory.product-updated',
+  'inventory.product-deleted',
   'inventory.stock-moved',
   'inventory.purchase-lot-corrected',
   'inventory.purchase-lot-voided',
   'food.configured',
   'food.supplier-created',
+  'food.supplier-updated',
+  'food.supplier-archived',
+  'food.supplier-deleted',
   'food.external-item-created',
   'operations.service-point-created',
+  'operations.service-point-renamed',
+  'operations.service-point-pinned',
+  'operations.service-point-deleted',
   'operations.order-paid',
   'operations.order-cancelled',
   'expense.created',
@@ -175,6 +185,7 @@ const SYNCHRONIZED_ACTIONS = new Set([
   'expense.payment-status-changed',
   'expense.payment-recorded',
   'expense.cancelled',
+  'expense.deleted',
   'capital.contribution-created',
   'capital.contribution-updated',
   'capital.reimbursed',
@@ -184,11 +195,19 @@ const SYNCHRONIZED_ACTIONS = new Set([
   'cash.closed',
   'voucher.created',
   'voucher.service-point-bound',
+  'voucher.updated',
+  'voucher.balance-added',
+  'voucher.cancelled',
+  'voucher.active',
+  'voucher.deleted',
+  'voucher.deleted-with-reversal',
   'ticket.lot-created',
   'ticket.lot-updated',
   'ticket.sale-created',
   'ticket.courtesy-created',
   'ticket.sale-cancelled',
+  'ticket.lot-deleted',
+  'ticket.sale-deleted',
 ]);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -1481,15 +1500,32 @@ export class CloudSyncService {
 
     if (payload.action === 'inventory.category-created') {
       const name = stringField(payload.details, 'name');
-      if (payload.entityId === null || name === null) {
+      const engine = stringField(payload.details, 'engine');
+      if (payload.entityId === null || name === null || (engine !== 'catalog' && engine !== 'food')) {
         throw new Error('Dados insuficientes para criar a categoria remota.');
       }
       database.sqlite
         .prepare(
-          `INSERT OR IGNORE INTO product_categories (id, name, active, created_at, updated_at)
-           VALUES (?, ?, 1, ?, ?)`,
+          `INSERT OR IGNORE INTO product_categories (id, name, active, engine, created_at, updated_at)
+           VALUES (?, ?, 1, ?, ?, ?)`,
         )
-        .run(payload.entityId, name, payload.createdAt, payload.createdAt);
+        .run(payload.entityId, name, engine, payload.createdAt, payload.createdAt);
+      return;
+    }
+
+    if (payload.action === 'inventory.category-updated') {
+      const name = stringField(payload.details, 'name');
+      if (payload.entityId === null || name === null)
+        throw new Error('Atualização remota de categoria incompleta.');
+      database.sqlite
+        .prepare('UPDATE product_categories SET name = ?, updated_at = ? WHERE id = ?')
+        .run(name, payload.createdAt, payload.entityId);
+      return;
+    }
+
+    if (payload.action === 'inventory.category-deleted') {
+      if (payload.entityId === null) throw new Error('Exclusão remota de categoria sem identificador.');
+      database.sqlite.prepare('DELETE FROM product_categories WHERE id = ?').run(payload.entityId);
       return;
     }
 
@@ -1533,6 +1569,99 @@ export class CloudSyncService {
       return;
     }
 
+    if (payload.action === 'inventory.product-updated') {
+      const after = isRecord(payload.details.after) ? payload.details.after : null;
+      if (payload.entityId === null || after === null)
+        throw new Error('Atualização remota de produto incompleta.');
+      const categoryId = stringField(after, 'categoryId');
+      const name = stringField(after, 'name');
+      const kind = stringField(after, 'kind');
+      const costCents = integerField(after, 'costCents');
+      const salePriceCents = integerField(after, 'salePriceCents');
+      const lowStockThreshold = integerField(after, 'lowStockThreshold');
+      const active = after.active;
+      if (
+        categoryId === null ||
+        name === null ||
+        (kind !== 'food' && kind !== 'drink') ||
+        costCents === null ||
+        salePriceCents === null ||
+        lowStockThreshold === null ||
+        typeof active !== 'boolean'
+      )
+        throw new Error('Dados inválidos na atualização remota de produto.');
+      database.sqlite
+        .prepare(
+          `UPDATE products
+           SET category_id = ?, name = ?, kind = ?, cost_cents = ?, sale_price_cents = ?,
+               low_stock_threshold = ?, combo_only = ?, active = ?, updated_at = ?
+           WHERE id = ?`,
+        )
+        .run(
+          categoryId,
+          name,
+          kind,
+          costCents,
+          salePriceCents,
+          lowStockThreshold,
+          after.comboOnly === true ? 1 : 0,
+          active ? 1 : 0,
+          payload.createdAt,
+          payload.entityId,
+        );
+      if (typeof after.fallbackIcon === 'string') {
+        database.sqlite
+          .prepare(
+            `INSERT INTO app_meta (key, value, updated_at) VALUES (?, ?, ?)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+          )
+          .run(`product.icon:${payload.entityId}`, after.fallbackIcon, payload.createdAt);
+      }
+      return;
+    }
+
+    if (payload.action === 'inventory.product-deleted') {
+      if (payload.entityId === null) throw new Error('Exclusão remota de produto sem identificador.');
+      const localOpenOrders = database.sqlite
+        .prepare(
+          `SELECT DISTINCT o.id FROM orders o
+           INNER JOIN order_items oi ON oi.order_id = o.id
+           WHERE o.status = 'open' AND (
+             (oi.item_kind = 'product' AND oi.item_id = ?)
+             OR (oi.item_kind = 'combo' AND oi.item_id IN (
+               SELECT combo_id FROM combo_components WHERE product_id = ?
+             ))
+           )`,
+        )
+        .all(payload.entityId, payload.entityId) as { readonly id: string }[];
+      for (const order of localOpenOrders) {
+        database.sqlite
+          .prepare('DELETE FROM order_voucher_allocations WHERE order_id = ?')
+          .run(order.id);
+        database.sqlite
+          .prepare("UPDATE orders SET status = 'cancelled', closed_at = ?, updated_at = ? WHERE id = ?")
+          .run(payload.createdAt, payload.createdAt, order.id);
+      }
+      database.sqlite
+        .prepare('UPDATE combos SET active = 0, updated_at = ? WHERE id IN (SELECT combo_id FROM combo_components WHERE product_id = ?)')
+        .run(payload.createdAt, payload.entityId);
+      database.sqlite.prepare('DELETE FROM combo_components WHERE product_id = ?').run(payload.entityId);
+      database.sqlite.prepare('DELETE FROM stock_transfers WHERE product_id = ?').run(payload.entityId);
+      database.sqlite
+        .prepare('DELETE FROM stock_purchase_lot_voids WHERE movement_id IN (SELECT movement_id FROM stock_purchase_lots WHERE product_id = ?)')
+        .run(payload.entityId);
+      database.sqlite.prepare('DELETE FROM stock_purchase_lots WHERE product_id = ?').run(payload.entityId);
+      database.sqlite.prepare('DELETE FROM food_sale_settlements WHERE product_id = ?').run(payload.entityId);
+      database.sqlite.prepare('DELETE FROM food_product_terms WHERE product_id = ?').run(payload.entityId);
+      database.sqlite.prepare('DELETE FROM stock_movements WHERE product_id = ?').run(payload.entityId);
+      database.sqlite.prepare('DELETE FROM event_stock WHERE product_id = ?').run(payload.entityId);
+      database.sqlite
+        .prepare('DELETE FROM app_meta WHERE key IN (?, ?)')
+        .run(`product.image:${payload.entityId}`, `product.icon:${payload.entityId}`);
+      database.sqlite.prepare('DELETE FROM products WHERE id = ?').run(payload.entityId);
+      return;
+    }
+
     if (payload.action === 'food.configured') {
       const supplierMode = stringField(payload.details, 'supplierMode');
       if (supplierMode !== 'gtrz' && supplierMode !== 'external') {
@@ -1558,6 +1687,32 @@ export class CloudSyncService {
          VALUES (?, ?, ?, 1, ?, ?)`,
         )
         .run(payload.entityId, eventId, name, payload.createdAt, payload.createdAt);
+      return;
+    }
+
+    if (payload.action === 'food.supplier-updated') {
+      const name = stringField(payload.details, 'name');
+      if (payload.entityId === null || name === null)
+        throw new Error('Atualização remota de fornecedor incompleta.');
+      database.sqlite
+        .prepare('UPDATE food_suppliers SET name = ?, updated_at = ? WHERE id = ? AND event_id = ?')
+        .run(name, payload.createdAt, payload.entityId, eventId);
+      return;
+    }
+
+    if (payload.action === 'food.supplier-archived') {
+      if (payload.entityId === null) throw new Error('Arquivamento remoto de fornecedor sem identificador.');
+      database.sqlite
+        .prepare('UPDATE food_suppliers SET active = 0, updated_at = ? WHERE id = ? AND event_id = ?')
+        .run(payload.createdAt, payload.entityId, eventId);
+      return;
+    }
+
+    if (payload.action === 'food.supplier-deleted') {
+      if (payload.entityId === null) throw new Error('Exclusão remota de fornecedor sem identificador.');
+      database.sqlite
+        .prepare('DELETE FROM food_suppliers WHERE id = ? AND event_id = ?')
+        .run(payload.entityId, eventId);
       return;
     }
 
@@ -1786,6 +1941,61 @@ export class CloudSyncService {
            VALUES (?, ?, ?, ?, 1, ?, ?)`,
         )
         .run(payload.entityId, eventId, label, type, payload.createdAt, payload.createdAt);
+      return;
+    }
+
+    if (payload.action === 'operations.service-point-renamed') {
+      const label = stringField(payload.details, 'label');
+      if (payload.entityId === null || label === null)
+        throw new Error('Renomeação remota de mesa incompleta.');
+      database.sqlite
+        .prepare('UPDATE service_points SET label = ?, updated_at = ? WHERE id = ? AND event_id = ?')
+        .run(label, payload.createdAt, payload.entityId, eventId);
+      database.sqlite
+        .prepare(
+          `UPDATE orders SET service_point_label = ?, updated_at = ?
+           WHERE service_point_id = ? AND status = 'open'`,
+        )
+        .run(label, payload.createdAt, payload.entityId);
+      return;
+    }
+
+    if (payload.action === 'operations.service-point-pinned') {
+      if (payload.entityId === null || typeof payload.details.pinned !== 'boolean')
+        throw new Error('Fixação remota de mesa incompleta.');
+      const key = `service-point.pinned:${payload.entityId}`;
+      if (payload.details.pinned) {
+        database.sqlite
+          .prepare(
+            `INSERT INTO app_meta (key, value, updated_at) VALUES (?, '1', ?)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+          )
+          .run(key, payload.createdAt);
+      } else {
+        database.sqlite.prepare('DELETE FROM app_meta WHERE key = ?').run(key);
+      }
+      return;
+    }
+
+    if (payload.action === 'operations.service-point-deleted') {
+      if (payload.entityId === null) throw new Error('Exclusão remota de mesa sem identificador.');
+      database.sqlite
+        .prepare(
+          `DELETE FROM order_voucher_allocations
+           WHERE order_id IN (
+             SELECT id FROM orders WHERE service_point_id = ? AND status = 'open'
+           )`,
+        )
+        .run(payload.entityId);
+      database.sqlite
+        .prepare("UPDATE orders SET status = 'cancelled', closed_at = ?, updated_at = ? WHERE service_point_id = ? AND status = 'open'")
+        .run(payload.createdAt, payload.createdAt, payload.entityId);
+      database.sqlite
+        .prepare('UPDATE service_points SET active = 0, updated_at = ? WHERE id = ? AND event_id = ?')
+        .run(payload.createdAt, payload.entityId, eventId);
+      database.sqlite
+        .prepare('DELETE FROM app_meta WHERE key = ?')
+        .run(`service-point.pinned:${payload.entityId}`);
       return;
     }
 
@@ -2249,6 +2459,11 @@ export class CloudSyncService {
         .run(payload.createdAt, payload.createdAt, payload.entityId);
       return;
     }
+    if (payload.action === 'expense.deleted') {
+      database.sqlite.prepare('DELETE FROM expense_payments WHERE expense_id = ?').run(payload.entityId);
+      database.sqlite.prepare('DELETE FROM expenses WHERE id = ?').run(payload.entityId);
+      return;
+    }
     throw new Error(`Ação de despesa sem aplicador: ${payload.action}.`);
   }
 
@@ -2326,6 +2541,67 @@ export class CloudSyncService {
            ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
         )
         .run(`voucher.service-point:${payload.entityId}`, servicePointId, payload.createdAt);
+      return;
+    }
+    if (payload.action === 'voucher.updated') {
+      const code = stringField(payload.details, 'code');
+      const label = stringField(payload.details, 'label');
+      const servicePointId = stringField(payload.details, 'servicePointId');
+      if (code === null || label === null || servicePointId === null)
+        throw new Error('Atualização remota de voucher incompleta.');
+      database.sqlite
+        .prepare('UPDATE vouchers SET code = ?, label = ?, updated_at = ? WHERE id = ? AND event_id = ?')
+        .run(code, label, payload.createdAt, payload.entityId, eventId);
+      database.sqlite
+        .prepare(
+          `INSERT INTO app_meta (key, value, updated_at) VALUES (?, ?, ?)
+           ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+        )
+        .run(`voucher.service-point:${payload.entityId}`, servicePointId, payload.createdAt);
+      return;
+    }
+    if (payload.action === 'voucher.balance-added') {
+      const amount = integerField(payload.details, 'amountCents');
+      if (amount === null || amount <= 0) throw new Error('Recarga remota de voucher inválida.');
+      database.sqlite
+        .prepare(
+          `UPDATE vouchers
+           SET initial_balance_cents = initial_balance_cents + ?,
+               remaining_balance_cents = remaining_balance_cents + ?,
+               status = CASE WHEN status = 'cancelled' THEN 'cancelled' ELSE 'active' END,
+               updated_at = ?
+           WHERE id = ? AND event_id = ?`,
+        )
+        .run(amount, amount, payload.createdAt, payload.entityId, eventId);
+      return;
+    }
+    if (payload.action === 'voucher.cancelled' || payload.action === 'voucher.active') {
+      database.sqlite
+        .prepare('UPDATE vouchers SET status = ?, updated_at = ? WHERE id = ? AND event_id = ?')
+        .run(payload.action === 'voucher.active' ? 'active' : 'cancelled', payload.createdAt, payload.entityId, eventId);
+      return;
+    }
+    if (payload.action === 'voucher.deleted') {
+      database.sqlite.prepare('DELETE FROM order_voucher_allocations WHERE voucher_id = ?').run(payload.entityId);
+      database.sqlite.prepare('DELETE FROM voucher_transactions WHERE voucher_id = ?').run(payload.entityId);
+      database.sqlite
+        .prepare('DELETE FROM app_meta WHERE key IN (?, ?)')
+        .run(`voucher.service-point:${payload.entityId}`, `voucher.deleted-at:${payload.entityId}`);
+      database.sqlite.prepare('DELETE FROM vouchers WHERE id = ? AND event_id = ?').run(payload.entityId, eventId);
+      return;
+    }
+    if (payload.action === 'voucher.deleted-with-reversal') {
+      database.sqlite.prepare('DELETE FROM order_voucher_allocations WHERE voucher_id = ?').run(payload.entityId);
+      database.sqlite
+        .prepare("UPDATE vouchers SET status = 'cancelled', updated_at = ? WHERE id = ? AND event_id = ?")
+        .run(payload.createdAt, payload.entityId, eventId);
+      database.sqlite.prepare('DELETE FROM app_meta WHERE key = ?').run(`voucher.service-point:${payload.entityId}`);
+      database.sqlite
+        .prepare(
+          `INSERT INTO app_meta (key, value, updated_at) VALUES (?, ?, ?)
+           ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+        )
+        .run(`voucher.deleted-at:${payload.entityId}`, String(payload.createdAt), payload.createdAt);
       return;
     }
     throw new Error(`Ação de voucher sem aplicador: ${payload.action}.`);
@@ -2688,6 +2964,19 @@ export class CloudSyncService {
       database.sqlite
         .prepare("UPDATE ticket_codes SET status = 'cancelled' WHERE sale_id = ?")
         .run(payload.entityId);
+      return;
+    }
+    if (payload.action === 'ticket.sale-deleted') {
+      database.sqlite.prepare('DELETE FROM ticket_codes WHERE sale_id = ?').run(payload.entityId);
+      database.sqlite.prepare('DELETE FROM ticket_sales WHERE id = ? AND event_id = ?').run(payload.entityId, eventId);
+      return;
+    }
+    if (payload.action === 'ticket.lot-deleted') {
+      database.sqlite
+        .prepare('DELETE FROM ticket_codes WHERE sale_id IN (SELECT id FROM ticket_sales WHERE lot_id = ? AND event_id = ?)')
+        .run(payload.entityId, eventId);
+      database.sqlite.prepare('DELETE FROM ticket_sales WHERE lot_id = ? AND event_id = ?').run(payload.entityId, eventId);
+      database.sqlite.prepare('DELETE FROM ticket_lots WHERE id = ? AND event_id = ?').run(payload.entityId, eventId);
       return;
     }
     throw new Error(`Ação de ingresso sem aplicador: ${payload.action}.`);

@@ -2,6 +2,7 @@ import { expect, test } from '@playwright/test';
 
 import {
   closeElectronApplication,
+  createInventoryCategory,
   ensureProduction,
   launchElectronApplication,
 } from './electron-app';
@@ -32,8 +33,7 @@ test('SMK-EVT-001 — exclui definitivamente evento com comanda aberta', async (
     }
 
     await window.getByRole('link', { name: 'Estoque' }).click();
-    await window.getByPlaceholder('Ex.: Cervejas').fill(categoryName);
-    await window.getByRole('button', { name: 'Criar categoria' }).click();
+    await createInventoryCategory(window, categoryName);
     const productForm = window.locator('form.product-form');
     await productForm.getByLabel('Nome', { exact: true }).fill(productName);
     await productForm.getByRole('combobox').first().selectOption({ label: categoryName });
@@ -46,6 +46,7 @@ test('SMK-EVT-001 — exclui definitivamente evento com comanda aberta', async (
     await productCard.getByRole('button', { name: 'Entrada', exact: true }).click();
     const movementForm = window.locator('form.movement-form');
     await movementForm.getByLabel('Quantidade', { exact: true }).fill('5');
+    await movementForm.getByLabel('Valor total pago').fill('15.00');
     await movementForm.getByRole('button', { name: 'Registrar entrada' }).click();
 
     await window.getByRole('link', { name: 'Despesas' }).click();

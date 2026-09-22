@@ -390,6 +390,7 @@ export function deleteExpense(
         reason,
       },
     });
+    database.sqlite.prepare('DELETE FROM expense_payments WHERE expense_id = ?').run(expense.id);
     database.sqlite.prepare('DELETE FROM expenses WHERE id = ?').run(expense.id);
   })();
 

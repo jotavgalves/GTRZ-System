@@ -2,7 +2,9 @@ import { randomUUID } from 'node:crypto';
 import { appendAudit } from './audit';
 import { getSessionState } from './control';
 import { createInventoryProduct, recordStockMovement } from './inventory';
+import { cancelOrder } from './operation-cancellation';
 import { buildStockRequirements } from './operation-stock';
+import { deleteInventoryProduct } from './product-administration';
 import type { DatabaseOrderItem } from './operation-types';
 import type { DatabaseContext } from './types';
 
@@ -178,8 +180,126 @@ export function createFoodSupplier(
   return listSuppliers(database, eventId).find((supplier) => supplier.id === id)!;
 }
 
-export function updateFoodSupplier(database: DatabaseContext, input: { readonly supplierId: string; readonly name: string }): DatabaseFoodSupplier { requireProduction(database); const eventId=requireEvent(database); const current=database.sqlite.prepare('SELECT id FROM food_suppliers WHERE id=? AND event_id=?').get(input.supplierId,eventId); if(current===undefined) throw new Error('Fornecedor não encontrado neste evento.'); const now=Date.now(); const name=input.name.trim(); database.sqlite.prepare('UPDATE food_suppliers SET name=?, updated_at=? WHERE id=?').run(name,now,input.supplierId); appendAudit(database,{action:'food.supplier-updated',entityType:'food-supplier',entityId:input.supplierId,eventId,details:{name}}); return listSuppliers(database,eventId).find(item=>item.id===input.supplierId)!; }
-export function archiveFoodSupplier(database: DatabaseContext, supplierId: string): void { requireProduction(database); const eventId=requireEvent(database); const current=database.sqlite.prepare('SELECT id FROM food_suppliers WHERE id=? AND event_id=?').get(supplierId,eventId); if(current===undefined) throw new Error('Fornecedor não encontrado neste evento.'); database.sqlite.prepare('UPDATE food_suppliers SET active=0, updated_at=? WHERE id=?').run(Date.now(),supplierId); appendAudit(database,{action:'food.supplier-archived',entityType:'food-supplier',entityId:supplierId,eventId,details:{}}); }
+export function updateFoodSupplier(
+  database: DatabaseContext,
+  input: { readonly supplierId: string; readonly name: string },
+): DatabaseFoodSupplier {
+  requireProduction(database);
+  const eventId = requireEvent(database);
+  const current = database.sqlite
+    .prepare('SELECT id FROM food_suppliers WHERE id = ? AND event_id = ?')
+    .get(input.supplierId, eventId);
+  if (current === undefined) throw new Error('Fornecedor não encontrado neste evento.');
+  const now = Date.now();
+  const name = input.name.trim();
+  database.sqlite
+    .prepare('UPDATE food_suppliers SET name = ?, updated_at = ? WHERE id = ?')
+    .run(name, now, input.supplierId);
+  appendAudit(database, {
+    action: 'food.supplier-updated',
+    entityType: 'food-supplier',
+    entityId: input.supplierId,
+    eventId,
+    details: { name },
+  });
+  return listSuppliers(database, eventId).find((item) => item.id === input.supplierId)!;
+}
+
+export function archiveFoodSupplier(database: DatabaseContext, supplierId: string): void {
+  requireProduction(database);
+  const eventId = requireEvent(database);
+  const current = database.sqlite
+    .prepare('SELECT id, name FROM food_suppliers WHERE id = ? AND event_id = ?')
+    .get(supplierId, eventId) as { readonly id: string; readonly name: string } | undefined;
+  if (current === undefined) throw new Error('Fornecedor não encontrado neste evento.');
+  const now = Date.now();
+  database.sqlite
+    .prepare('UPDATE food_suppliers SET active = 0, updated_at = ? WHERE id = ?')
+    .run(now, supplierId);
+  appendAudit(database, {
+    action: 'food.supplier-archived',
+    entityType: 'food-supplier',
+    entityId: supplierId,
+    eventId,
+    details: { name: current.name },
+  });
+}
+
+export function deleteFoodSupplier(
+  database: DatabaseContext,
+  input: {
+    readonly supplierId: string;
+    readonly deleteLinkedSales: boolean;
+    readonly reason: string;
+  },
+): void {
+  requireProduction(database);
+  const eventId = requireEvent(database);
+  const reason = input.reason.trim();
+  const supplier = database.sqlite
+    .prepare('SELECT id, name FROM food_suppliers WHERE id = ? AND event_id = ?')
+    .get(input.supplierId, eventId) as { readonly id: string; readonly name: string } | undefined;
+  if (supplier === undefined) throw new Error('Fornecedor não encontrado neste evento.');
+
+  const productRows = database.sqlite
+    .prepare('SELECT product_id FROM food_product_terms WHERE event_id = ? AND supplier_id = ?')
+    .all(eventId, supplier.id) as { readonly product_id: string }[];
+  const productIds = productRows.map((row) => row.product_id);
+  const placeholders = productIds.map(() => '?').join(', ');
+  const affectedOrders =
+    productIds.length === 0
+      ? []
+      : (database.sqlite
+          .prepare(
+            `SELECT DISTINCT o.id
+             FROM orders o
+             INNER JOIN order_items oi ON oi.order_id = o.id
+             WHERE o.event_id = ? AND o.status IN ('open', 'paid')
+               AND (
+                 (oi.item_kind = 'product' AND oi.item_id IN (${placeholders}))
+                 OR (oi.item_kind = 'combo' AND oi.item_id IN (
+                   SELECT combo_id FROM combo_components WHERE product_id IN (${placeholders})
+                 ))
+               )`,
+          )
+          .all(eventId, ...productIds, ...productIds) as { readonly id: string }[]);
+  if (affectedOrders.length > 0 && !input.deleteLinkedSales) {
+    throw new Error(
+      `O fornecedor possui ${String(affectedOrders.length)} venda(s) ou comanda(s) vinculada(s). Confirme a exclusão das vendas para continuar.`,
+    );
+  }
+
+  database.sqlite.transaction(() => {
+    for (const order of affectedOrders) {
+      cancelOrder(database, {
+        orderId: order.id,
+        reason: `Exclusão do fornecedor ${supplier.name}: ${reason}`,
+      });
+    }
+    for (const productId of productIds) {
+      deleteInventoryProduct(database, {
+        productId,
+        mode: 'keep-sales-history',
+        reason: `Exclusão do fornecedor ${supplier.name}: ${reason}`,
+      });
+    }
+    database.sqlite
+      .prepare('DELETE FROM food_suppliers WHERE id = ? AND event_id = ?')
+      .run(supplier.id, eventId);
+    appendAudit(database, {
+      action: 'food.supplier-deleted',
+      entityType: 'food-supplier',
+      entityId: supplier.id,
+      eventId,
+      details: {
+        cancelledOrdersCount: affectedOrders.length,
+        deletedProductsCount: productIds.length,
+        name: supplier.name,
+        reason,
+      },
+    });
+  })();
+}
 
 export function createExternalFoodItem(
   database: DatabaseContext,

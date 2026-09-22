@@ -1,6 +1,6 @@
 import { expect, test } from '@playwright/test';
 
-import { closeElectronApplication, launchElectronApplication } from './electron-app';
+import { activateEvent, closeElectronApplication, createInventoryCategory, launchElectronApplication } from './electron-app';
 
 test('SMK-CMB-001 — calcula combo pelo estoque dos componentes e protege custos no Caixa', async () => {
   const electronApplication = await launchElectronApplication();
@@ -18,13 +18,10 @@ test('SMK-CMB-001 — calcula combo pelo estoque dos componentes e protege custo
     await window.getByPlaceholder('Ex.: La Rumba Neon — Agosto').fill(eventName);
     await window.getByRole('button', { name: 'Criar evento' }).click();
     await expect(window.getByText(eventName, { exact: true }).first()).toBeVisible();
+    await activateEvent(window, eventName);
 
     await window.getByRole('link', { name: 'Estoque' }).click();
-    await window.getByPlaceholder('Ex.: Cervejas').fill(categoryName);
-    await window.getByRole('button', { name: 'Criar categoria' }).click();
-    await expect(
-      window.locator('.category-chips').getByText(categoryName, { exact: true }),
-    ).toBeVisible();
+    await createInventoryCategory(window, categoryName);
 
     const productForm = window.locator('form.product-form');
     await productForm.getByLabel('Nome', { exact: true }).fill(productName);
@@ -38,6 +35,7 @@ test('SMK-CMB-001 — calcula combo pelo estoque dos componentes e protege custo
     await productCard.getByRole('button', { name: 'Entrada', exact: true }).click();
     const movementForm = window.locator('form.movement-form');
     await movementForm.getByLabel('Quantidade', { exact: true }).fill('6');
+    await movementForm.getByLabel('Valor total pago').fill('36.00');
     await movementForm.getByRole('button', { name: 'Registrar entrada' }).click();
     productCard = window.locator('article.inventory-card').filter({ hasText: productName });
     await expect(productCard.getByText('6 un.', { exact: true })).toBeVisible();

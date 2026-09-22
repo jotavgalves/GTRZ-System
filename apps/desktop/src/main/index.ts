@@ -16,9 +16,16 @@ let mainWindow: BrowserWindow | null = null;
 let databaseRuntime: DatabaseRuntime | null = null;
 let cloudSyncService: CloudSyncService | null = null;
 const runtimeEnvironment = getRuntimeEnvironment();
+const cloudSyncEnabledForRuntime = process.env.GTRZ_E2E_DISABLE_CLOUD_SYNC !== '1';
 
 if (runtimeEnvironment === 'test') {
-  app.setPath('userData', path.join(app.getPath('appData'), '@gtrz', 'desktop-test'));
+  const isolatedTestDataPath = process.env.GTRZ_E2E_USER_DATA_PATH?.trim();
+  app.setPath(
+    'userData',
+    isolatedTestDataPath && isolatedTestDataPath.length > 0
+      ? isolatedTestDataPath
+      : path.join(app.getPath('appData'), '@gtrz', 'desktop-test'),
+  );
 }
 
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
@@ -91,13 +98,15 @@ if (!hasSingleInstanceLock) {
         return { success: result.success, message: result.message };
       });
       cloudSyncService.setResetBackupAgent(() => backupService.createBackup('pre-event-reset'));
-      cloudSyncService.start(
-        () => getSessionState(requireDatabaseRuntime().get()).activeEvent?.id ?? null,
-      );
-      cloudSyncService.startReplication(
-        () => requireDatabaseRuntime().get(),
-        () => getSessionState(requireDatabaseRuntime().get()).activeEvent?.id ?? null,
-      );
+      if (cloudSyncEnabledForRuntime) {
+        cloudSyncService.start(
+          () => getSessionState(requireDatabaseRuntime().get()).activeEvent?.id ?? null,
+        );
+        cloudSyncService.startReplication(
+          () => requireDatabaseRuntime().get(),
+          () => getSessionState(requireDatabaseRuntime().get()).activeEvent?.id ?? null,
+        );
+      }
 
       await backupService.createBackup('automatic').catch(() => undefined);
       mainWindow = createMainWindow({ title: environmentLabel(runtimeEnvironment) });

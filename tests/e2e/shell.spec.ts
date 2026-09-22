@@ -1,6 +1,6 @@
 import { expect, test } from '@playwright/test';
 
-import { closeElectronApplication, launchElectronApplication } from './electron-app';
+import { activateEvent, closeElectronApplication, createInventoryCategory, launchElectronApplication } from './electron-app';
 
 test('SMK-INF-002 — abre o GTRZ System com navegação modular', async () => {
   const electronApplication = await launchElectronApplication();
@@ -86,15 +86,12 @@ test('SMK-EST-001 — cadastra produto, movimenta saldo e protege custos no Caix
     await window.getByPlaceholder('Ex.: La Rumba Neon — Agosto').fill(eventName);
     await window.getByRole('button', { name: 'Criar evento' }).click();
     await expect(window.getByText(eventName, { exact: true }).first()).toBeVisible();
+    await activateEvent(window, eventName);
 
     await window.getByRole('link', { name: 'Estoque' }).click();
     await expect(window.getByRole('heading', { name: 'Estoque', exact: true })).toBeVisible();
 
-    await window.getByPlaceholder('Ex.: Cervejas').fill(categoryName);
-    await window.getByRole('button', { name: 'Criar categoria' }).click();
-    await expect(
-      window.locator('.category-chips').getByText(categoryName, { exact: true }),
-    ).toBeVisible();
+    await createInventoryCategory(window, categoryName);
 
     const productForm = window.locator('form.product-form');
     await productForm.getByLabel('Nome', { exact: true }).fill(productName);
@@ -106,13 +103,14 @@ test('SMK-EST-001 — cadastra produto, movimenta saldo e protege custos no Caix
 
     let productCard = window.locator('article.inventory-card').filter({ hasText: productName });
     await expect(productCard).toBeVisible();
-    await expect(productCard.getByText('Custo un.', { exact: true })).toBeVisible();
+    await expect(productCard.getByText('Custo médio', { exact: true })).toBeVisible();
     await expect(productCard.getByText('R$ 6,00', { exact: true })).toBeVisible();
     await expect(productCard.getByText('40.00%')).toBeVisible();
 
     await productCard.getByRole('button', { name: 'Entrada', exact: true }).click();
     const movementForm = window.locator('form.movement-form');
     await movementForm.getByLabel('Quantidade', { exact: true }).fill('6');
+    await movementForm.getByLabel('Valor total pago').fill('36.00');
     await movementForm.getByRole('button', { name: 'Registrar entrada' }).click();
 
     productCard = window.locator('article.inventory-card').filter({ hasText: productName });
@@ -130,9 +128,9 @@ test('SMK-EST-001 — cadastra produto, movimenta saldo e protege custos no Caix
     productCard = window.locator('article.inventory-card').filter({ hasText: productName });
     await expect(productCard).toBeVisible();
     await expect(productCard.getByText('R$ 10,00', { exact: true })).toBeVisible();
-    await expect(productCard.getByText('Custo un.', { exact: true })).toHaveCount(0);
-    await expect(productCard.getByText('Valor atual estoque', { exact: true })).toHaveCount(0);
-    await expect(productCard.getByText('Aporte líquido', { exact: true })).toHaveCount(0);
+    await expect(productCard.getByText('Custo médio', { exact: true })).toHaveCount(0);
+    await expect(productCard.getByText('Valor do saldo', { exact: true })).toHaveCount(0);
+    await expect(productCard.getByText('Investido no evento', { exact: true })).toHaveCount(0);
     await expect(productCard.getByRole('button', { name: 'Editar' })).toHaveCount(0);
     await expect(productCard.getByRole('button', { name: 'Entrada', exact: true })).toHaveCount(0);
     await expect(productCard.getByRole('button', { name: /Baixar estoque/u })).toHaveCount(0);

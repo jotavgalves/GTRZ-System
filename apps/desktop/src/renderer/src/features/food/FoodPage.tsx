@@ -6,6 +6,7 @@ import {
   RefreshCw,
   Store,
   TriangleAlert,
+  Trash2,
 } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { FoodState, InventoryState } from '@gtrz/contracts';
@@ -226,23 +227,64 @@ export function FoodPage(): React.JSX.Element {
                           <Pencil size={14} />
                         </button>
                         {item.active ? (
-                          <button
-                            className="icon-button"
-                            disabled={busy}
-                            onClick={() => {
-                              if (
-                                window.confirm(
-                                  `Arquivar ${item.name}? O histórico será preservado.`,
+                          <>
+                            <button
+                              aria-label={`Arquivar ${item.name}`}
+                              className="icon-button"
+                              disabled={busy}
+                              onClick={() => {
+                                if (
+                                  window.confirm(
+                                    `Arquivar ${item.name}? O histórico será preservado.`,
+                                  )
                                 )
-                              )
-                                void run(() =>
-                                  window.gtrz.food.archiveSupplier({ supplierId: item.id }),
+                                  void run(() =>
+                                    window.gtrz.food.archiveSupplier({ supplierId: item.id }),
+                                  );
+                              }}
+                              type="button"
+                            >
+                              <Archive size={14} />
+                            </button>
+                            <button
+                              aria-label={`Excluir ${item.name}`}
+                              className="icon-button"
+                              disabled={busy}
+                              onClick={() => {
+                                const reason = window.prompt(
+                                  `Motivo para excluir ${item.name}. Se houver vendas, você poderá confirmar o estorno delas.`,
                                 );
-                            }}
-                            type="button"
-                          >
-                            <Archive size={14} />
-                          </button>
+                                if (reason === null || reason.trim().length < 3) return;
+                                void run(async () => {
+                                  try {
+                                    await window.gtrz.food.deleteSupplier({
+                                      supplierId: item.id,
+                                      deleteLinkedSales: false,
+                                      reason,
+                                    });
+                                  } catch (deleteError) {
+                                    const message =
+                                      deleteError instanceof Error ? deleteError.message : 'Não foi possível excluir.';
+                                    if (!message.includes('Confirme a exclusão das vendas')) throw deleteError;
+                                    if (
+                                      !window.confirm(
+                                        `${message}\n\nExcluir também essas vendas, com os respectivos estornos?`,
+                                      )
+                                    )
+                                      return;
+                                    await window.gtrz.food.deleteSupplier({
+                                      supplierId: item.id,
+                                      deleteLinkedSales: true,
+                                      reason,
+                                    });
+                                  }
+                                });
+                              }}
+                              type="button"
+                            >
+                              <Trash2 size={14} />
+                            </button>
+                          </>
                         ) : null}
                       </div>
                     ),

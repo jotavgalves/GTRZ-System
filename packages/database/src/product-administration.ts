@@ -214,6 +214,8 @@ export function deleteInventoryProduct(
     database.sqlite.prepare('DELETE FROM stock_transfers WHERE product_id = ?').run(product.id);
     database.sqlite.prepare('DELETE FROM stock_purchase_lot_voids WHERE movement_id IN (SELECT movement_id FROM stock_purchase_lots WHERE product_id = ?)').run(product.id);
     database.sqlite.prepare('DELETE FROM stock_purchase_lots WHERE product_id = ?').run(product.id);
+    database.sqlite.prepare('DELETE FROM food_sale_settlements WHERE product_id = ?').run(product.id);
+    database.sqlite.prepare('DELETE FROM food_product_terms WHERE product_id = ?').run(product.id);
     database.sqlite.prepare('DELETE FROM stock_movements WHERE product_id = ?').run(product.id);
     database.sqlite.prepare('DELETE FROM event_stock WHERE product_id = ?').run(product.id);
     clearProductPresentation(database, product.id);

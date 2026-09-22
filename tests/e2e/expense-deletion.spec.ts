@@ -33,7 +33,7 @@ test('SMK-FIN-002 — exclui despesa definitivamente e atualiza totais', async (
     await window.getByPlaceholder('Ex.: Estrutura').fill('Operação');
     await window.getByPlaceholder('Ex.: Locação de gerador').fill(description);
     await window.getByPlaceholder('0,00').fill('25.00');
-    await window.getByLabel('Forma de pagamento').selectOption('pix');
+    await window.getByLabel('Forma prevista').selectOption('pix');
     await window.getByRole('button', { name: 'Registrar despesa' }).click();
     await expect(window.getByText('Despesa registrada.')).toBeVisible();
 
@@ -78,8 +78,7 @@ test('SMK-FIN-003 — situação da despesa não altera o resultado', async () =
     await window.getByPlaceholder('Ex.: Estrutura').fill('Estrutura');
     await window.getByPlaceholder('Ex.: Locação de gerador').fill(description);
     await window.getByPlaceholder('0,00').fill('25.00');
-    await window.getByLabel('Situação').selectOption('open');
-    await window.getByLabel('Forma de pagamento').selectOption('pix');
+    await window.getByLabel('Forma prevista').selectOption('pix');
     await window.getByRole('button', { name: 'Registrar despesa' }).click();
     await expect(window.getByText('Despesa registrada.')).toBeVisible();
 
@@ -95,8 +94,9 @@ test('SMK-FIN-003 — situação da despesa não altera o resultado', async () =
 
     await window.getByRole('link', { name: 'Despesas' }).click();
     await expenseCard.getByRole('button', { name: 'Gerenciar', exact: true }).click();
-    await expenseCard.getByLabel('Situação do pagamento').selectOption('partial');
-    await expect(window.getByText('Situação da despesa atualizada.')).toBeVisible();
+    await expenseCard.getByLabel('Pagamento real').fill('10.00');
+    await expenseCard.getByRole('button', { name: 'Registrar pagamento' }).click();
+    await expect(window.getByText('Pagamento registrado no livro financeiro.')).toBeVisible();
     await expect(paymentBadge).toHaveText('Parcial');
 
     await window.getByRole('link', { name: 'Caixa' }).click();
@@ -104,8 +104,9 @@ test('SMK-FIN-003 — situação da despesa não altera o resultado', async () =
 
     await window.getByRole('link', { name: 'Despesas' }).click();
     await expenseCard.getByRole('button', { name: 'Gerenciar', exact: true }).click();
-    await expenseCard.getByLabel('Situação do pagamento').selectOption('paid');
-    await expect(window.getByText('Situação da despesa atualizada.')).toBeVisible();
+    await expenseCard.getByLabel('Pagamento real').fill('15.00');
+    await expenseCard.getByRole('button', { name: 'Registrar pagamento' }).click();
+    await expect(window.getByText('Pagamento registrado no livro financeiro.')).toBeVisible();
     await expect(paymentBadge).toHaveText('Paga');
 
     await window.getByRole('link', { name: 'Caixa' }).click();
