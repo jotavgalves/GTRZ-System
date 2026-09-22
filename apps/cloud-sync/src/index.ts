@@ -425,6 +425,26 @@ export class MonitorRoom extends DurableObject<Env> {
         reason TEXT,
         created_at INTEGER NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS global_reset_requests (
+        request_id TEXT PRIMARY KEY,
+        event_id TEXT NOT NULL,
+        event_name TEXT NOT NULL,
+        reason TEXT NOT NULL,
+        requested_by_device_id TEXT NOT NULL,
+        target_device_ids_json TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('pending', 'committed', 'cancelled')),
+        created_at INTEGER NOT NULL,
+        completed_at INTEGER
+      );
+      CREATE TABLE IF NOT EXISTS global_reset_backups (
+        request_id TEXT NOT NULL,
+        device_id TEXT NOT NULL,
+        object_key TEXT NOT NULL,
+        sha256 TEXT NOT NULL,
+        size_bytes INTEGER NOT NULL CHECK (size_bytes > 0),
+        created_at INTEGER NOT NULL,
+        PRIMARY KEY (request_id, device_id)
+      );
       DELETE FROM flow_log WHERE type = 'connection.heartbeat';
     `);
     const columns = this.ctx.storage.sql.exec('PRAGMA table_info(mobile_operators)').toArray();
@@ -477,7 +497,14 @@ export class MonitorRoom extends DurableObject<Env> {
       }
 
       if (request.method === 'POST' && url.pathname === '/v1/monitor/global-event/reset') {
-        return json(await this.#resetGlobalEvent(await readJson(request)));
+        return json(this.#requestGlobalReset(await readJson(request)));
+      }
+
+      const resetBackupMatch = /^\/v1\/monitor\/reset-backup\/([^/]+)$/.exec(url.pathname);
+      if (request.method === 'POST' && resetBackupMatch !== null) {
+        return json(
+          await this.#receiveResetBackup(decodeURIComponent(resetBackupMatch[1] ?? ''), request),
+        );
       }
 
       if (request.method === 'POST' && url.pathname === '/v1/cashier/enroll') {
@@ -1218,12 +1245,31 @@ export class MonitorRoom extends DurableObject<Env> {
         reason: typeof row.reason === 'string' ? row.reason : null,
         createdAt: Number(row.created_at),
       }));
+    const pendingReset = this.ctx.storage.sql
+      .exec(
+        `SELECT request_id, event_id, event_name, reason, target_device_ids_json, created_at
+         FROM global_reset_requests WHERE status = 'pending' ORDER BY created_at DESC LIMIT 1`,
+      )
+      .toArray()[0] as Record<string, unknown> | undefined;
     return {
       activeEventId: typeof current?.active_event_id === 'string' ? current.active_event_id : null,
       activeEventName:
         typeof current?.active_event_name === 'string' ? current.active_event_name : null,
       revision: Number(current?.revision ?? 0),
       commands,
+      pendingReset:
+        pendingReset === undefined
+          ? null
+          : {
+              requestId: storedString(pendingReset.request_id, 'request_id'),
+              eventId: storedString(pendingReset.event_id, 'event_id'),
+              eventName: storedString(pendingReset.event_name, 'event_name'),
+              reason: storedString(pendingReset.reason, 'reason'),
+              targetDeviceIds: parseStoredJson(
+                storedString(pendingReset.target_device_ids_json, 'target_device_ids_json'),
+              ),
+              createdAt: Number(pendingReset.created_at),
+            },
     };
   }
 
@@ -1261,35 +1307,188 @@ export class MonitorRoom extends DurableObject<Env> {
     return this.#globalControl(0);
   }
 
-  async #resetGlobalEvent(payload: JsonRecord): Promise<JsonRecord> {
+  #requestGlobalReset(payload: JsonRecord): JsonRecord {
     const eventId = requiredString(payload.eventId, 'eventId', 160);
     const eventName = requiredString(payload.eventName, 'eventName', 100);
     const reason = requiredString(payload.reason, 'reason', 240);
-    const room = this.env.EVENT_ROOM.get(this.env.EVENT_ROOM.idFromName(`event:${eventId}`));
-    const reset = await room.fetch(
-      new Request(`https://event.internal/v1/events/${encodeURIComponent(eventId)}/reset`, {
-        method: 'POST',
-      }),
-    );
-    if (!reset.ok)
-      throw new ApiError(502, 'EVENT_RESET_FAILED', 'A central não conseguiu limpar o evento.');
-
+    const requestedByDeviceId = requiredString(payload.deviceId, 'deviceId', 80);
     const now = Date.now();
+    const knownDevices = this.ctx.storage.sql
+      .exec(
+        `SELECT device_id, label, last_seen_at FROM devices
+         WHERE last_seen_at >= ? ORDER BY device_id ASC`,
+        now - 30 * 24 * 60 * 60 * 1_000,
+      )
+      .toArray() as unknown as readonly {
+      readonly device_id: string;
+      readonly label: string;
+      readonly last_seen_at: number;
+    }[];
+    if (knownDevices.length === 0) {
+      throw new ApiError(
+        409,
+        'NO_ACTIVE_DEVICES',
+        'Nenhum PC conectado pode criar o backup obrigatório.',
+      );
+    }
+    const offline = knownDevices.filter((device) => device.last_seen_at < now - 45_000);
+    if (offline.length > 0) {
+      throw new ApiError(
+        409,
+        'BACKUP_DEVICE_OFFLINE',
+        `Todos os PCs precisam estar online para gerar backup: ${offline.map((device) => device.label).join(', ')}.`,
+      );
+    }
+    const activeDevices = knownDevices.map((device) => device.device_id);
+    if (!activeDevices.includes(requestedByDeviceId)) {
+      throw new ApiError(
+        409,
+        'REQUESTING_DEVICE_OFFLINE',
+        'Este PC precisa estar conectado antes de iniciar a limpeza.',
+      );
+    }
+    const pending = this.ctx.storage.sql
+      .exec(`SELECT request_id FROM global_reset_requests WHERE status = 'pending' LIMIT 1`)
+      .toArray()[0] as { readonly request_id: string } | undefined;
+    if (pending !== undefined) {
+      throw new ApiError(
+        409,
+        'RESET_ALREADY_PENDING',
+        'Já existe uma limpeza aguardando backups dos PCs.',
+      );
+    }
+
     this.ctx.storage.sql
       .exec(
-        `INSERT INTO global_event_commands (command_id, type, event_id, event_name, reason, created_at)
-         VALUES (?, 'event.reset', ?, ?, ?, ?)`,
+        `INSERT INTO global_reset_requests
+         (request_id, event_id, event_name, reason, requested_by_device_id, target_device_ids_json, status, created_at, completed_at)
+         VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, NULL)`,
         crypto.randomUUID(),
         eventId,
         eventName,
         reason,
+        requestedByDeviceId,
+        JSON.stringify(activeDevices),
         now,
       )
       .toArray();
-    for (const socket of this.ctx.getWebSockets('mobile')) {
-      sendSocket(socket, { type: 'mobile.event-reset', eventId, reason });
-    }
     return this.#globalControl(0);
+  }
+
+  async #receiveResetBackup(requestId: string, request: Request): Promise<JsonRecord> {
+    const deviceId = requiredString(
+      request.headers.get('X-GTRZ-Device-Id'),
+      'X-GTRZ-Device-Id',
+      80,
+    );
+    const sha256 = requiredString(
+      request.headers.get('X-GTRZ-Backup-Sha256'),
+      'X-GTRZ-Backup-Sha256',
+      128,
+    );
+    const sizeBytes = positiveInteger(
+      Number(request.headers.get('X-GTRZ-Backup-Size')),
+      'X-GTRZ-Backup-Size',
+    );
+    const reset = this.ctx.storage.sql
+      .exec(
+        `SELECT event_id, event_name, reason, target_device_ids_json, status
+         FROM global_reset_requests WHERE request_id = ?`,
+        requestId,
+      )
+      .toArray()[0] as Record<string, unknown> | undefined;
+    if (reset === undefined || reset.status !== 'pending') {
+      throw new ApiError(409, 'RESET_NOT_PENDING', 'Esta limpeza não está aguardando backups.');
+    }
+    const targets = parseStoredJson(
+      storedString(reset.target_device_ids_json, 'target_device_ids_json'),
+    );
+    if (!Array.isArray(targets) || !targets.includes(deviceId)) {
+      throw new ApiError(
+        403,
+        'DEVICE_NOT_REQUIRED',
+        'Este PC não faz parte da preparação da limpeza.',
+      );
+    }
+    const eventId = storedString(reset.event_id, 'event_id');
+    const objectKey = `backups/${encodeURIComponent(eventId)}/${requestId}/${encodeURIComponent(deviceId)}.gtrzbackup`;
+    await this.env.SYNC_AUDIT_ARCHIVE.put(objectKey, request.body, {
+      httpMetadata: { contentType: 'application/octet-stream' },
+      customMetadata: { requestId, eventId, deviceId, sha256 },
+    });
+    this.ctx.storage.sql
+      .exec(
+        `INSERT INTO global_reset_backups (request_id, device_id, object_key, sha256, size_bytes, created_at)
+         VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT(request_id, device_id) DO UPDATE SET object_key = excluded.object_key,
+           sha256 = excluded.sha256, size_bytes = excluded.size_bytes, created_at = excluded.created_at`,
+        requestId,
+        deviceId,
+        objectKey,
+        sha256,
+        sizeBytes,
+        Date.now(),
+      )
+      .toArray();
+    await this.#commitResetIfPrepared(requestId);
+    return { success: true, objectKey };
+  }
+
+  async #commitResetIfPrepared(requestId: string): Promise<void> {
+    const reset = this.ctx.storage.sql
+      .exec(
+        `SELECT event_id, event_name, reason, target_device_ids_json, status
+         FROM global_reset_requests WHERE request_id = ?`,
+        requestId,
+      )
+      .toArray()[0] as Record<string, unknown> | undefined;
+    if (reset === undefined || reset.status !== 'pending') return;
+    const targets = parseStoredJson(
+      storedString(reset.target_device_ids_json, 'target_device_ids_json'),
+    );
+    if (!Array.isArray(targets) || !targets.every((id) => typeof id === 'string')) return;
+    const count = this.ctx.storage.sql
+      .exec('SELECT COUNT(*) AS amount FROM global_reset_backups WHERE request_id = ?', requestId)
+      .one() as { readonly amount: number };
+    if (count.amount !== targets.length) return;
+    const eventId = storedString(reset.event_id, 'event_id');
+    const room = this.env.EVENT_ROOM.get(this.env.EVENT_ROOM.idFromName(`event:${eventId}`));
+    const response = await room.fetch(
+      new Request(`https://event.internal/v1/events/${encodeURIComponent(eventId)}/reset`, {
+        method: 'POST',
+      }),
+    );
+    if (!response.ok)
+      throw new ApiError(502, 'EVENT_RESET_FAILED', 'A central não conseguiu limpar o evento.');
+    const now = Date.now();
+    this.ctx.storage.transactionSync(() => {
+      this.ctx.storage.sql
+        .exec(
+          `UPDATE global_reset_requests SET status = 'committed', completed_at = ?
+           WHERE request_id = ? AND status = 'pending'`,
+          now,
+          requestId,
+        )
+        .toArray();
+      this.ctx.storage.sql
+        .exec(
+          `INSERT INTO global_event_commands (command_id, type, event_id, event_name, reason, created_at)
+           VALUES (?, 'event.reset', ?, ?, ?, ?)`,
+          crypto.randomUUID(),
+          eventId,
+          storedString(reset.event_name, 'event_name'),
+          storedString(reset.reason, 'reason'),
+          now,
+        )
+        .toArray();
+    });
+    for (const socket of this.ctx.getWebSockets('mobile')) {
+      sendSocket(socket, {
+        type: 'mobile.event-reset',
+        eventId,
+        reason: storedString(reset.reason, 'reason'),
+      });
+    }
   }
 }
 
@@ -3372,7 +3571,7 @@ function mobileApiRequest(url: URL): boolean {
 }
 
 function monitorRequest(url: URL): boolean {
-  return /^\/v1\/monitor\/(heartbeat|snapshot|command|transport|conflict|global-control|global-event|global-event\/reset)$/.test(
+  return /^\/v1\/monitor\/(heartbeat|snapshot|command|transport|conflict|global-control|global-event|global-event\/reset|reset-backup\/[^/]+)$/.test(
     url.pathname,
   );
 }

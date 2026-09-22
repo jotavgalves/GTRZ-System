@@ -94,8 +94,9 @@ export function CloudEventSelector(): React.JSX.Element {
             Zerar dados deste evento em todos os dispositivos
           </summary>
           <p>
-            Apaga vendas, mesas, vouchers, despesas, ingressos, caixas e estoque do evento. O evento
-            e o catálogo de produtos permanecem.
+            Primeiro cada PC conectado cria um backup local e envia uma cópia verificada para a
+            nuvem. A limpeza só acontece quando todos confirmarem. Ela apaga vendas, mesas,
+            vouchers, despesas, ingressos, caixas e estoque; o evento e o catálogo permanecem.
           </p>
           <label>
             <span>{`Digite ${state.activeEvent.name} para confirmar`}</span>
@@ -116,7 +117,9 @@ export function CloudEventSelector(): React.JSX.Element {
             onClick={() => void resetEvent()}
             type="button"
           >
-            {resetting ? 'Zerando em todos os dispositivos...' : 'Zerar dados do evento'}
+            {resetting
+              ? 'Solicitando backups obrigatórios...'
+              : 'Preparar backups e zerar o evento'}
           </button>
         </details>
       )}

@@ -90,6 +90,7 @@ if (!hasSingleInstanceLock) {
         const result = await printService.printCloudJob(job);
         return { success: result.success, message: result.message };
       });
+      cloudSyncService.setResetBackupAgent(() => backupService.createBackup('pre-event-reset'));
       cloudSyncService.start(
         () => getSessionState(requireDatabaseRuntime().get()).activeEvent?.id ?? null,
       );

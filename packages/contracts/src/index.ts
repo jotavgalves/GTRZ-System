@@ -352,7 +352,13 @@ export const cloudMonitorSchema = z.object({
   localConflicts: z.array(cloudSyncConflictSchema),
 });
 
-export const backupKindSchema = z.enum(['automatic', 'event-close', 'manual', 'pre-restore']);
+export const backupKindSchema = z.enum([
+  'automatic',
+  'event-close',
+  'manual',
+  'pre-restore',
+  'pre-event-reset',
+]);
 export const backupIntegritySchema = z.enum(['valid', 'invalid']);
 
 export const backupRecordSchema = z.object({

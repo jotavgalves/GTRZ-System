@@ -1,6 +1,6 @@
 import { readFile, writeFile } from 'node:fs/promises';
 import { hostname } from 'node:os';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { WebSocket, type RawData } from 'ws';
 
 import {
@@ -14,6 +14,7 @@ import {
   cloudMonitorSchema,
   type CloudMonitor,
   type CloudSyncStatus,
+  type BackupRecord,
 } from '@gtrz/contracts';
 import {
   getSessionState,
@@ -100,6 +101,14 @@ interface GlobalEventCommand {
   readonly eventId: string;
   readonly eventName: string;
   readonly reason: string | null;
+}
+
+interface PendingGlobalReset {
+  readonly requestId: string;
+  readonly eventId: string;
+  readonly eventName: string;
+  readonly reason: string;
+  readonly targetDeviceIds: readonly string[];
 }
 
 export interface CloudPrintReceipt {
@@ -229,6 +238,7 @@ export class CloudSyncService {
   readonly #endpoint: string;
   readonly #getDeviceLabel: () => string;
   #printAgent: ((job: ClaimedCloudPrintJob) => Promise<PrintAgentResult>) | null = null;
+  #resetBackupAgent: (() => Promise<BackupRecord>) | null = null;
   #heartbeatTimer: NodeJS.Timeout | null = null;
   #outboxTimer: NodeJS.Timeout | null = null;
   #stream: WebSocket | null = null;
@@ -287,6 +297,10 @@ export class CloudSyncService {
 
   setPrintAgent(agent: (job: ClaimedCloudPrintJob) => Promise<PrintAgentResult>): void {
     this.#printAgent = agent;
+  }
+
+  setResetBackupAgent(agent: () => Promise<BackupRecord>): void {
+    this.#resetBackupAgent = agent;
   }
 
   async flushOutbox(database: DatabaseContext, activeEventId: string | null): Promise<void> {
@@ -379,13 +393,17 @@ export class CloudSyncService {
     if (input.confirmationName.trim() !== event.name) {
       throw new Error('Digite exatamente o nome do evento para confirmar a limpeza.');
     }
+    const deviceId = await this.#readOrCreateDeviceId();
+    const pairingKey = await this.#readPairingKey();
+    if (pairingKey === null)
+      throw new Error('A chave da nuvem não foi encontrada neste computador.');
     await this.#globalControlRequest('/v1/monitor/global-event/reset', {
       eventId: event.id,
       eventName: event.name,
       reason: input.reason.trim(),
+      deviceId,
     });
-    resetEventData(database, { ...input, system: true });
-    this.#onDataChanged();
+    await this.#pullGlobalControl(database, pairingKey, deviceId);
   }
 
   async getStatus(): Promise<CloudSyncStatus> {
@@ -742,6 +760,80 @@ export class CloudSyncService {
         )
         .run(cursorKey, String(cursor), Date.now());
     }
+    const pending = this.#pendingReset(payload.pendingReset);
+    if (pending !== null && pending.targetDeviceIds.includes(deviceId)) {
+      await this.#prepareResetBackup(database, pairingKey, deviceId, pending);
+    }
+  }
+
+  #pendingReset(value: unknown): PendingGlobalReset | null {
+    if (!isRecord(value) || !Array.isArray(value.targetDeviceIds)) return null;
+    if (
+      typeof value.requestId !== 'string' ||
+      typeof value.eventId !== 'string' ||
+      typeof value.eventName !== 'string' ||
+      typeof value.reason !== 'string' ||
+      !value.targetDeviceIds.every((item) => typeof item === 'string')
+    )
+      return null;
+    return {
+      requestId: value.requestId,
+      eventId: value.eventId,
+      eventName: value.eventName,
+      reason: value.reason,
+      targetDeviceIds: value.targetDeviceIds,
+    };
+  }
+
+  async #prepareResetBackup(
+    database: DatabaseContext,
+    pairingKey: string,
+    deviceId: string,
+    reset: PendingGlobalReset,
+  ): Promise<void> {
+    const completionKey = `global.reset-backup:${reset.requestId}`;
+    const complete = database.sqlite
+      .prepare('SELECT 1 FROM sync_state WHERE key = ?')
+      .get(completionKey);
+    if (complete !== undefined) return;
+    if (this.#resetBackupAgent === null) {
+      this.#reportConflict({
+        commandId: reset.requestId,
+        eventId: reset.eventId,
+        deviceId,
+        action: 'event.reset-backup',
+        entityId: reset.eventId,
+        reason: 'Este PC não conseguiu preparar o backup obrigatório.',
+      });
+      return;
+    }
+    const backup = await this.#resetBackupAgent();
+    if (backup.integrity !== 'valid')
+      throw new Error('O backup pré-limpeza não passou na verificação.');
+    const contents = await readFile(backup.filePath);
+    const response = await fetch(
+      `${this.#endpoint}/v1/monitor/reset-backup/${encodeURIComponent(reset.requestId)}`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/octet-stream',
+          'X-GTRZ-Key': pairingKey,
+          'X-GTRZ-Device-Id': deviceId,
+          'X-GTRZ-Backup-Sha256': createHash('sha256').update(contents).digest('hex'),
+          'X-GTRZ-Backup-Size': String(contents.byteLength),
+        },
+        body: new Uint8Array(contents),
+        signal: AbortSignal.timeout(30_000),
+      },
+    );
+    if (!response.ok) throw new Error('A nuvem não confirmou o envio do backup obrigatório.');
+    database.sqlite
+      .prepare(
+        `INSERT INTO sync_state (key, value, updated_at) VALUES (?, ?, ?)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+      )
+      .run(completionKey, backup.fileName, Date.now());
+    this.#onDataChanged();
   }
 
   #reportConflict(conflict: {
