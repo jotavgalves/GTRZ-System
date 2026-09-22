@@ -358,7 +358,9 @@
 }
 
 .mobile-permission-switch {
-  display: inline-flex;
+  display: grid;
+  grid-template-columns: auto 1.7rem;
+  grid-template-rows: 1rem;
   align-items: center;
   gap: 0.38rem;
   color: var(--color-text-muted);
@@ -368,14 +370,20 @@
 }
 
 .mobile-permission-switch input {
-  position: absolute;
-  width: 1px;
-  height: 1px;
+  z-index: 1;
+  grid-column: 2;
+  grid-row: 1;
+  width: 1.7rem;
+  height: 1rem;
+  margin: 0;
   opacity: 0;
+  cursor: pointer;
 }
 
 .mobile-permission-switch i {
   position: relative;
+  grid-column: 2;
+  grid-row: 1;
   width: 1.7rem;
   height: 1rem;
   border: 1px solid var(--color-border);

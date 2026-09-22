@@ -71,6 +71,7 @@ export function MobileOperatorsPanel(): React.JSX.Element {
   const [editPassword, setEditPassword] = useState('');
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [updatingOperatorId, setUpdatingOperatorId] = useState<string | null>(null);
 
   const load = useCallback(async (): Promise<void> => {
     setLoading(true);
@@ -107,13 +108,17 @@ export function MobileOperatorsPanel(): React.JSX.Element {
 
   async function updateOperator(operator: MobileOperator, changes: { readonly name?: string; readonly password?: string; readonly permissions?: MobilePermissions; readonly active?: boolean }): Promise<boolean> {
     setError(null);
+    setUpdatingOperatorId(operator.id);
     try {
-      await window.gtrz.settings.updateMobileOperator({ operatorId: operator.id, ...changes });
-      await load();
+      const updated = await window.gtrz.settings.updateMobileOperator({ operatorId: operator.id, ...changes });
+      setOperators((current) => current.map((item) => item.id === updated.id ? updated : item));
+      setEditing((current) => current?.id === updated.id ? updated : current);
       return true;
     } catch (updateError: unknown) {
       setError(updateError instanceof Error ? updateError.message : 'Não foi possível atualizar o perfil.');
       return false;
+    } finally {
+      setUpdatingOperatorId(null);
     }
   }
 
@@ -192,7 +197,7 @@ export function MobileOperatorsPanel(): React.JSX.Element {
         {operators.map((operator) => (
           <article className="cloud-mobile-operator" key={operator.id}>
             <div className="cloud-mobile-operator__identity"><span className={operator.active ? 'cloud-mobile-operator__status' : 'cloud-mobile-operator__status cloud-mobile-operator__status--inactive'} aria-label={operator.active ? 'Ativo' : 'Desativado'} /><div><strong>{operator.name}</strong><small>{`${enabledPermissions(operator.permissions)} · ${operator.active ? `${String(operator.sessionCount)} sessão(ões)` : 'Desativado'} · ${formatLastSeen(operator.lastSeenAt)}`}</small></div></div>
-            <PermissionSwitches disabled={!operator.active} idPrefix={`operator-${operator.id}`} permissions={operator.permissions} onChange={(nextPermissions) => void updateOperator(operator, { permissions: nextPermissions })} />
+            <PermissionSwitches disabled={!operator.active || updatingOperatorId === operator.id} idPrefix={`operator-${operator.id}`} permissions={operator.permissions} onChange={(nextPermissions) => void updateOperator(operator, { permissions: nextPermissions })} />
             <div className="cloud-mobile-operator__actions"><button className="button button--ghost" onClick={() => openEdit(operator)} type="button" title="Editar perfil"><Pencil size={16} aria-hidden="true" />Editar</button><button className="button button--ghost" onClick={() => void requirePassword(operator)} type="button" title="Exigir senha novamente"><KeyRound size={16} aria-hidden="true" />Senha</button><button className="button button--ghost" onClick={() => void updateOperator(operator, { active: !operator.active })} type="button">{operator.active ? 'Desativar' : 'Ativar'}</button><button className="button button--danger" onClick={() => void deleteOperator(operator)} type="button">Excluir</button></div>
           </article>
         ))}
