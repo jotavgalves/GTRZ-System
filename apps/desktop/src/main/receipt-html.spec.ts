@@ -34,25 +34,20 @@ const receipt: DatabaseOrderReceipt = {
 };
 
 describe('thermal receipt html', () => {
-  it('mostra a nota reduzida com operador, itens, total e pagamento sem repetir valores', () => {
-    const html = buildReceiptHtml(receipt, 58);
+  it('gera comprovante do cliente e vale de retirada na mesma impressão', async () => {
+    const html = await buildReceiptHtml(receipt, 58);
 
     expect(html).toContain('width: 58mm');
-    expect(html).toContain('NOTA DE RETIRADA');
+    expect(html).toContain('NOTA DE COMPRA');
+    expect(html).toContain('VALE DE RETIRADA');
     expect(html).toContain('La Rumba Teste');
     expect(html).toContain('2× Budweiser');
     expect(html).toContain('JOÃO');
-    expect(html).toContain('class="operator"');
+    expect(html).toContain('ATENDENTE:');
     expect(html).toContain('Dinheiro');
-    expect(html).toContain('Voucher VIP-001');
-    expect(html).toContain('Válida somente para o evento e a data indicados.');
-    expect(html).toContain('85FFBB3F');
-    expect(html).not.toContain('Mesa:');
-    expect(html).not.toContain('Subtotal');
-    expect(html).not.toContain('Recebido');
-    expect(html).not.toContain('Troco');
-    expect(html).not.toContain('Origem:');
-    expect(html).not.toContain('Impresso em:');
+    expect(html).toContain('R$ 10,00');
+    expect(html).toContain('CÓDIGO:');
+    expect(html).toContain('page-break-after:always');
   });
 
   it('dimensiona a altura conforme o conteúdo com limites seguros', () => {

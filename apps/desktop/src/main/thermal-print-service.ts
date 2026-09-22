@@ -116,7 +116,7 @@ export class ThermalPrintService {
     settings: PrintingSettings,
   ): Promise<PrintOrderResult> {
     try {
-      const html = buildReceiptHtml(receipt, settings.paperWidthMm);
+      const html = await buildReceiptHtml(receipt, settings.paperWidthMm);
       const window = createHiddenWindow();
 
       try {

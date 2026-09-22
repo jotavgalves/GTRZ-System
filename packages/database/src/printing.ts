@@ -48,6 +48,11 @@ export interface DatabaseOrderReceipt {
   readonly operatorName?: string;
   readonly originLabel?: string;
   readonly printedByLabel?: string;
+  readonly documentType?: 'sale-batch' | 'internal-decrement';
+  readonly internalReason?: string;
+  readonly recipient?: string;
+  readonly authorizedBy?: string;
+  readonly referenceCode?: string;
 }
 
 const AUTOMATIC_KEY = 'printing.automatic';

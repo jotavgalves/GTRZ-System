@@ -110,6 +110,11 @@ export interface CloudPrintReceipt {
     readonly changeCents: number;
   }[];
   readonly vouchers: readonly { readonly code: string; readonly amountCents: number }[];
+  readonly documentType?: 'sale-batch' | 'internal-decrement';
+  readonly internalReason?: string;
+  readonly recipient?: string;
+  readonly authorizedBy?: string;
+  readonly referenceCode?: string;
 }
 
 export interface ClaimedCloudPrintJob {

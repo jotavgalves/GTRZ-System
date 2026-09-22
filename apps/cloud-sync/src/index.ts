@@ -68,6 +68,11 @@ interface CloudReceiptDocument {
     readonly changeCents: number;
   }[];
   readonly vouchers: readonly { readonly code: string; readonly amountCents: number }[];
+  readonly documentType?: 'sale-batch' | 'internal-decrement';
+  readonly internalReason?: string;
+  readonly recipient?: string;
+  readonly authorizedBy?: string;
+  readonly referenceCode?: string;
 }
 
 interface ClaimedPrintJob {
@@ -1218,6 +1223,10 @@ export class EventRoom extends DurableObject<Env> {
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS print_counter (
+        counter_id INTEGER PRIMARY KEY CHECK (counter_id = 1),
+        next_number INTEGER NOT NULL
+      );
       CREATE TABLE IF NOT EXISTS print_attempts (
         attempt_id TEXT PRIMARY KEY,
         job_id TEXT NOT NULL,
@@ -1986,35 +1995,33 @@ export class EventRoom extends DurableObject<Env> {
         )
         .toArray();
       const movementId = crypto.randomUUID();
-      return this.#recordCommand(
+      const journalPayload = {
         commandId,
-        'journal.committed',
-        {
-          commandId,
-          deviceId,
-          auditId: now,
-          profile: 'mobile-inventory',
-          action: 'inventory.stock-moved',
-          entityType: 'stock-movement',
-          entityId: movementId,
-          createdAt: now,
-          details: {
-            productId,
-            productLabel: product.label,
-            type,
-            quantity,
-            delta,
-            beforeQuantity: product.quantity,
-            afterQuantity,
-            purchaseTotalCents,
-            purchaseUnitCents:
-              purchaseTotalCents === null ? null : Math.round(purchaseTotalCents / quantity),
-            note: note ?? `Movimento móvel por ${deviceLabel}`,
-            operatorName: deviceLabel,
-          },
+        deviceId,
+        auditId: now,
+        profile: 'mobile-inventory',
+        action: 'inventory.stock-moved',
+        entityType: 'stock-movement',
+        entityId: movementId,
+        createdAt: now,
+        details: {
+          productId,
+          productLabel: product.label,
+          type,
+          quantity,
+          delta,
+          beforeQuantity: product.quantity,
+          afterQuantity,
+          purchaseTotalCents,
+          purchaseUnitCents:
+            purchaseTotalCents === null ? null : Math.round(purchaseTotalCents / quantity),
+          note: note ?? `Movimento móvel por ${deviceLabel}`,
+          operatorName: deviceLabel,
         },
-        now,
-      );
+      };
+      const result = this.#recordCommand(commandId, 'journal.committed', journalPayload, now);
+      this.#enqueueInternalReceiptJob(eventId, commandId, journalPayload);
+      return result;
     });
     this.#broadcast(response.event, eventId);
     this.#recordJournalInMonitor(eventId, response.event, false);
@@ -2243,6 +2250,17 @@ export class EventRoom extends DurableObject<Env> {
           entityType,
           profile,
         });
+      } else if (action === 'inventory.stock-moved') {
+        this.#enqueueInternalReceiptJob(eventId, commandId, {
+          action,
+          auditId,
+          createdAt,
+          details,
+          deviceId,
+          entityId,
+          entityType,
+          profile,
+        });
       }
       return result;
     });
@@ -2278,6 +2296,8 @@ export class EventRoom extends DurableObject<Env> {
       (typeof order.id === 'string' && order.id) ||
       null;
     if (orderId === null) return;
+    const idempotencyKey = `receipt:${orderId}`;
+    if (this.#printJobExists(idempotencyKey)) return;
 
     const items = Array.isArray(details.items)
       ? details.items.flatMap((entry) => {
@@ -2360,6 +2380,8 @@ export class EventRoom extends DurableObject<Env> {
       items,
       payments,
       vouchers,
+      documentType: 'sale-batch',
+      referenceCode: this.#nextPrintReference(eventId),
     };
     const now = Date.now();
     this.ctx.storage.sql
@@ -2370,7 +2392,7 @@ export class EventRoom extends DurableObject<Env> {
           created_at, updated_at)
          VALUES (?, ?, ?, ?, ?, 'queued', NULL, NULL, NULL, NULL, NULL, NULL, 0, NULL, ?, ?)`,
         crypto.randomUUID(),
-        `receipt:${orderId}`,
+        idempotencyKey,
         commandId,
         orderId,
         JSON.stringify(document),
@@ -2378,6 +2400,87 @@ export class EventRoom extends DurableObject<Env> {
         now,
       )
       .toArray();
+  }
+
+  #enqueueInternalReceiptJob(eventId: string, commandId: string, payload: JsonRecord): void {
+    const details = isRecord(payload.details) ? payload.details : {};
+    const type = typeof details.type === 'string' ? details.type : null;
+    if (type !== 'courtesy' && type !== 'internal-consumption') return;
+    const movementId = typeof payload.entityId === 'string' ? payload.entityId : null;
+    const productLabel = typeof details.productLabel === 'string' ? details.productLabel : null;
+    const quantity = typeof details.quantity === 'number' ? details.quantity : null;
+    if (movementId === null || productLabel === null || quantity === null) return;
+    const idempotencyKey = `internal:${movementId}`;
+    if (this.#printJobExists(idempotencyKey)) return;
+    const note =
+      typeof details.note === 'string' && details.note.trim().length > 0 ? details.note : undefined;
+    const document: CloudReceiptDocument = {
+      orderId: movementId,
+      eventName:
+        typeof details.eventName === 'string'
+          ? details.eventName
+          : `Evento ${eventId.slice(0, 8).toUpperCase()}`,
+      servicePointLabel: 'Estoque GTRZ',
+      servicePointType: 'counter',
+      subtotalCents: 0,
+      discountCents: 0,
+      totalCents: 0,
+      closedAt: typeof payload.createdAt === 'number' ? payload.createdAt : Date.now(),
+      operatorName:
+        typeof details.operatorName === 'string'
+          ? details.operatorName
+          : typeof payload.profile === 'string'
+            ? payload.profile
+            : 'GTRZ',
+      originLabel: typeof payload.deviceId === 'string' ? payload.deviceId : 'GTRZ System',
+      items: [{ name: productLabel, quantity, unitPriceCents: 0, totalCents: 0 }],
+      payments: [],
+      vouchers: [],
+      documentType: 'internal-decrement',
+      internalReason: type === 'courtesy' ? 'CORTESIA' : 'CONSUMO INTERNO',
+      ...(note === undefined ? {} : { recipient: note }),
+      referenceCode: this.#nextPrintReference(eventId, 'BI'),
+    };
+    const now = Date.now();
+    this.ctx.storage.sql
+      .exec(
+        `INSERT INTO print_jobs
+         (job_id, idempotency_key, command_id, order_id, document_json, status, assigned_printer_id,
+          claim_token, claimed_at, printed_at, printed_by_device_id, printed_by_label, attempts, error,
+          created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, 'queued', NULL, NULL, NULL, NULL, NULL, NULL, 0, NULL, ?, ?)`,
+        crypto.randomUUID(),
+        idempotencyKey,
+        commandId,
+        movementId,
+        JSON.stringify(document),
+        now,
+        now,
+      )
+      .toArray();
+  }
+
+  #printJobExists(idempotencyKey: string): boolean {
+    return (
+      this.ctx.storage.sql
+        .exec('SELECT job_id FROM print_jobs WHERE idempotency_key = ?', idempotencyKey)
+        .toArray().length > 0
+    );
+  }
+
+  #nextPrintReference(eventId: string, prefix?: 'BI'): string {
+    this.ctx.storage.sql
+      .exec('INSERT OR IGNORE INTO print_counter (counter_id, next_number) VALUES (1, 1)')
+      .toArray();
+    const row = this.ctx.storage.sql
+      .exec('SELECT next_number FROM print_counter WHERE counter_id = 1')
+      .toArray()[0] as { readonly next_number: number };
+    this.ctx.storage.sql
+      .exec('UPDATE print_counter SET next_number = ? WHERE counter_id = 1', row.next_number + 1)
+      .toArray();
+    const number = String(row.next_number).padStart(4, '0');
+    const eventCode = eventId.slice(0, 8).toUpperCase();
+    return prefix === 'BI' ? `${eventCode}-BI-${number}` : `${eventCode}-${number}`;
   }
 
   #registerPrintPrinter(payload: JsonRecord): JsonRecord {
