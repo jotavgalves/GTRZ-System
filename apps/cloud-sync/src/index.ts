@@ -43,6 +43,51 @@ interface CommandResponse {
   readonly result: JsonRecord;
 }
 
+interface MobilePermissions {
+  readonly sales: boolean;
+  readonly inventory: boolean;
+  readonly tickets: boolean;
+  readonly expenses: boolean;
+  readonly vouchers: boolean;
+}
+
+const MOBILE_PERMISSION_KEYS = ['sales', 'inventory', 'tickets', 'expenses', 'vouchers'] as const;
+
+function legacyPermissions(role: unknown): MobilePermissions {
+  return {
+    sales: role === 'sales' || role === 'sales-and-inventory',
+    inventory: role === 'inventory' || role === 'sales-and-inventory',
+    tickets: false,
+    expenses: false,
+    vouchers: false,
+  };
+}
+
+function legacyRoleFor(permissions: MobilePermissions): 'sales' | 'inventory' | 'sales-and-inventory' {
+  if (permissions.sales && permissions.inventory) return 'sales-and-inventory';
+  return permissions.inventory ? 'inventory' : 'sales';
+}
+
+function mobilePermissions(value: unknown): MobilePermissions {
+  if (!isRecord(value)) throw new ApiError(400, 'INVALID_INPUT', 'Permissões móveis inválidas.');
+  const permissions = {} as Record<(typeof MOBILE_PERMISSION_KEYS)[number], boolean>;
+  for (const key of MOBILE_PERMISSION_KEYS) {
+    if (typeof value[key] !== 'boolean')
+      throw new ApiError(400, 'INVALID_INPUT', 'Permissões móveis inválidas.');
+    permissions[key] = value[key];
+  }
+  return permissions as MobilePermissions;
+}
+
+function storedMobilePermissions(value: unknown, role: unknown): MobilePermissions {
+  if (typeof value !== 'string') return legacyPermissions(role);
+  try {
+    return mobilePermissions(JSON.parse(value) as unknown);
+  } catch {
+    return legacyPermissions(role);
+  }
+}
+
 class ApiError extends Error {
   readonly status: number;
   readonly code: string;
@@ -308,6 +353,21 @@ export class MonitorRoom extends DurableObject<Env> {
         ON mobile_sessions (operator_id, revoked_at, last_seen_at DESC);
       DELETE FROM flow_log WHERE type = 'connection.heartbeat';
     `);
+    const columns = this.ctx.storage.sql.exec('PRAGMA table_info(mobile_operators)').toArray();
+    if (!columns.some((column) => column.name === 'permissions_json')) {
+      this.ctx.storage.sql.exec('ALTER TABLE mobile_operators ADD COLUMN permissions_json TEXT');
+    }
+    this.ctx.storage.sql
+      .exec(
+        `UPDATE mobile_operators
+         SET permissions_json = CASE role
+           WHEN 'sales' THEN '{"sales":true,"inventory":false,"tickets":false,"expenses":false,"vouchers":false}'
+           WHEN 'inventory' THEN '{"sales":false,"inventory":true,"tickets":false,"expenses":false,"vouchers":false}'
+           ELSE '{"sales":true,"inventory":true,"tickets":false,"expenses":false,"vouchers":false}'
+         END
+         WHERE permissions_json IS NULL`,
+      )
+      .toArray();
   }
 
   override async fetch(request: Request): Promise<Response> {
@@ -752,7 +812,7 @@ export class MonitorRoom extends DurableObject<Env> {
   #mobileOperators(): readonly JsonRecord[] {
     return this.ctx.storage.sql
       .exec(
-        `SELECT o.operator_id, o.name, o.role, o.active, o.created_at, o.updated_at, o.last_seen_at,
+        `SELECT o.operator_id, o.name, o.role, o.permissions_json, o.active, o.created_at, o.updated_at, o.last_seen_at,
                 (SELECT COUNT(*) FROM mobile_sessions s WHERE s.operator_id = o.operator_id AND s.revoked_at IS NULL) AS session_count
          FROM mobile_operators o ORDER BY o.active DESC, o.name COLLATE NOCASE`,
       )
@@ -764,7 +824,7 @@ export class MonitorRoom extends DurableObject<Env> {
     return {
       id: storedString(row.operator_id, 'operator_id'),
       name: storedString(row.name, 'name'),
-      role: storedString(row.role, 'role'),
+      permissions: storedMobilePermissions(row.permissions_json, row.role),
       active: Number(row.active) === 1,
       createdAt: Number(row.created_at),
       updatedAt: Number(row.updated_at),
@@ -778,10 +838,7 @@ export class MonitorRoom extends DurableObject<Env> {
     const password = requiredString(payload.password, 'password', 128);
     if (password.length < 6)
       throw new ApiError(400, 'INVALID_INPUT', 'A senha deve possuir ao menos 6 caracteres.');
-    const role = requiredString(payload.role, 'role', 32);
-    if (role !== 'sales' && role !== 'inventory' && role !== 'sales-and-inventory') {
-      throw new ApiError(400, 'INVALID_INPUT', 'Permissão móvel inválida.');
-    }
+    const permissions = mobilePermissions(payload.permissions);
     const operatorId = crypto.randomUUID();
     const salt = newSalt();
     const now = Date.now();
@@ -789,13 +846,14 @@ export class MonitorRoom extends DurableObject<Env> {
       this.ctx.storage.sql
         .exec(
           `INSERT INTO mobile_operators
-         (operator_id, name, password_salt, password_hash, role, active, created_at, updated_at, last_seen_at)
-         VALUES (?, ?, ?, ?, ?, 1, ?, ?, NULL)`,
+         (operator_id, name, password_salt, password_hash, role, permissions_json, active, created_at, updated_at, last_seen_at)
+         VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, NULL)`,
           operatorId,
           name,
           salt,
           await passwordHash(password, salt),
-          role,
+          legacyRoleFor(permissions),
+          JSON.stringify(permissions),
           now,
           now,
         )
@@ -811,13 +869,12 @@ export class MonitorRoom extends DurableObject<Env> {
     const current = this.#mobileOperatorRow(operatorId);
     const name =
       payload.name === undefined ? current.name : requiredString(payload.name, 'name', 60);
-    const role =
-      payload.role === undefined ? current.role : requiredString(payload.role, 'role', 32);
+    const permissions =
+      payload.permissions === undefined
+        ? storedMobilePermissions(current.permissions_json, current.role)
+        : mobilePermissions(payload.permissions);
     const active =
       payload.active === undefined ? Number(current.active) === 1 : payload.active === true;
-    if (role !== 'sales' && role !== 'inventory' && role !== 'sales-and-inventory') {
-      throw new ApiError(400, 'INVALID_INPUT', 'Permissão móvel inválida.');
-    }
     let salt = storedString(current.password_salt, 'password_salt');
     let hash = storedString(current.password_hash, 'password_hash');
     if (payload.password !== undefined) {
@@ -831,12 +888,13 @@ export class MonitorRoom extends DurableObject<Env> {
     try {
       this.ctx.storage.sql
         .exec(
-          `UPDATE mobile_operators SET name = ?, password_salt = ?, password_hash = ?, role = ?, active = ?, updated_at = ?
+          `UPDATE mobile_operators SET name = ?, password_salt = ?, password_hash = ?, role = ?, permissions_json = ?, active = ?, updated_at = ?
          WHERE operator_id = ?`,
           name,
           salt,
           hash,
-          role,
+          legacyRoleFor(permissions),
+          JSON.stringify(permissions),
           active ? 1 : 0,
           now,
           operatorId,
@@ -882,7 +940,7 @@ export class MonitorRoom extends DurableObject<Env> {
     const deviceId = requiredString(payload.deviceId, 'deviceId', 80);
     const rows = this.ctx.storage.sql
       .exec(
-        `SELECT operator_id, name, password_salt, password_hash, role, active, created_at, updated_at, last_seen_at
+        `SELECT operator_id, name, password_salt, password_hash, role, permissions_json, active, created_at, updated_at, last_seen_at
          FROM mobile_operators WHERE active = 1`,
       )
       .toArray() as Array<Record<string, unknown>>;
@@ -937,7 +995,7 @@ export class MonitorRoom extends DurableObject<Env> {
     const token = requiredString(payload.token, 'token', 160);
     const row = this.ctx.storage.sql
       .exec(
-        `SELECT o.operator_id, o.name, o.role, o.active, o.created_at, o.updated_at, o.last_seen_at,
+        `SELECT o.operator_id, o.name, o.role, o.permissions_json, o.active, o.created_at, o.updated_at, o.last_seen_at,
               s.device_id, s.created_at AS session_created_at
        FROM mobile_sessions s JOIN mobile_operators o ON o.operator_id = s.operator_id
        WHERE s.session_token = ? AND s.revoked_at IS NULL`,
@@ -964,7 +1022,7 @@ export class MonitorRoom extends DurableObject<Env> {
     return {
       operatorId: storedString(row.operator_id, 'operator_id'),
       name: storedString(row.name, 'name'),
-      role: storedString(row.role, 'role'),
+      permissions: storedMobilePermissions(row.permissions_json, row.role),
       deviceId: storedString(row.device_id, 'device_id'),
       eventId,
     };
@@ -973,7 +1031,7 @@ export class MonitorRoom extends DurableObject<Env> {
   #mobileOperatorRow(operatorId: string): Record<string, unknown> {
     const row = this.ctx.storage.sql
       .exec(
-        `SELECT operator_id, name, password_salt, password_hash, role, active, created_at, updated_at, last_seen_at
+        `SELECT operator_id, name, password_salt, password_hash, role, permissions_json, active, created_at, updated_at, last_seen_at
        FROM mobile_operators WHERE operator_id = ?`,
         operatorId,
       )
@@ -986,7 +1044,7 @@ export class MonitorRoom extends DurableObject<Env> {
   #mobileOperatorById(operatorId: string): JsonRecord {
     const row = this.ctx.storage.sql
       .exec(
-        `SELECT o.operator_id, o.name, o.role, o.active, o.created_at, o.updated_at, o.last_seen_at,
+        `SELECT o.operator_id, o.name, o.role, o.permissions_json, o.active, o.created_at, o.updated_at, o.last_seen_at,
               (SELECT COUNT(*) FROM mobile_sessions s WHERE s.operator_id = o.operator_id AND s.revoked_at IS NULL) AS session_count
        FROM mobile_operators o WHERE o.operator_id = ?`,
         operatorId,
@@ -1090,6 +1148,11 @@ export class EventRoom extends DurableObject<Env> {
         correction_command_id TEXT NOT NULL UNIQUE,
         created_at INTEGER NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS mobile_context (
+        context_id INTEGER PRIMARY KEY CHECK (context_id = 1),
+        payload_json TEXT NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
     `);
   }
 
@@ -1111,6 +1174,14 @@ export class EventRoom extends DurableObject<Env> {
 
       if (request.method === 'POST' && url.pathname.endsWith('/cashier/catalog')) {
         return json(this.#replaceCashierCatalog(await readJson(request)));
+      }
+
+      if (request.method === 'GET' && url.pathname.endsWith('/cashier/context')) {
+        return json(this.#mobileContext());
+      }
+
+      if (request.method === 'POST' && url.pathname.endsWith('/cashier/context')) {
+        return json(this.#replaceMobileContext(await readJson(request)));
       }
 
       if (request.method === 'POST' && url.pathname.endsWith('/cashier/sales')) {
@@ -1141,6 +1212,33 @@ export class EventRoom extends DurableObject<Env> {
             url.pathname.split('/')[3] ?? '',
           ),
         );
+      }
+
+      if (request.method === 'POST' && url.pathname.endsWith('/cashier/tickets')) {
+        return json(this.#commitMobileTicketSale(
+          await readJson(request),
+          requiredString(request.headers.get('X-GTRZ-Cashier-Device'), 'X-GTRZ-Cashier-Device', 80),
+          requiredString(request.headers.get('X-GTRZ-Cashier-Label'), 'X-GTRZ-Cashier-Label', 60),
+          url.pathname.split('/')[3] ?? '',
+        ));
+      }
+
+      if (request.method === 'POST' && url.pathname.endsWith('/cashier/expenses')) {
+        return json(this.#commitMobileExpense(
+          await readJson(request),
+          requiredString(request.headers.get('X-GTRZ-Cashier-Device'), 'X-GTRZ-Cashier-Device', 80),
+          requiredString(request.headers.get('X-GTRZ-Cashier-Label'), 'X-GTRZ-Cashier-Label', 60),
+          url.pathname.split('/')[3] ?? '',
+        ));
+      }
+
+      if (request.method === 'POST' && url.pathname.endsWith('/cashier/vouchers')) {
+        return json(this.#commitMobileVoucher(
+          await readJson(request),
+          requiredString(request.headers.get('X-GTRZ-Cashier-Device'), 'X-GTRZ-Cashier-Device', 80),
+          requiredString(request.headers.get('X-GTRZ-Cashier-Label'), 'X-GTRZ-Cashier-Label', 60),
+          url.pathname.split('/')[3] ?? '',
+        ));
       }
 
       if (request.method === 'POST' && url.pathname.endsWith('/cashier/reject-sale')) {
@@ -1277,6 +1375,187 @@ export class EventRoom extends DurableObject<Env> {
       .exec('SELECT COALESCE(MAX(sequence), 0) AS sequence FROM event_log')
       .one() as { readonly sequence: number };
     return { products, currentSequence: current.sequence };
+  }
+
+  #mobileContextPayload(): JsonRecord {
+    const row = this.ctx.storage.sql
+      .exec('SELECT payload_json FROM mobile_context WHERE context_id = 1')
+      .toArray()[0] as { readonly payload_json: string } | undefined;
+    if (row === undefined) return { ticketLots: [], servicePoints: [], voucherCodes: [] };
+    try {
+      return parseStoredJson(row.payload_json);
+    } catch {
+      return { ticketLots: [], servicePoints: [], voucherCodes: [] };
+    }
+  }
+
+  #mobileContext(): JsonRecord {
+    const current = this.ctx.storage.sql
+      .exec('SELECT COALESCE(MAX(sequence), 0) AS sequence FROM event_log')
+      .one() as { readonly sequence: number };
+    return { ...this.#mobileContextPayload(), currentSequence: current.sequence };
+  }
+
+  #replaceMobileContext(payload: JsonRecord): JsonRecord {
+    const ticketLots = Array.isArray(payload.ticketLots) ? payload.ticketLots : [];
+    const servicePoints = Array.isArray(payload.servicePoints) ? payload.servicePoints : [];
+    const voucherCodes = Array.isArray(payload.voucherCodes) ? payload.voucherCodes : [];
+    if (ticketLots.length > 500 || servicePoints.length > 500 || voucherCodes.length > 5_000)
+      throw new ApiError(400, 'INVALID_INPUT', 'Contexto móvel excede o limite permitido.');
+    const normalized = { ticketLots, servicePoints, voucherCodes };
+    this.ctx.storage.sql
+      .exec(
+        `INSERT INTO mobile_context (context_id, payload_json, updated_at) VALUES (1, ?, ?)
+         ON CONFLICT(context_id) DO UPDATE SET payload_json = excluded.payload_json, updated_at = excluded.updated_at`,
+        JSON.stringify(normalized),
+        Date.now(),
+      )
+      .toArray();
+    return this.#mobileContext();
+  }
+
+  #saveMobileContext(context: JsonRecord, now: number): void {
+    this.ctx.storage.sql
+      .exec(
+        `INSERT INTO mobile_context (context_id, payload_json, updated_at) VALUES (1, ?, ?)
+         ON CONFLICT(context_id) DO UPDATE SET payload_json = excluded.payload_json, updated_at = excluded.updated_at`,
+        JSON.stringify(context),
+        now,
+      )
+      .toArray();
+  }
+
+  #commitMobileTicketSale(
+    payload: JsonRecord,
+    deviceId: string,
+    deviceLabel: string,
+    eventId: string,
+  ): CommandResponse {
+    const commandId = requiredString(payload.commandId, 'commandId');
+    const existing = this.#existingCommand(commandId);
+    if (existing !== null) return existing;
+    const lotId = requiredString(payload.lotId, 'lotId');
+    const attendeeName = requiredString(payload.attendeeName, 'attendeeName', 120);
+    const source = requiredString(payload.source, 'source', 24);
+    const quantity = positiveInteger(payload.quantity, 'quantity');
+    if (!['sympla', 'whatsapp', 'door', 'courtesy'].includes(source))
+      throw new ApiError(400, 'INVALID_INPUT', 'Origem de ingresso inválida.');
+    const paymentMethod = source === 'courtesy' ? null : requiredString(payload.paymentMethod, 'paymentMethod', 24);
+    if (paymentMethod !== null && !['cash', 'pix', 'credit-card', 'debit-card'].includes(paymentMethod))
+      throw new ApiError(400, 'INVALID_INPUT', 'Método de pagamento inválido.');
+
+    const context = this.#mobileContextPayload();
+    const ticketLots = Array.isArray(context.ticketLots) ? context.ticketLots : [];
+    const lot = ticketLots.find((item) => isRecord(item) && item.id === lotId);
+    if (!isRecord(lot) || lot.active !== true || typeof lot.availableQuantity !== 'number')
+      throw new ApiError(409, 'TICKET_LOT_UNAVAILABLE', 'Este lote não está disponível no celular.');
+    const availableQuantity = lot.availableQuantity;
+    if (!Number.isSafeInteger(availableQuantity) || availableQuantity < quantity)
+      throw new ApiError(409, 'TICKET_CAPACITY_EXHAUSTED', 'Não há ingressos suficientes neste lote.');
+    const lotName = requiredString(lot.name, 'ticketLot.name', 100);
+    const unitPriceCents = source === 'courtesy' ? 0 : nonNegativeInteger(lot.priceCents, 'ticketLot.priceCents');
+    const now = Date.now();
+    const saleId = crypto.randomUUID();
+    const codes = Array.from({ length: quantity }, () => ({
+      id: crypto.randomUUID(),
+      code: `GTRZ-${crypto.randomUUID().replaceAll('-', '').slice(0, 10).toUpperCase()}`,
+    }));
+    const nextLots = ticketLots.map((item) => {
+      if (!isRecord(item) || item.id !== lotId) return item;
+      return {
+        ...item,
+        availableQuantity: availableQuantity - quantity,
+        soldQuantity: Number(item.soldQuantity ?? 0) + (source === 'courtesy' ? 0 : quantity),
+        courtesyQuantity: Number(item.courtesyQuantity ?? 0) + (source === 'courtesy' ? quantity : 0),
+      };
+    });
+    const journalPayload = {
+      commandId,
+      deviceId,
+      auditId: now,
+      profile: 'mobile-tickets',
+      action: source === 'courtesy' ? 'ticket.courtesy-created' : 'ticket.sale-created',
+      entityType: 'ticket-sale',
+      entityId: saleId,
+      createdAt: now,
+      details: {
+        attendeeName,
+        codes,
+        lotId,
+        lotName,
+        paymentMethod,
+        quantity,
+        source,
+        totalCents: unitPriceCents * quantity,
+        unitPriceCents,
+        operatorName: deviceLabel,
+      },
+    };
+    const response = this.ctx.storage.transactionSync(() => {
+      this.#saveMobileContext({ ...context, ticketLots: nextLots }, now);
+      return this.#recordCommand(commandId, 'journal.committed', journalPayload, now);
+    });
+    this.#broadcast(response.event, eventId);
+    this.#recordJournalInMonitor(eventId, response.event, false);
+    this.#archiveAcceptedJournal(eventId, response.event);
+    return response;
+  }
+
+  #commitMobileExpense(payload: JsonRecord, deviceId: string, deviceLabel: string, eventId: string): CommandResponse {
+    const commandId = requiredString(payload.commandId, 'commandId');
+    const existing = this.#existingCommand(commandId);
+    if (existing !== null) return existing;
+    const category = requiredString(payload.category, 'category', 80);
+    const description = requiredString(payload.description, 'description', 160);
+    const amountCents = positiveInteger(payload.amountCents, 'amountCents');
+    const paymentMethod = requiredString(payload.paymentMethod, 'paymentMethod', 24);
+    if (!['cash', 'pix', 'credit-card', 'debit-card'].includes(paymentMethod))
+      throw new ApiError(400, 'INVALID_INPUT', 'Método de pagamento inválido.');
+    const note = payload.note === undefined || payload.note === null ? null : requiredString(payload.note, 'note', 240);
+    const now = Date.now();
+    const journalPayload = {
+      commandId, deviceId, auditId: now, profile: 'mobile-expenses', action: 'expense.created',
+      entityType: 'expense', entityId: crypto.randomUUID(), createdAt: now,
+      details: { amountCents, category, description, note, paymentMethod, paymentStatus: 'open', operatorName: deviceLabel },
+    };
+    const response = this.ctx.storage.transactionSync(() => this.#recordCommand(commandId, 'journal.committed', journalPayload, now));
+    this.#broadcast(response.event, eventId);
+    this.#recordJournalInMonitor(eventId, response.event, false);
+    this.#archiveAcceptedJournal(eventId, response.event);
+    return response;
+  }
+
+  #commitMobileVoucher(payload: JsonRecord, deviceId: string, deviceLabel: string, eventId: string): CommandResponse {
+    const commandId = requiredString(payload.commandId, 'commandId');
+    const existing = this.#existingCommand(commandId);
+    if (existing !== null) return existing;
+    const label = requiredString(payload.label, 'label', 100);
+    const initialBalanceCents = positiveInteger(payload.initialBalanceCents, 'initialBalanceCents');
+    const servicePointId = requiredString(payload.servicePointId, 'servicePointId');
+    const context = this.#mobileContextPayload();
+    const servicePoints = Array.isArray(context.servicePoints) ? context.servicePoints : [];
+    if (!servicePoints.some((point) => isRecord(point) && point.id === servicePointId && point.active === true))
+      throw new ApiError(409, 'SERVICE_POINT_UNAVAILABLE', 'A mesa selecionada não está disponível.');
+    const requestedCode = payload.code === undefined || payload.code === null ? null : requiredString(payload.code, 'code', 32);
+    const code = (requestedCode ?? `GTRZ-${crypto.randomUUID().replaceAll('-', '').slice(0, 8)}`).toLocaleUpperCase('pt-BR').replaceAll(/\s+/gu, '-');
+    if (code.length < 4) throw new ApiError(400, 'INVALID_INPUT', 'Código de voucher inválido.');
+    const voucherCodes = Array.isArray(context.voucherCodes) ? context.voucherCodes.filter((value): value is string => typeof value === 'string') : [];
+    if (voucherCodes.some((value) => value.toLocaleUpperCase('pt-BR') === code))
+      throw new ApiError(409, 'VOUCHER_CODE_EXISTS', 'Este código de voucher já existe.');
+    const now = Date.now();
+    const journalPayload = {
+      commandId, deviceId, auditId: now, profile: 'mobile-vouchers', action: 'voucher.created',
+      entityType: 'voucher', entityId: crypto.randomUUID(), createdAt: now,
+      details: { code, initialBalanceCents, label, servicePointId, operatorName: deviceLabel },
+    };
+    const response = this.ctx.storage.transactionSync(() => {
+      this.#saveMobileContext({ ...context, voucherCodes: [...voucherCodes, code] }, now);
+      return this.#recordCommand(commandId, 'journal.committed', journalPayload, now);
+    });
+    this.#broadcast(response.event, eventId);
+    this.#recordJournalInMonitor(eventId, response.event, false);
+    this.#archiveAcceptedJournal(eventId, response.event);
+    return response;
   }
 
   #replaceCashierCatalog(payload: JsonRecord): JsonRecord {
@@ -2007,7 +2286,7 @@ interface CashierAuthorization {
 interface MobileAuthorization {
   readonly operatorId: string;
   readonly name: string;
-  readonly role: 'sales' | 'inventory' | 'sales-and-inventory';
+  readonly permissions: MobilePermissions;
   readonly deviceId: string;
   readonly eventId: string;
   readonly token: string;
@@ -2075,16 +2354,16 @@ async function authorizeMobile(request: Request, env: Env): Promise<MobileAuthor
     typeof payload.eventId !== 'string'
   )
     return null;
-  if (
-    payload.role !== 'sales' &&
-    payload.role !== 'inventory' &&
-    payload.role !== 'sales-and-inventory'
-  )
+  let permissions: MobilePermissions;
+  try {
+    permissions = mobilePermissions(payload.permissions);
+  } catch {
     return null;
+  }
   return {
     operatorId: payload.operatorId,
     name: payload.name,
-    role: payload.role,
+    permissions,
     deviceId: payload.deviceId,
     eventId: payload.eventId,
     token,
@@ -2092,7 +2371,7 @@ async function authorizeMobile(request: Request, env: Env): Promise<MobileAuthor
 }
 
 function eventRequest(url: URL): boolean {
-  return /^\/v1\/events\/[^/]+\/(stock|sales|journal|snapshot|stream|cashier\/(catalog|sales|reject-sale))$/.test(
+  return /^\/v1\/events\/[^/]+\/(stock|sales|journal|snapshot|stream|cashier\/(catalog|context|sales|stock|tickets|expenses|vouchers|reject-sale))$/.test(
     url.pathname,
   );
 }
@@ -2102,7 +2381,7 @@ function cashierApiRequest(url: URL): boolean {
 }
 
 function mobileApiRequest(url: URL): boolean {
-  return /^\/v1\/mobile\/(catalog|sales|stock|stream|session|session\/stream)$/.test(url.pathname);
+  return /^\/v1\/mobile\/(catalog|context|sales|stock|tickets|expenses|vouchers|stream|session|session\/stream)$/.test(url.pathname);
 }
 
 function monitorRequest(url: URL): boolean {
@@ -2262,7 +2541,7 @@ export default {
       }
       if (url.pathname === '/v1/mobile/session') {
         return json({
-          operator: { id: mobile.operatorId, name: mobile.name, role: mobile.role },
+          operator: { id: mobile.operatorId, name: mobile.name, permissions: mobile.permissions },
           eventId: mobile.eventId,
         });
       }
@@ -2274,12 +2553,13 @@ export default {
           new Request('https://monitor.internal/v1/mobile/session/stream', { headers }),
         );
       }
-      const isSalesRequest = url.pathname === '/v1/mobile/sales';
-      const isStockRequest = url.pathname === '/v1/mobile/stock';
-      if (
-        (isSalesRequest && mobile.role === 'inventory') ||
-        (isStockRequest && mobile.role === 'sales')
-      ) {
+      const permission =
+        url.pathname === '/v1/mobile/sales' ? 'sales' :
+        url.pathname === '/v1/mobile/stock' ? 'inventory' :
+        url.pathname === '/v1/mobile/tickets' ? 'tickets' :
+        url.pathname === '/v1/mobile/expenses' ? 'expenses' :
+        url.pathname === '/v1/mobile/vouchers' ? 'vouchers' : null;
+      if (permission !== null && !mobile.permissions[permission]) {
         return json(
           {
             error: { code: 'MOBILE_FORBIDDEN', message: 'Este perfil não possui esta permissão.' },
@@ -2293,9 +2573,7 @@ export default {
           ? 'catalog'
           : suffix === 'stream'
             ? 'stream'
-            : suffix === 'stock'
-              ? 'stock'
-              : 'sales';
+              : suffix;
       const room = env.EVENT_ROOM.get(env.EVENT_ROOM.idFromName(`event:${mobile.eventId}`));
       const targetUrl = new URL(
         `https://event.internal/v1/events/${encodeURIComponent(mobile.eventId)}/cashier/${targetSuffix}`,
@@ -2315,6 +2593,20 @@ export default {
           ...(request.method === 'POST' ? { body: await request.text() } : {}),
         }),
       );
+      if (suffix === 'context' && response.ok) {
+        const context: unknown = await response.json();
+        if (isRecord(context)) {
+          return refreshCashierSession(
+            json({
+              ...context,
+              ticketLots: mobile.permissions.tickets ? context.ticketLots : [],
+              servicePoints: mobile.permissions.vouchers ? context.servicePoints : [],
+              voucherCodes: mobile.permissions.vouchers ? context.voucherCodes : [],
+            }),
+            mobile.token,
+          );
+        }
+      }
       return refreshCashierSession(response, mobile.token);
     }
 

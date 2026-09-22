@@ -260,7 +260,7 @@
 
 .cloud-mobile-operators__create {
   display: grid;
-  grid-template-columns: minmax(10rem, 1fr) minmax(10rem, 1fr) minmax(10rem, 0.8fr) auto;
+  grid-template-columns: minmax(10rem, 1fr) minmax(10rem, 1fr) minmax(17rem, 1.6fr) auto;
   align-items: end;
   gap: var(--space-3);
 }
@@ -350,13 +350,69 @@
 
 .cloud-mobile-operator__actions { justify-content: flex-end; }
 
-.cloud-mobile-operator__actions select {
-  min-height: 2.2rem;
+.mobile-permission-switches {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.45rem 0.7rem;
+}
+
+.mobile-permission-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.38rem;
+  color: var(--color-text-muted);
+  font-size: 0.72rem;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.mobile-permission-switch input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+}
+
+.mobile-permission-switch i {
+  position: relative;
+  width: 1.7rem;
+  height: 1rem;
   border: 1px solid var(--color-border);
-  border-radius: var(--radius-sm);
+  border-radius: 999px;
   background: var(--color-bg-raised);
-  color: var(--color-text);
-  padding: 0 var(--space-2);
+  transition: background-color 140ms ease, border-color 140ms ease;
+}
+
+.mobile-permission-switch i::after {
+  position: absolute;
+  top: 0.14rem;
+  left: 0.16rem;
+  width: 0.58rem;
+  height: 0.58rem;
+  border-radius: 50%;
+  background: var(--color-text-muted);
+  content: '';
+  transition: transform 140ms ease, background-color 140ms ease;
+}
+
+.mobile-permission-switch input:checked + i {
+  border-color: var(--color-brand);
+  background: var(--color-brand-soft);
+}
+
+.mobile-permission-switch input:checked + i::after {
+  transform: translateX(0.64rem);
+  background: var(--color-brand);
+}
+
+.mobile-permission-switch input:focus-visible + i { outline: 2px solid var(--color-focus); outline-offset: 2px; }
+.mobile-permission-switch input:disabled + i { opacity: 0.45; }
+.mobile-permission-switch:has(input:disabled) { cursor: not-allowed; }
+
+.cloud-mobile-operator > .mobile-permission-switches {
+  flex: 0 1 22rem;
+  justify-content: flex-end;
 }
 
 .cloud-device-row,

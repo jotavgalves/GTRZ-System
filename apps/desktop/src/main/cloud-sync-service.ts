@@ -111,6 +111,8 @@ const SYNCHRONIZED_ACTIONS = new Set([
   'cash.supply',
   'cash.withdrawal',
   'cash.closed',
+  'voucher.created',
+  'voucher.service-point-bound',
   'ticket.lot-created',
   'ticket.lot-updated',
   'ticket.sale-created',
@@ -228,6 +230,7 @@ export class CloudSyncService {
 
     this.#retryRecoverablePaidOrders(database);
     await this.#publishCashierCatalog(database, activeEventId, pairingKey);
+    await this.#publishMobileContext(database, activeEventId, pairingKey);
     this.#ensureStream(database, activeEventId, deviceId, pairingKey);
 
     const pending = database.sqlite
@@ -621,6 +624,79 @@ export class CloudSyncService {
       throw new Error(
         `Não foi possível publicar o catálogo do caixa (${String(response.status)}).`,
       );
+    database.sqlite
+      .prepare(
+        `INSERT INTO sync_state (key, value, updated_at) VALUES (?, ?, ?)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+      )
+      .run(stateKey, fingerprint, Date.now());
+  }
+
+  async #publishMobileContext(
+    database: DatabaseContext,
+    activeEventId: string | null,
+    pairingKey: string,
+  ): Promise<void> {
+    if (activeEventId === null) return;
+    const ticketLots = database.sqlite
+      .prepare(
+        `SELECT tl.id, tl.name, tl.price_cents, tl.capacity, tl.active,
+                COALESCE(SUM(CASE WHEN ts.status = 'active' THEN ts.quantity ELSE 0 END), 0) AS used_quantity,
+                COALESCE(SUM(CASE WHEN ts.status = 'active' AND ts.source = 'courtesy' THEN ts.quantity ELSE 0 END), 0) AS courtesy_quantity
+         FROM ticket_lots tl
+         LEFT JOIN ticket_sales ts ON ts.lot_id = tl.id
+         WHERE tl.event_id = ?
+         GROUP BY tl.id
+         ORDER BY tl.created_at ASC`,
+      )
+      .all(activeEventId) as readonly {
+      readonly id: string;
+      readonly name: string;
+      readonly price_cents: number;
+      readonly capacity: number;
+      readonly active: number;
+      readonly used_quantity: number;
+      readonly courtesy_quantity: number;
+    }[];
+    const servicePoints = database.sqlite
+      .prepare(
+        `SELECT id, label, active FROM service_points
+         WHERE event_id = ? ORDER BY label COLLATE NOCASE`,
+      )
+      .all(activeEventId) as readonly { readonly id: string; readonly label: string; readonly active: number }[];
+    const voucherCodes = database.sqlite
+      .prepare('SELECT code FROM vouchers WHERE event_id = ?')
+      .all(activeEventId) as readonly { readonly code: string }[];
+    const context = {
+      ticketLots: ticketLots.map((lot) => ({
+        id: lot.id,
+        name: lot.name,
+        priceCents: lot.price_cents,
+        active: lot.active === 1,
+        soldQuantity: lot.used_quantity - lot.courtesy_quantity,
+        courtesyQuantity: lot.courtesy_quantity,
+        availableQuantity: Math.max(0, lot.capacity - lot.used_quantity),
+      })),
+      servicePoints: servicePoints.map((point) => ({ id: point.id, label: point.label, active: point.active === 1 })),
+      voucherCodes: voucherCodes.map((voucher) => voucher.code),
+    };
+    const fingerprint = JSON.stringify(context);
+    const stateKey = `mobile.context:${activeEventId}`;
+    const current = database.sqlite
+      .prepare('SELECT value FROM sync_state WHERE key = ?')
+      .get(stateKey) as { readonly value: string } | undefined;
+    if (current?.value === fingerprint) return;
+    const response = await fetch(
+      `${this.#endpoint}/v1/events/${encodeURIComponent(activeEventId)}/cashier/context`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-GTRZ-Key': pairingKey },
+        body: JSON.stringify(context),
+        signal: AbortSignal.timeout(CONNECTION_TIMEOUT_MS),
+      },
+    );
+    if (!response.ok)
+      throw new Error(`Não foi possível publicar o contexto móvel (${String(response.status)}).`);
     database.sqlite
       .prepare(
         `INSERT INTO sync_state (key, value, updated_at) VALUES (?, ?, ?)
@@ -1259,6 +1335,11 @@ export class CloudSyncService {
       return;
     }
 
+    if (payload.action.startsWith('voucher.')) {
+      this.#applyRemoteVoucher(database, eventId, payload);
+      return;
+    }
+
     throw new Error(`Ação remota ainda não possui aplicador: ${payload.action}.`);
   }
 
@@ -1651,6 +1732,60 @@ export class CloudSyncService {
       return;
     }
     throw new Error(`Ação de despesa sem aplicador: ${payload.action}.`);
+  }
+
+  #applyRemoteVoucher(database: DatabaseContext, eventId: string, payload: JournalPayload): void {
+    if (payload.entityId === null) throw new Error('O voucher remoto não possui identificador.');
+    if (database.sqlite.prepare('SELECT id FROM events WHERE id = ?').get(eventId) === undefined) {
+      throw new Error('O evento do voucher ainda não existe neste computador.');
+    }
+    if (payload.action === 'voucher.created') {
+      const code = stringField(payload.details, 'code');
+      const label = stringField(payload.details, 'label');
+      const initialBalanceCents = integerField(payload.details, 'initialBalanceCents');
+      const servicePointId = stringField(payload.details, 'servicePointId');
+      if (code === null || label === null || initialBalanceCents === null || initialBalanceCents <= 0) {
+        throw new Error('Dados insuficientes para criar o voucher remoto.');
+      }
+      const exists = database.sqlite.prepare('SELECT id FROM vouchers WHERE id = ?').get(payload.entityId);
+      if (exists === undefined) {
+        database.sqlite
+          .prepare(
+            `INSERT INTO vouchers
+             (id, event_id, code, label, initial_balance_cents, remaining_balance_cents, status, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?)`,
+          )
+          .run(payload.entityId, eventId, code, label, initialBalanceCents, initialBalanceCents, payload.createdAt, payload.createdAt);
+        database.sqlite
+          .prepare(
+            `INSERT INTO voucher_transactions
+             (id, event_id, voucher_id, voucher_code, order_id, type, amount_cents, balance_before_cents, balance_after_cents, note, created_at)
+             VALUES (?, ?, ?, ?, NULL, 'issue', ?, 0, ?, ?, ?)`,
+          )
+          .run(randomUUID(), eventId, payload.entityId, code, initialBalanceCents, initialBalanceCents, label, payload.createdAt);
+      }
+      if (servicePointId !== null) {
+        database.sqlite
+          .prepare(
+            `INSERT INTO app_meta (key, value, updated_at) VALUES (?, ?, ?)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+          )
+          .run(`voucher.service-point:${payload.entityId}`, servicePointId, payload.createdAt);
+      }
+      return;
+    }
+    if (payload.action === 'voucher.service-point-bound') {
+      const servicePointId = stringField(payload.details, 'servicePointId');
+      if (servicePointId === null) throw new Error('Vínculo remoto de voucher incompleto.');
+      database.sqlite
+        .prepare(
+          `INSERT INTO app_meta (key, value, updated_at) VALUES (?, ?, ?)
+           ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+        )
+        .run(`voucher.service-point:${payload.entityId}`, servicePointId, payload.createdAt);
+      return;
+    }
+    throw new Error(`Ação de voucher sem aplicador: ${payload.action}.`);
   }
 
   #applyRemoteCapital(database: DatabaseContext, eventId: string, payload: JournalPayload): void {

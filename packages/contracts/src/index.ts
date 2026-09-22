@@ -233,11 +233,17 @@ export const cloudSyncStatusSchema = z.object({
   message: z.string().min(1).max(240),
 });
 
-export const mobileOperatorRoleSchema = z.enum(['sales', 'inventory', 'sales-and-inventory']);
+export const mobilePermissionsSchema = z.object({
+  sales: z.boolean(),
+  inventory: z.boolean(),
+  tickets: z.boolean(),
+  expenses: z.boolean(),
+  vouchers: z.boolean(),
+});
 export const mobileOperatorSchema = z.object({
   id: z.uuid(),
   name: z.string().trim().min(2).max(60),
-  role: mobileOperatorRoleSchema,
+  permissions: mobilePermissionsSchema,
   active: z.boolean(),
   createdAt: z.number().int().nonnegative(),
   updatedAt: z.number().int().nonnegative(),
@@ -248,13 +254,13 @@ export const mobileOperatorListSchema = z.array(mobileOperatorSchema);
 export const createMobileOperatorInputSchema = z.object({
   name: z.string().trim().min(2).max(60),
   password: z.string().min(6).max(128),
-  role: mobileOperatorRoleSchema,
+  permissions: mobilePermissionsSchema,
 });
 export const updateMobileOperatorInputSchema = z.object({
   operatorId: z.uuid(),
   name: z.string().trim().min(2).max(60).optional(),
   password: z.string().min(6).max(128).optional(),
-  role: mobileOperatorRoleSchema.optional(),
+  permissions: mobilePermissionsSchema.optional(),
   active: z.boolean().optional(),
 });
 export const endMobileOperatorSessionsInputSchema = z.object({
@@ -388,7 +394,7 @@ export type UpdatePaymentTerminalSettingsInput = z.infer<
 >;
 export type OperationResult = z.infer<typeof operationResultSchema>;
 export type CloudSyncStatus = z.infer<typeof cloudSyncStatusSchema>;
-export type MobileOperatorRole = z.infer<typeof mobileOperatorRoleSchema>;
+export type MobilePermissions = z.infer<typeof mobilePermissionsSchema>;
 export type MobileOperator = z.infer<typeof mobileOperatorSchema>;
 export type CreateMobileOperatorInput = z.infer<typeof createMobileOperatorInputSchema>;
 export type UpdateMobileOperatorInput = z.infer<typeof updateMobileOperatorInputSchema>;

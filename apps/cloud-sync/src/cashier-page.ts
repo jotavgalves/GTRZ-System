@@ -240,6 +240,15 @@ main{max-width:1220px;padding:24px}
   letter-spacing:0;
 }
 .cart-body{padding:0 16px 16px}
+.mobile-operation{width:min(100%,560px)}
+.mobile-form{
+  padding:16px;
+  border:1px solid var(--line);
+  border-radius:14px;
+  background:linear-gradient(145deg,rgb(25 25 29 / 96%),rgb(18 18 21 / 96%));
+}
+.mobile-form .field:first-child{margin-top:0}
+.mobile-form .primary{margin-top:4px}
 .line{padding:14px 0}
 .line b{font-size:13px;font-weight:800}
 .quantity button{
@@ -430,6 +439,8 @@ main{max-width:1220px;padding:24px}
   .search-shell{margin-bottom:10px}
   .search{height:46px;border-radius:11px}
   .layout{display:block}
+  .mobile-operation{width:100%}
+  .mobile-form{padding:14px;border-radius:13px}
   .catalog{
     grid-template-columns:repeat(2,minmax(0,1fr));
     gap:8px;
@@ -449,7 +460,7 @@ main{max-width:1220px;padding:24px}
     right:10px;
     bottom:max(10px,env(safe-area-inset-bottom));
     left:10px;
-    z-index:15;
+    z-index:3;
     max-height:82vh;
     border-radius:16px;
     background:rgb(23 23 27 / 98%);
