@@ -19,6 +19,8 @@ import {
 import {
   getSessionState,
   listCombos,
+  redeemVouchers,
+  refundOrderVouchers,
   resetEventData,
   setActiveEvent,
   type DatabaseContext,
@@ -1658,6 +1660,60 @@ export class CloudSyncService {
       return;
     }
 
+    if (payload.action === 'inventory.stock-rejected') {
+      const productId = stringField(payload.details, 'productId');
+      const quantity = integerField(payload.details, 'quantity');
+      const originalDelta = integerField(payload.details, 'delta');
+      const reason = stringField(payload.details, 'reason');
+      if (
+        payload.entityId === null ||
+        productId === null ||
+        quantity === null ||
+        quantity <= 0 ||
+        originalDelta === null ||
+        originalDelta >= 0 ||
+        Math.abs(originalDelta) !== quantity
+      ) {
+        throw new Error('A rejeição central do estoque é inválida.');
+      }
+      const alreadyApplied = database.sqlite
+        .prepare('SELECT id FROM stock_movements WHERE id = ?')
+        .get(payload.entityId);
+      if (alreadyApplied !== undefined) return;
+      const productExists = database.sqlite.prepare('SELECT id FROM products WHERE id = ?').get(productId);
+      if (productExists === undefined) {
+        throw new Error('O produto rejeitado pela central não existe neste computador.');
+      }
+      const current = database.sqlite
+        .prepare('SELECT quantity FROM event_stock WHERE event_id = ? AND product_id = ?')
+        .get(eventId, productId) as { readonly quantity: number } | undefined;
+      const restoredQuantity = (current?.quantity ?? 0) + quantity;
+      database.sqlite
+        .prepare(
+          `INSERT INTO event_stock (event_id, product_id, quantity, updated_at)
+           VALUES (?, ?, ?, ?)
+           ON CONFLICT(event_id, product_id) DO UPDATE SET
+             quantity = excluded.quantity, updated_at = excluded.updated_at`,
+        )
+        .run(eventId, productId, restoredQuantity, payload.createdAt);
+      database.sqlite
+        .prepare(
+          `INSERT INTO stock_movements
+           (id, event_id, product_id, type, quantity, delta, note, created_at)
+           VALUES (?, ?, ?, 'correction-positive', ?, ?, ?, ?)`,
+        )
+        .run(
+          payload.entityId,
+          eventId,
+          productId,
+          quantity,
+          quantity,
+          reason ?? 'Movimento rejeitado pela central de sincronização.',
+          payload.createdAt,
+        );
+      return;
+    }
+
     if (payload.action === 'inventory.purchase-lot-corrected') {
       const totalCostCents = integerField(payload.details, 'totalCostCents');
       if (payload.entityId === null || totalCostCents === null || totalCostCents <= 0) {
@@ -1806,9 +1862,6 @@ export class CloudSyncService {
     ) {
       throw new Error('A venda remota não contém sua transação completa.');
     }
-    if (vouchers.length > 0) {
-      throw new Error('Venda remota com voucher aguarda aplicador transacional de voucher.');
-    }
     const orderId = stringField(order, 'id');
     const servicePointId = stringField(order, 'servicePointId');
     const servicePointLabel = stringField(order, 'servicePointLabel');
@@ -1822,6 +1875,21 @@ export class CloudSyncService {
       openedAt === null
     ) {
       throw new Error('A venda remota não identifica a comanda.');
+    }
+    const voucherUses = vouchers.map((raw) => {
+      if (!isRecord(raw)) throw new Error('Uso remoto de voucher inválido.');
+      const code = stringField(raw, 'code');
+      const amountCents = integerField(raw, 'amountCents');
+      if (code === null || amountCents === null || amountCents <= 0)
+        throw new Error('Uso remoto de voucher incompleto.');
+      return { code, amountCents };
+    });
+    const paymentCents = payments.reduce((total, raw) =>
+      total + (isRecord(raw) ? (integerField(raw, 'amountCents') ?? 0) : 0),
+    0);
+    const voucherCents = voucherUses.reduce((total, voucher) => total + voucher.amountCents, 0);
+    if (paymentCents + voucherCents !== totalCents) {
+      throw new Error('Os pagamentos e vouchers remotos não somam o total da venda.');
     }
     if (database.sqlite.prepare('SELECT id FROM orders WHERE id = ?').get(orderId) !== undefined)
       return;
@@ -1904,6 +1972,7 @@ export class CloudSyncService {
         payload.createdAt,
         payload.createdAt,
       );
+    redeemVouchers(database, eventId, orderId, voucherUses, payload.createdAt);
     const insertItem = database.sqlite.prepare(
       `INSERT INTO order_items
        (id, order_id, item_kind, item_id, item_name, quantity, unit_price_cents, total_cents, created_at)
@@ -2371,6 +2440,7 @@ export class CloudSyncService {
           payload.createdAt,
         );
     }
+    refundOrderVouchers(database, eventId, payload.entityId, payload.createdAt);
     const refunds = Array.isArray(payload.details.refunds) ? payload.details.refunds : [];
     for (const raw of refunds) {
       if (!isRecord(raw)) continue;

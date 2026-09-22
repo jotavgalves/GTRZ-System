@@ -1540,6 +1540,14 @@ export class EventRoom extends DurableObject<Env> {
         correction_command_id TEXT NOT NULL UNIQUE,
         created_at INTEGER NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS accepted_orders (
+        order_id TEXT PRIMARY KEY,
+        command_id TEXT NOT NULL UNIQUE,
+        stock_movements_json TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('paid', 'cancelled')),
+        created_at INTEGER NOT NULL,
+        cancelled_at INTEGER
+      );
       CREATE TABLE IF NOT EXISTS mobile_context (
         context_id INTEGER PRIMARY KEY CHECK (context_id = 1),
         payload_json TEXT NOT NULL,
@@ -1884,6 +1892,7 @@ export class EventRoom extends DurableObject<Env> {
         DELETE FROM event_log;
         DELETE FROM cashier_products;
         DELETE FROM cashier_rejections;
+        DELETE FROM accepted_orders;
         DELETE FROM mobile_context;
         DELETE FROM print_attempts;
         DELETE FROM print_jobs;
@@ -2229,15 +2238,46 @@ export class EventRoom extends DurableObject<Env> {
     });
     const now = Date.now();
     this.ctx.storage.transactionSync(() => {
-      this.ctx.storage.sql.exec('DELETE FROM cashier_products').toArray();
+      // The first connected desktop seeds the projection. Later publications may update
+      // presentation data or add products, but never overwrite cloud stock with a stale
+      // local SQLite snapshot.
       for (const product of products) {
+        const current = this.ctx.storage.sql
+          .exec(
+            'SELECT product_id FROM cashier_products WHERE product_id = ?',
+            product.productId,
+          )
+          .toArray()[0] as { readonly product_id: string } | undefined;
+        if (current === undefined) {
+          this.ctx.storage.sql
+            .exec(
+              `INSERT INTO cashier_products
+               (product_id, label, kind, item_kind, visible, category_label, image_data_url,
+                fallback_icon, components_json, unit_price_cents, quantity, active, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)`,
+              product.productId,
+              product.label,
+              product.kind,
+              product.itemKind,
+              product.visible ? 1 : 0,
+              product.categoryLabel,
+              product.imageDataUrl,
+              product.fallbackIcon,
+              JSON.stringify(product.components),
+              product.unitPriceCents,
+              product.quantity,
+              now,
+            )
+            .toArray();
+          continue;
+        }
         this.ctx.storage.sql
           .exec(
-            `INSERT INTO cashier_products
-             (product_id, label, kind, item_kind, visible, category_label, image_data_url,
-              fallback_icon, components_json, unit_price_cents, quantity, active, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)`,
-            product.productId,
+            `UPDATE cashier_products
+             SET label = ?, kind = ?, item_kind = ?, visible = ?, category_label = ?,
+                 image_data_url = ?, fallback_icon = ?, components_json = ?,
+                 unit_price_cents = ?, updated_at = ?
+             WHERE product_id = ?`,
             product.label,
             product.kind,
             product.itemKind,
@@ -2247,11 +2287,12 @@ export class EventRoom extends DurableObject<Env> {
             product.fallbackIcon,
             JSON.stringify(product.components),
             product.unitPriceCents,
-            product.quantity,
             now,
+            product.productId,
           )
           .toArray();
       }
+      this.#recalculateCashierCombos(now);
     });
     return this.#cashierCatalog();
   }
@@ -2406,39 +2447,7 @@ export class EventRoom extends DurableObject<Env> {
           )
           .toArray();
       }
-      const comboRows = this.ctx.storage.sql
-        .exec(
-          `SELECT product_id, components_json FROM cashier_products WHERE item_kind = 'combo' AND active = 1`,
-        )
-        .toArray() as unknown as readonly {
-        readonly product_id: string;
-        readonly components_json: string;
-      }[];
-      for (const combo of comboRows) {
-        const components = parseCashierComponents(combo.components_json);
-        const available =
-          components.length === 0
-            ? 0
-            : Math.min(
-                ...components.map((component) => {
-                  const componentRow = this.ctx.storage.sql
-                    .exec(
-                      'SELECT quantity FROM cashier_products WHERE product_id = ?',
-                      component.productId,
-                    )
-                    .toArray()[0] as { readonly quantity: number } | undefined;
-                  return Math.floor((componentRow?.quantity ?? 0) / component.quantity);
-                }),
-              );
-        this.ctx.storage.sql
-          .exec(
-            'UPDATE cashier_products SET quantity = ?, updated_at = ? WHERE product_id = ?',
-            available,
-            now,
-            combo.product_id,
-          )
-          .toArray();
-      }
+      this.#recalculateCashierCombos(now);
       const context = this.#mobileContextPayload();
       const servicePoints = Array.isArray(context.servicePoints) ? context.servicePoints : [];
       const selectedServicePoint = servicePoints.find(
@@ -2513,6 +2522,7 @@ export class EventRoom extends DurableObject<Env> {
         },
       };
       const result = this.#recordCommand(commandId, 'journal.committed', journalPayload, now);
+      this.#recordAcceptedOrder(saleId, commandId, stockMovements, now);
       this.#enqueueReceiptJob(eventId, commandId, journalPayload);
       return result;
     });
@@ -2789,6 +2799,289 @@ export class EventRoom extends DurableObject<Env> {
     };
   }
 
+  #recalculateCashierCombos(now: number): void {
+    const combos = this.ctx.storage.sql
+      .exec(
+        `SELECT product_id, components_json
+         FROM cashier_products WHERE item_kind = 'combo' AND active = 1`,
+      )
+      .toArray() as unknown as readonly {
+      readonly product_id: string;
+      readonly components_json: string;
+    }[];
+    for (const combo of combos) {
+      const components = parseCashierComponents(combo.components_json);
+      const available =
+        components.length === 0
+          ? 0
+          : Math.min(
+              ...components.map((component) => {
+                const componentRow = this.ctx.storage.sql
+                  .exec(
+                    'SELECT quantity FROM cashier_products WHERE product_id = ?',
+                    component.productId,
+                  )
+                  .toArray()[0] as { readonly quantity: number } | undefined;
+                return Math.floor((componentRow?.quantity ?? 0) / component.quantity);
+              }),
+            );
+      this.ctx.storage.sql
+        .exec(
+          'UPDATE cashier_products SET quantity = ?, updated_at = ? WHERE product_id = ?',
+          available,
+          now,
+          combo.product_id,
+        )
+        .toArray();
+    }
+  }
+
+  #readJournalStockMovements(details: JsonRecord):
+    | readonly { readonly id: string; readonly productId: string; readonly quantity: number; readonly delta: number }[]
+    | null {
+    if (!Array.isArray(details.stockMovements) || details.stockMovements.length === 0) return null;
+    const ids = new Set<string>();
+    const movements = [] as {
+      id: string;
+      productId: string;
+      quantity: number;
+      delta: number;
+    }[];
+    for (const raw of details.stockMovements) {
+      if (!isRecord(raw)) return null;
+      const id = typeof raw.id === 'string' ? raw.id : null;
+      const productId =
+        typeof raw.product_id === 'string'
+          ? raw.product_id
+          : typeof raw.productId === 'string'
+            ? raw.productId
+            : null;
+      const quantity = typeof raw.quantity === 'number' ? raw.quantity : null;
+      const delta = typeof raw.delta === 'number' ? raw.delta : null;
+      if (
+        id === null ||
+        productId === null ||
+        quantity === null ||
+        !Number.isSafeInteger(quantity) ||
+        quantity <= 0 ||
+        delta === null ||
+        !Number.isSafeInteger(delta) ||
+        delta === 0 ||
+        Math.abs(delta) !== quantity ||
+        ids.has(id)
+      ) {
+        return null;
+      }
+      ids.add(id);
+      movements.push({ id, productId, quantity, delta });
+    }
+    return movements;
+  }
+
+  #applyCanonicalStockDeltas(
+    movements: readonly { readonly productId: string; readonly quantity: number; readonly delta: number }[],
+    now: number,
+  ): string | null {
+    const totals = new Map<string, number>();
+    for (const movement of movements) {
+      totals.set(movement.productId, (totals.get(movement.productId) ?? 0) + movement.delta);
+    }
+    const products = new Map<
+      string,
+      { readonly label: string; readonly quantity: number; readonly active: number; readonly itemKind: string }
+    >();
+    for (const [productId, delta] of totals) {
+      const product = this.ctx.storage.sql
+        .exec(
+          `SELECT label, quantity, active, item_kind AS itemKind
+           FROM cashier_products WHERE product_id = ?`,
+          productId,
+        )
+        .toArray()[0] as
+        | { readonly label: string; readonly quantity: number; readonly active: number; readonly itemKind: string }
+        | undefined;
+      if (product === undefined || product.active !== 1 || product.itemKind !== 'product') {
+        return 'Um item da operação não existe mais no estoque central.';
+      }
+      if (product.quantity + delta < 0) {
+        return `Estoque central insuficiente para ${product.label}.`;
+      }
+      products.set(productId, product);
+    }
+    for (const [productId, delta] of totals) {
+      this.ctx.storage.sql
+        .exec(
+          'UPDATE cashier_products SET quantity = quantity + ?, updated_at = ? WHERE product_id = ?',
+          delta,
+          now,
+          productId,
+        )
+        .toArray();
+    }
+    this.#recalculateCashierCombos(now);
+    return null;
+  }
+
+  #recordAcceptedOrder(
+    orderId: string,
+    commandId: string,
+    movements: readonly unknown[],
+    now: number,
+  ): void {
+    this.ctx.storage.sql
+      .exec(
+        `INSERT INTO accepted_orders
+         (order_id, command_id, stock_movements_json, status, created_at, cancelled_at)
+         VALUES (?, ?, ?, 'paid', ?, NULL)`,
+        orderId,
+        commandId,
+        JSON.stringify(movements),
+        now,
+      )
+      .toArray();
+  }
+
+  #acceptDesktopPaidOrder(
+    commandId: string,
+    entityId: string | null,
+    details: JsonRecord,
+    now: number,
+  ): string | null {
+    const order = isRecord(details.order) ? details.order : null;
+    const orderId = order !== null && typeof order.id === 'string' ? order.id : entityId;
+    if (orderId === null || entityId === null || orderId !== entityId) {
+      return 'A venda não possui uma comanda válida para confirmação central.';
+    }
+    const existing = this.ctx.storage.sql
+      .exec('SELECT command_id FROM accepted_orders WHERE order_id = ?', orderId)
+      .toArray()[0] as { readonly command_id: string } | undefined;
+    if (existing !== undefined) {
+      return 'Esta comanda já foi confirmada por outro comando.';
+    }
+    const movements = this.#readJournalStockMovements(details);
+    if (movements === null || movements.some((movement) => movement.delta >= 0)) {
+      return 'A venda não contém as baixas de estoque necessárias para confirmação central.';
+    }
+    const stockError = this.#applyCanonicalStockDeltas(movements, now);
+    if (stockError !== null) return stockError;
+    this.#recordAcceptedOrder(orderId, commandId, movements, now);
+    return null;
+  }
+
+  #acceptDesktopStockMovement(details: JsonRecord, now: number): string | null {
+    const productId = typeof details.productId === 'string' ? details.productId : null;
+    const quantity = typeof details.quantity === 'number' ? details.quantity : null;
+    const delta = typeof details.delta === 'number' ? details.delta : null;
+    if (
+      productId === null ||
+      quantity === null ||
+      !Number.isSafeInteger(quantity) ||
+      quantity <= 0 ||
+      delta === null ||
+      !Number.isSafeInteger(delta) ||
+      delta === 0 ||
+      Math.abs(delta) !== quantity
+    ) {
+      return 'O movimento de estoque não contém uma quantidade válida.';
+    }
+    return this.#applyCanonicalStockDeltas([{ productId, quantity, delta }], now);
+  }
+
+  #restoreAcceptedOrder(orderId: string, now: number): string | null {
+    const row = this.ctx.storage.sql
+      .exec(
+        `SELECT stock_movements_json, status FROM accepted_orders WHERE order_id = ?`,
+        orderId,
+      )
+      .toArray()[0] as { readonly stock_movements_json: string; readonly status: string } | undefined;
+    if (row === undefined || row.status === 'cancelled') return null;
+    let storedMovements: unknown;
+    try {
+      storedMovements = JSON.parse(row.stock_movements_json) as unknown;
+    } catch {
+      return 'A venda central possui movimentos de estoque ilegíveis.';
+    }
+    const movements = this.#readJournalStockMovements({ stockMovements: storedMovements });
+    if (movements === null) return 'A venda central não possui movimentos de estoque restauráveis.';
+    const restoreError = this.#applyCanonicalStockDeltas(
+      movements.map((movement) => ({ ...movement, delta: -movement.delta })),
+      now,
+    );
+    if (restoreError !== null) return restoreError;
+    this.ctx.storage.sql
+      .exec('UPDATE accepted_orders SET status = \'cancelled\', cancelled_at = ? WHERE order_id = ?', now, orderId)
+      .toArray();
+    return null;
+  }
+
+  #rejectedDesktopOrder(
+    commandId: string,
+    entityId: string | null,
+    details: JsonRecord,
+    deviceId: string,
+    reason: string,
+    now: number,
+  ): CommandResponse {
+    const payments = Array.isArray(details.payments)
+      ? details.payments.flatMap((payment) => {
+          if (!isRecord(payment) || typeof payment.method !== 'string' || typeof payment.amountCents !== 'number')
+            return [];
+          return [{ method: payment.method, amountCents: payment.amountCents }];
+        })
+      : [];
+    return this.#recordCommand(
+      commandId,
+      'journal.rejected',
+      {
+        action: 'operations.order-cancelled',
+        auditId: 0,
+        createdAt: now,
+        details: {
+          reason: `Rejeitada pela central: ${reason}`,
+          refunds: payments,
+          rejectedCommandId: commandId,
+          rejectedDeviceId: deviceId,
+        },
+        deviceId: 'cloud-audit',
+        entityId,
+        entityType: 'order',
+        profile: 'system',
+      },
+      now,
+    );
+  }
+
+  #rejectedDesktopStockMovement(
+    commandId: string,
+    entityId: string | null,
+    details: JsonRecord,
+    deviceId: string,
+    reason: string,
+    now: number,
+  ): CommandResponse {
+    return this.#recordCommand(
+      commandId,
+      'journal.rejected',
+      {
+        action: 'inventory.stock-rejected',
+        auditId: 0,
+        createdAt: now,
+        details: {
+          ...details,
+          originalMovementId: entityId,
+          reason: `Rejeitado pela central: ${reason}`,
+          rejectedCommandId: commandId,
+          rejectedDeviceId: deviceId,
+        },
+        deviceId: 'cloud-audit',
+        entityId: `cloud-reject:${commandId}`,
+        entityType: 'stock-movement',
+        profile: 'system',
+      },
+      now,
+    );
+  }
+
   #commitJournal(payload: JsonRecord, eventId: string): CommandResponse {
     const commandId = requiredString(payload.commandId, 'commandId');
     const existing = this.#existingCommand(commandId);
@@ -2822,11 +3115,40 @@ export class EventRoom extends DurableObject<Env> {
     const profile = requiredString(payload.profile, 'profile', 32);
 
     const response = this.ctx.storage.transactionSync(() => {
+      const now = Date.now();
+      if (action === 'operations.order-paid') {
+        const rejection = this.#acceptDesktopPaidOrder(commandId, entityId, details, now);
+        if (rejection !== null) {
+          return this.#rejectedDesktopOrder(
+            commandId,
+            entityId,
+            details,
+            deviceId,
+            rejection,
+            now,
+          );
+        }
+      } else if (action === 'inventory.stock-moved') {
+        const rejection = this.#acceptDesktopStockMovement(details, now);
+        if (rejection !== null) {
+          return this.#rejectedDesktopStockMovement(
+            commandId,
+            entityId,
+            details,
+            deviceId,
+            rejection,
+            now,
+          );
+        }
+      } else if (action === 'operations.order-cancelled' && entityId !== null) {
+        const rejection = this.#restoreAcceptedOrder(entityId, now);
+        if (rejection !== null) throw new ApiError(409, 'ORDER_RESTORE_FAILED', rejection);
+      }
       const result = this.#recordCommand(
         commandId,
         'journal.recorded',
         { action, auditId, createdAt, details, deviceId, entityId, entityType, profile },
-        Date.now(),
+        now,
       );
       if (action === 'operations.order-paid') {
         this.#enqueueReceiptJob(eventId, commandId, {
