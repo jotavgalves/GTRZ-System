@@ -1,4 +1,5 @@
 import { appendAudit } from './audit';
+import { hostname } from 'node:os';
 import { getSessionState } from './control';
 import { getOrder } from './operation-core';
 import type { DatabasePaymentMethod, DatabaseServicePointType } from './operation-types';
@@ -9,6 +10,7 @@ export type DatabaseThermalPaperWidth = 58 | 80;
 export interface DatabasePrintingSettings {
   readonly automaticPrinting: boolean;
   readonly deviceName: string | null;
+  readonly machineName: string;
   readonly paperWidthMm: DatabaseThermalPaperWidth;
 }
 
@@ -43,10 +45,14 @@ export interface DatabaseOrderReceipt {
   readonly items: readonly DatabaseReceiptItem[];
   readonly payments: readonly DatabaseReceiptPayment[];
   readonly vouchers: readonly DatabaseReceiptVoucher[];
+  readonly operatorName?: string;
+  readonly originLabel?: string;
+  readonly printedByLabel?: string;
 }
 
 const AUTOMATIC_KEY = 'printing.automatic';
 const DEVICE_KEY = 'printing.device_name';
+const MACHINE_NAME_KEY = 'printing.machine_name';
 const PAPER_WIDTH_KEY = 'printing.paper_width_mm';
 
 function readMeta(database: DatabaseContext, key: string): string | null {
@@ -69,11 +75,13 @@ function writeMeta(database: DatabaseContext, key: string, value: string): void 
 export function getPrintingSettings(database: DatabaseContext): DatabasePrintingSettings {
   const automaticPrinting = readMeta(database, AUTOMATIC_KEY) === '1';
   const rawDeviceName = readMeta(database, DEVICE_KEY);
+  const rawMachineName = readMeta(database, MACHINE_NAME_KEY)?.trim();
   const rawPaperWidth = Number(readMeta(database, PAPER_WIDTH_KEY) ?? '80');
 
   return {
     automaticPrinting,
     deviceName: rawDeviceName === null || rawDeviceName.length === 0 ? null : rawDeviceName,
+    machineName: rawMachineName && rawMachineName.length >= 2 ? rawMachineName : hostname(),
     paperWidthMm: rawPaperWidth === 58 ? 58 : 80,
   };
 }
@@ -87,10 +95,12 @@ export function updatePrintingSettings(
   }
 
   const deviceName = input.deviceName?.trim() ?? '';
+  const machineName = input.machineName.trim();
 
   database.sqlite.transaction(() => {
     writeMeta(database, AUTOMATIC_KEY, input.automaticPrinting ? '1' : '0');
     writeMeta(database, DEVICE_KEY, deviceName);
+    writeMeta(database, MACHINE_NAME_KEY, machineName);
     writeMeta(database, PAPER_WIDTH_KEY, String(input.paperWidthMm));
     appendAudit(database, {
       action: 'settings.printing-updated',
@@ -99,6 +109,7 @@ export function updatePrintingSettings(
       details: {
         automaticPrinting: input.automaticPrinting,
         deviceName: deviceName.length === 0 ? null : deviceName,
+        machineName,
         paperWidthMm: input.paperWidthMm,
       },
     });

@@ -13,12 +13,14 @@ export const printerListSchema = z.array(printerInfoSchema);
 export const printingSettingsSchema = z.object({
   automaticPrinting: z.boolean(),
   deviceName: z.string().min(1).nullable(),
+  machineName: z.string().trim().min(2).max(60),
   paperWidthMm: thermalPaperWidthSchema,
 });
 
 export const updatePrintingSettingsInputSchema = printingSettingsSchema.pick({
   automaticPrinting: true,
   deviceName: true,
+  machineName: true,
   paperWidthMm: true,
 });
 

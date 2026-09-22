@@ -1,6 +1,7 @@
 import { DurableObject } from 'cloudflare:workers';
 import { cashierIcon, cashierManifest, cashierPage } from './cashier-page';
 import { monitorPage } from './monitor-page';
+import { printQueuePage } from './print-queue-page';
 
 interface Env {
   readonly EVENT_ROOM: DurableObjectNamespace<EventRoom>;
@@ -43,6 +44,38 @@ interface CommandResponse {
   readonly result: JsonRecord;
 }
 
+interface CloudReceiptDocument {
+  readonly orderId: string;
+  readonly eventName: string;
+  readonly servicePointLabel: string;
+  readonly servicePointType: 'counter' | 'table';
+  readonly subtotalCents: number;
+  readonly discountCents: number;
+  readonly totalCents: number;
+  readonly closedAt: number;
+  readonly operatorName: string;
+  readonly originLabel: string;
+  readonly items: readonly {
+    readonly name: string;
+    readonly quantity: number;
+    readonly unitPriceCents: number;
+    readonly totalCents: number;
+  }[];
+  readonly payments: readonly {
+    readonly method: 'cash' | 'pix' | 'credit-card' | 'debit-card';
+    readonly amountCents: number;
+    readonly receivedCents: number | null;
+    readonly changeCents: number;
+  }[];
+  readonly vouchers: readonly { readonly code: string; readonly amountCents: number }[];
+}
+
+interface ClaimedPrintJob {
+  readonly jobId: string;
+  readonly claimToken: string;
+  readonly document: CloudReceiptDocument;
+}
+
 interface MobilePermissions {
   readonly sales: boolean;
   readonly inventory: boolean;
@@ -63,7 +96,9 @@ function legacyPermissions(role: unknown): MobilePermissions {
   };
 }
 
-function legacyRoleFor(permissions: MobilePermissions): 'sales' | 'inventory' | 'sales-and-inventory' {
+function legacyRoleFor(
+  permissions: MobilePermissions,
+): 'sales' | 'inventory' | 'sales-and-inventory' {
   if (permissions.sales && permissions.inventory) return 'sales-and-inventory';
   return permissions.inventory ? 'inventory' : 'sales';
 }
@@ -1153,6 +1188,45 @@ export class EventRoom extends DurableObject<Env> {
         payload_json TEXT NOT NULL,
         updated_at INTEGER NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS print_printers (
+        printer_id TEXT PRIMARY KEY,
+        device_id TEXT NOT NULL,
+        device_label TEXT NOT NULL,
+        printer_name TEXT NOT NULL,
+        paper_width_mm INTEGER NOT NULL CHECK (paper_width_mm IN (58, 80)),
+        enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
+        busy_job_id TEXT,
+        last_seen_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        UNIQUE(device_id, printer_name)
+      );
+      CREATE TABLE IF NOT EXISTS print_jobs (
+        job_id TEXT PRIMARY KEY,
+        idempotency_key TEXT NOT NULL UNIQUE,
+        command_id TEXT NOT NULL,
+        order_id TEXT NOT NULL,
+        document_json TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('queued', 'claimed', 'printed', 'failed', 'uncertain')),
+        assigned_printer_id TEXT,
+        claim_token TEXT,
+        claimed_at INTEGER,
+        printed_at INTEGER,
+        printed_by_device_id TEXT,
+        printed_by_label TEXT,
+        attempts INTEGER NOT NULL DEFAULT 0,
+        error TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS print_attempts (
+        attempt_id TEXT PRIMARY KEY,
+        job_id TEXT NOT NULL,
+        printer_id TEXT NOT NULL,
+        device_id TEXT NOT NULL,
+        result TEXT NOT NULL CHECK (result IN ('claimed', 'printed', 'failed', 'uncertain')),
+        error TEXT,
+        created_at INTEGER NOT NULL
+      );
     `);
   }
 
@@ -1215,36 +1289,70 @@ export class EventRoom extends DurableObject<Env> {
       }
 
       if (request.method === 'POST' && url.pathname.endsWith('/cashier/tickets')) {
-        return json(this.#commitMobileTicketSale(
-          await readJson(request),
-          requiredString(request.headers.get('X-GTRZ-Cashier-Device'), 'X-GTRZ-Cashier-Device', 80),
-          requiredString(request.headers.get('X-GTRZ-Cashier-Label'), 'X-GTRZ-Cashier-Label', 60),
-          url.pathname.split('/')[3] ?? '',
-        ));
+        return json(
+          this.#commitMobileTicketSale(
+            await readJson(request),
+            requiredString(
+              request.headers.get('X-GTRZ-Cashier-Device'),
+              'X-GTRZ-Cashier-Device',
+              80,
+            ),
+            requiredString(request.headers.get('X-GTRZ-Cashier-Label'), 'X-GTRZ-Cashier-Label', 60),
+            url.pathname.split('/')[3] ?? '',
+          ),
+        );
       }
 
       if (request.method === 'POST' && url.pathname.endsWith('/cashier/expenses')) {
-        return json(this.#commitMobileExpense(
-          await readJson(request),
-          requiredString(request.headers.get('X-GTRZ-Cashier-Device'), 'X-GTRZ-Cashier-Device', 80),
-          requiredString(request.headers.get('X-GTRZ-Cashier-Label'), 'X-GTRZ-Cashier-Label', 60),
-          url.pathname.split('/')[3] ?? '',
-        ));
+        return json(
+          this.#commitMobileExpense(
+            await readJson(request),
+            requiredString(
+              request.headers.get('X-GTRZ-Cashier-Device'),
+              'X-GTRZ-Cashier-Device',
+              80,
+            ),
+            requiredString(request.headers.get('X-GTRZ-Cashier-Label'), 'X-GTRZ-Cashier-Label', 60),
+            url.pathname.split('/')[3] ?? '',
+          ),
+        );
       }
 
       if (request.method === 'POST' && url.pathname.endsWith('/cashier/vouchers')) {
-        return json(this.#commitMobileVoucher(
-          await readJson(request),
-          requiredString(request.headers.get('X-GTRZ-Cashier-Device'), 'X-GTRZ-Cashier-Device', 80),
-          requiredString(request.headers.get('X-GTRZ-Cashier-Label'), 'X-GTRZ-Cashier-Label', 60),
-          url.pathname.split('/')[3] ?? '',
-        ));
+        return json(
+          this.#commitMobileVoucher(
+            await readJson(request),
+            requiredString(
+              request.headers.get('X-GTRZ-Cashier-Device'),
+              'X-GTRZ-Cashier-Device',
+              80,
+            ),
+            requiredString(request.headers.get('X-GTRZ-Cashier-Label'), 'X-GTRZ-Cashier-Label', 60),
+            url.pathname.split('/')[3] ?? '',
+          ),
+        );
       }
 
       if (request.method === 'POST' && url.pathname.endsWith('/cashier/reject-sale')) {
         return json(
           this.#rejectCashierSale(await readJson(request), url.pathname.split('/')[3] ?? ''),
         );
+      }
+
+      if (request.method === 'POST' && url.pathname.endsWith('/print/printers')) {
+        return json(this.#registerPrintPrinter(await readJson(request)));
+      }
+
+      if (request.method === 'POST' && url.pathname.endsWith('/print/claim')) {
+        return json(this.#claimPrintJob(await readJson(request)));
+      }
+
+      if (request.method === 'POST' && url.pathname.endsWith('/print/complete')) {
+        return json(this.#completePrintJob(await readJson(request)));
+      }
+
+      if (request.method === 'GET' && url.pathname.endsWith('/print/jobs')) {
+        return json(this.#listPrintJobs());
       }
 
       if (request.method === 'POST' && url.pathname.endsWith('/stock')) {
@@ -1440,20 +1548,33 @@ export class EventRoom extends DurableObject<Env> {
     const quantity = positiveInteger(payload.quantity, 'quantity');
     if (!['sympla', 'whatsapp', 'door', 'courtesy'].includes(source))
       throw new ApiError(400, 'INVALID_INPUT', 'Origem de ingresso inválida.');
-    const paymentMethod = source === 'courtesy' ? null : requiredString(payload.paymentMethod, 'paymentMethod', 24);
-    if (paymentMethod !== null && !['cash', 'pix', 'credit-card', 'debit-card'].includes(paymentMethod))
+    const paymentMethod =
+      source === 'courtesy' ? null : requiredString(payload.paymentMethod, 'paymentMethod', 24);
+    if (
+      paymentMethod !== null &&
+      !['cash', 'pix', 'credit-card', 'debit-card'].includes(paymentMethod)
+    )
       throw new ApiError(400, 'INVALID_INPUT', 'Método de pagamento inválido.');
 
     const context = this.#mobileContextPayload();
     const ticketLots = Array.isArray(context.ticketLots) ? context.ticketLots : [];
     const lot = ticketLots.find((item) => isRecord(item) && item.id === lotId);
     if (!isRecord(lot) || lot.active !== true || typeof lot.availableQuantity !== 'number')
-      throw new ApiError(409, 'TICKET_LOT_UNAVAILABLE', 'Este lote não está disponível no celular.');
+      throw new ApiError(
+        409,
+        'TICKET_LOT_UNAVAILABLE',
+        'Este lote não está disponível no celular.',
+      );
     const availableQuantity = lot.availableQuantity;
     if (!Number.isSafeInteger(availableQuantity) || availableQuantity < quantity)
-      throw new ApiError(409, 'TICKET_CAPACITY_EXHAUSTED', 'Não há ingressos suficientes neste lote.');
+      throw new ApiError(
+        409,
+        'TICKET_CAPACITY_EXHAUSTED',
+        'Não há ingressos suficientes neste lote.',
+      );
     const lotName = requiredString(lot.name, 'ticketLot.name', 100);
-    const unitPriceCents = source === 'courtesy' ? 0 : nonNegativeInteger(lot.priceCents, 'ticketLot.priceCents');
+    const unitPriceCents =
+      source === 'courtesy' ? 0 : nonNegativeInteger(lot.priceCents, 'ticketLot.priceCents');
     const now = Date.now();
     const saleId = crypto.randomUUID();
     const codes = Array.from({ length: quantity }, () => ({
@@ -1466,7 +1587,8 @@ export class EventRoom extends DurableObject<Env> {
         ...item,
         availableQuantity: availableQuantity - quantity,
         soldQuantity: Number(item.soldQuantity ?? 0) + (source === 'courtesy' ? 0 : quantity),
-        courtesyQuantity: Number(item.courtesyQuantity ?? 0) + (source === 'courtesy' ? quantity : 0),
+        courtesyQuantity:
+          Number(item.courtesyQuantity ?? 0) + (source === 'courtesy' ? quantity : 0),
       };
     });
     const journalPayload = {
@@ -1501,7 +1623,12 @@ export class EventRoom extends DurableObject<Env> {
     return response;
   }
 
-  #commitMobileExpense(payload: JsonRecord, deviceId: string, deviceLabel: string, eventId: string): CommandResponse {
+  #commitMobileExpense(
+    payload: JsonRecord,
+    deviceId: string,
+    deviceLabel: string,
+    eventId: string,
+  ): CommandResponse {
     const commandId = requiredString(payload.commandId, 'commandId');
     const existing = this.#existingCommand(commandId);
     if (existing !== null) return existing;
@@ -1511,21 +1638,45 @@ export class EventRoom extends DurableObject<Env> {
     const paymentMethod = requiredString(payload.paymentMethod, 'paymentMethod', 24);
     if (!['cash', 'pix', 'credit-card', 'debit-card'].includes(paymentMethod))
       throw new ApiError(400, 'INVALID_INPUT', 'Método de pagamento inválido.');
-    const note = payload.note === undefined || payload.note === null ? null : requiredString(payload.note, 'note', 240);
+    const note =
+      payload.note === undefined || payload.note === null
+        ? null
+        : requiredString(payload.note, 'note', 240);
     const now = Date.now();
     const journalPayload = {
-      commandId, deviceId, auditId: now, profile: 'mobile-expenses', action: 'expense.created',
-      entityType: 'expense', entityId: crypto.randomUUID(), createdAt: now,
-      details: { amountCents, category, description, note, paymentMethod, paymentStatus: 'open', operatorName: deviceLabel },
+      commandId,
+      deviceId,
+      auditId: now,
+      profile: 'mobile-expenses',
+      action: 'expense.created',
+      entityType: 'expense',
+      entityId: crypto.randomUUID(),
+      createdAt: now,
+      details: {
+        amountCents,
+        category,
+        description,
+        note,
+        paymentMethod,
+        paymentStatus: 'open',
+        operatorName: deviceLabel,
+      },
     };
-    const response = this.ctx.storage.transactionSync(() => this.#recordCommand(commandId, 'journal.committed', journalPayload, now));
+    const response = this.ctx.storage.transactionSync(() =>
+      this.#recordCommand(commandId, 'journal.committed', journalPayload, now),
+    );
     this.#broadcast(response.event, eventId);
     this.#recordJournalInMonitor(eventId, response.event, false);
     this.#archiveAcceptedJournal(eventId, response.event);
     return response;
   }
 
-  #commitMobileVoucher(payload: JsonRecord, deviceId: string, deviceLabel: string, eventId: string): CommandResponse {
+  #commitMobileVoucher(
+    payload: JsonRecord,
+    deviceId: string,
+    deviceLabel: string,
+    eventId: string,
+  ): CommandResponse {
     const commandId = requiredString(payload.commandId, 'commandId');
     const existing = this.#existingCommand(commandId);
     if (existing !== null) return existing;
@@ -1534,18 +1685,39 @@ export class EventRoom extends DurableObject<Env> {
     const servicePointId = requiredString(payload.servicePointId, 'servicePointId');
     const context = this.#mobileContextPayload();
     const servicePoints = Array.isArray(context.servicePoints) ? context.servicePoints : [];
-    if (!servicePoints.some((point) => isRecord(point) && point.id === servicePointId && point.active === true))
-      throw new ApiError(409, 'SERVICE_POINT_UNAVAILABLE', 'A mesa selecionada não está disponível.');
-    const requestedCode = payload.code === undefined || payload.code === null ? null : requiredString(payload.code, 'code', 32);
-    const code = (requestedCode ?? `GTRZ-${crypto.randomUUID().replaceAll('-', '').slice(0, 8)}`).toLocaleUpperCase('pt-BR').replaceAll(/\s+/gu, '-');
+    if (
+      !servicePoints.some(
+        (point) => isRecord(point) && point.id === servicePointId && point.active === true,
+      )
+    )
+      throw new ApiError(
+        409,
+        'SERVICE_POINT_UNAVAILABLE',
+        'A mesa selecionada não está disponível.',
+      );
+    const requestedCode =
+      payload.code === undefined || payload.code === null
+        ? null
+        : requiredString(payload.code, 'code', 32);
+    const code = (requestedCode ?? `GTRZ-${crypto.randomUUID().replaceAll('-', '').slice(0, 8)}`)
+      .toLocaleUpperCase('pt-BR')
+      .replaceAll(/\s+/gu, '-');
     if (code.length < 4) throw new ApiError(400, 'INVALID_INPUT', 'Código de voucher inválido.');
-    const voucherCodes = Array.isArray(context.voucherCodes) ? context.voucherCodes.filter((value): value is string => typeof value === 'string') : [];
+    const voucherCodes = Array.isArray(context.voucherCodes)
+      ? context.voucherCodes.filter((value): value is string => typeof value === 'string')
+      : [];
     if (voucherCodes.some((value) => value.toLocaleUpperCase('pt-BR') === code))
       throw new ApiError(409, 'VOUCHER_CODE_EXISTS', 'Este código de voucher já existe.');
     const now = Date.now();
     const journalPayload = {
-      commandId, deviceId, auditId: now, profile: 'mobile-vouchers', action: 'voucher.created',
-      entityType: 'voucher', entityId: crypto.randomUUID(), createdAt: now,
+      commandId,
+      deviceId,
+      auditId: now,
+      profile: 'mobile-vouchers',
+      action: 'voucher.created',
+      entityType: 'voucher',
+      entityId: crypto.randomUUID(),
+      createdAt: now,
       details: { code, initialBalanceCents, label, servicePointId, operatorName: deviceLabel },
     };
     const response = this.ctx.storage.transactionSync(() => {
@@ -1738,9 +1910,13 @@ export class EventRoom extends DurableObject<Env> {
           totalChangeCents: changeCents,
           stockMovements,
           vouchers: [],
+          operatorName: deviceLabel,
+          originLabel: `Caixa mobile · ${deviceLabel}`,
         },
       };
-      return this.#recordCommand(commandId, 'journal.committed', journalPayload, now);
+      const result = this.#recordCommand(commandId, 'journal.committed', journalPayload, now);
+      this.#enqueueReceiptJob(eventId, commandId, journalPayload);
+      return result;
     });
     this.#broadcast(response.event, eventId);
     this.#recordJournalInMonitor(eventId, response.event, false);
@@ -2049,14 +2225,27 @@ export class EventRoom extends DurableObject<Env> {
       payload.entityId === null ? null : requiredString(payload.entityId, 'entityId', 160);
     const profile = requiredString(payload.profile, 'profile', 32);
 
-    const response = this.ctx.storage.transactionSync(() =>
-      this.#recordCommand(
+    const response = this.ctx.storage.transactionSync(() => {
+      const result = this.#recordCommand(
         commandId,
         'journal.recorded',
         { action, auditId, createdAt, details, deviceId, entityId, entityType, profile },
         Date.now(),
-      ),
-    );
+      );
+      if (action === 'operations.order-paid') {
+        this.#enqueueReceiptJob(eventId, commandId, {
+          action,
+          auditId,
+          createdAt,
+          details,
+          deviceId,
+          entityId,
+          entityType,
+          profile,
+        });
+      }
+      return result;
+    });
     this.#broadcast(response.event, eventId);
     this.#recordJournalInMonitor(eventId, response.event, false);
     this.#archiveAcceptedJournal(eventId, response.event);
@@ -2079,6 +2268,309 @@ export class EventRoom extends DurableObject<Env> {
         { httpMetadata: { contentType: 'application/json' } },
       ),
     );
+  }
+
+  #enqueueReceiptJob(eventId: string, commandId: string, payload: JsonRecord): void {
+    const details = isRecord(payload.details) ? payload.details : {};
+    const order = isRecord(details.order) ? details.order : {};
+    const orderId =
+      (typeof payload.entityId === 'string' && payload.entityId) ||
+      (typeof order.id === 'string' && order.id) ||
+      null;
+    if (orderId === null) return;
+
+    const items = Array.isArray(details.items)
+      ? details.items.flatMap((entry) => {
+          if (!isRecord(entry)) return [];
+          const name = typeof entry.itemName === 'string' ? entry.itemName : null;
+          const quantity = typeof entry.quantity === 'number' ? entry.quantity : null;
+          const unitPriceCents =
+            typeof entry.unitPriceCents === 'number' ? entry.unitPriceCents : null;
+          const totalCents = typeof entry.totalCents === 'number' ? entry.totalCents : null;
+          return name === null ||
+            quantity === null ||
+            unitPriceCents === null ||
+            totalCents === null
+            ? []
+            : [{ name, quantity, unitPriceCents, totalCents }];
+        })
+      : [];
+    const payments: CloudReceiptDocument['payments'] = Array.isArray(details.payments)
+      ? details.payments.flatMap((entry) => {
+          if (!isRecord(entry)) return [];
+          const method = entry.method;
+          const amountCents = typeof entry.amountCents === 'number' ? entry.amountCents : null;
+          if (
+            amountCents === null ||
+            (method !== 'cash' &&
+              method !== 'pix' &&
+              method !== 'credit-card' &&
+              method !== 'debit-card')
+          ) {
+            return [];
+          }
+          return [
+            {
+              method: method as CloudReceiptDocument['payments'][number]['method'],
+              amountCents,
+              receivedCents: typeof entry.receivedCents === 'number' ? entry.receivedCents : null,
+              changeCents: typeof entry.changeCents === 'number' ? entry.changeCents : 0,
+            },
+          ];
+        })
+      : [];
+    const vouchers = Array.isArray(details.vouchers)
+      ? details.vouchers.flatMap((entry) => {
+          if (!isRecord(entry)) return [];
+          const code = typeof entry.code === 'string' ? entry.code : null;
+          const amountCents = typeof entry.amountCents === 'number' ? entry.amountCents : null;
+          return code === null || amountCents === null ? [] : [{ code, amountCents }];
+        })
+      : [];
+    const servicePointLabel =
+      typeof order.servicePointLabel === 'string' ? order.servicePointLabel : 'Caixa GTRZ';
+    const document: CloudReceiptDocument = {
+      orderId,
+      eventName:
+        typeof details.eventName === 'string'
+          ? details.eventName
+          : `Evento ${eventId.slice(0, 8).toUpperCase()}`,
+      servicePointLabel,
+      servicePointType: servicePointLabel.toLocaleLowerCase('pt-BR').includes('mesa')
+        ? 'table'
+        : 'counter',
+      subtotalCents: typeof details.subtotalCents === 'number' ? details.subtotalCents : 0,
+      discountCents: typeof details.discountCents === 'number' ? details.discountCents : 0,
+      totalCents: typeof details.totalCents === 'number' ? details.totalCents : 0,
+      closedAt: typeof payload.createdAt === 'number' ? payload.createdAt : Date.now(),
+      operatorName:
+        typeof details.operatorName === 'string'
+          ? details.operatorName
+          : typeof payload.profile === 'string'
+            ? payload.profile
+            : 'Operador GTRZ',
+      originLabel:
+        typeof details.originLabel === 'string'
+          ? details.originLabel
+          : typeof details.originMachineName === 'string'
+            ? details.originMachineName
+            : typeof payload.deviceId === 'string'
+              ? payload.deviceId
+              : 'GTRZ System',
+      items,
+      payments,
+      vouchers,
+    };
+    const now = Date.now();
+    this.ctx.storage.sql
+      .exec(
+        `INSERT OR IGNORE INTO print_jobs
+         (job_id, idempotency_key, command_id, order_id, document_json, status, assigned_printer_id,
+          claim_token, claimed_at, printed_at, printed_by_device_id, printed_by_label, attempts, error,
+          created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, 'queued', NULL, NULL, NULL, NULL, NULL, NULL, 0, NULL, ?, ?)`,
+        crypto.randomUUID(),
+        `receipt:${orderId}`,
+        commandId,
+        orderId,
+        JSON.stringify(document),
+        now,
+        now,
+      )
+      .toArray();
+  }
+
+  #registerPrintPrinter(payload: JsonRecord): JsonRecord {
+    const deviceId = requiredString(payload.deviceId, 'deviceId', 80);
+    const deviceLabel = requiredString(payload.deviceLabel, 'deviceLabel', 60);
+    const printerName = requiredString(payload.printerName, 'printerName', 160);
+    const paperWidthMm = payload.paperWidthMm === 58 ? 58 : 80;
+    const enabled = payload.enabled === true;
+    const now = Date.now();
+    const existing = this.ctx.storage.sql
+      .exec(
+        'SELECT printer_id FROM print_printers WHERE device_id = ? AND printer_name = ?',
+        deviceId,
+        printerName,
+      )
+      .toArray()[0] as { readonly printer_id: string } | undefined;
+    const printerId = existing?.printer_id ?? crypto.randomUUID();
+    this.ctx.storage.sql
+      .exec(
+        `INSERT INTO print_printers
+         (printer_id, device_id, device_label, printer_name, paper_width_mm, enabled, busy_job_id, last_seen_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?)
+         ON CONFLICT(device_id, printer_name) DO UPDATE SET
+           device_label = excluded.device_label, paper_width_mm = excluded.paper_width_mm,
+           enabled = excluded.enabled, last_seen_at = excluded.last_seen_at, updated_at = excluded.updated_at`,
+        printerId,
+        deviceId,
+        deviceLabel,
+        printerName,
+        paperWidthMm,
+        enabled ? 1 : 0,
+        now,
+        now,
+      )
+      .toArray();
+    return { printerId, registeredAt: now, enabled };
+  }
+
+  #claimPrintJob(payload: JsonRecord): JsonRecord {
+    const deviceId = requiredString(payload.deviceId, 'deviceId', 80);
+    return this.ctx.storage.transactionSync(() => {
+      const now = Date.now();
+      const printer = this.ctx.storage.sql
+        .exec(
+          `SELECT printer_id, device_label FROM print_printers
+           WHERE device_id = ? AND enabled = 1 AND busy_job_id IS NULL AND last_seen_at >= ?
+           ORDER BY last_seen_at DESC LIMIT 1`,
+          deviceId,
+          now - 45_000,
+        )
+        .toArray()[0] as { readonly printer_id: string; readonly device_label: string } | undefined;
+      if (printer === undefined) return { job: null };
+      const job = this.ctx.storage.sql
+        .exec(
+          `SELECT job_id, document_json FROM print_jobs WHERE status = 'queued'
+           ORDER BY created_at ASC LIMIT 1`,
+        )
+        .toArray()[0] as { readonly job_id: string; readonly document_json: string } | undefined;
+      if (job === undefined) return { job: null };
+
+      const claimToken = crypto.randomUUID();
+      this.ctx.storage.sql
+        .exec(
+          `UPDATE print_jobs SET status = 'claimed', assigned_printer_id = ?, claim_token = ?, claimed_at = ?,
+             attempts = attempts + 1, updated_at = ? WHERE job_id = ? AND status = 'queued'`,
+          printer.printer_id,
+          claimToken,
+          now,
+          now,
+          job.job_id,
+        )
+        .toArray();
+      this.ctx.storage.sql
+        .exec(
+          'UPDATE print_printers SET busy_job_id = ?, updated_at = ? WHERE printer_id = ?',
+          job.job_id,
+          now,
+          printer.printer_id,
+        )
+        .toArray();
+      this.ctx.storage.sql
+        .exec(
+          `INSERT INTO print_attempts (attempt_id, job_id, printer_id, device_id, result, error, created_at)
+           VALUES (?, ?, ?, ?, 'claimed', NULL, ?)`,
+          crypto.randomUUID(),
+          job.job_id,
+          printer.printer_id,
+          deviceId,
+          now,
+        )
+        .toArray();
+      return {
+        job: {
+          jobId: job.job_id,
+          claimToken,
+          printerLabel: printer.device_label,
+          document: JSON.parse(job.document_json) as CloudReceiptDocument,
+        } satisfies ClaimedPrintJob & { readonly printerLabel: string },
+      };
+    });
+  }
+
+  #completePrintJob(payload: JsonRecord): JsonRecord {
+    const jobId = requiredString(payload.jobId, 'jobId', 80);
+    const claimToken = requiredString(payload.claimToken, 'claimToken', 80);
+    const deviceId = requiredString(payload.deviceId, 'deviceId', 80);
+    const result = requiredString(payload.result, 'result', 16);
+    if (result !== 'printed' && result !== 'failed' && result !== 'uncertain') {
+      throw new ApiError(400, 'INVALID_INPUT', 'Resultado de impressão inválido.');
+    }
+    const error = payload.error === undefined ? null : requiredString(payload.error, 'error', 240);
+    return this.ctx.storage.transactionSync(() => {
+      const job = this.ctx.storage.sql
+        .exec(
+          `SELECT assigned_printer_id FROM print_jobs
+           WHERE job_id = ? AND claim_token = ? AND status = 'claimed'`,
+          jobId,
+          claimToken,
+        )
+        .toArray()[0] as { readonly assigned_printer_id: string } | undefined;
+      if (job === undefined) {
+        throw new ApiError(
+          409,
+          'PRINT_CLAIM_INVALID',
+          'Este trabalho não pertence mais a este agente.',
+        );
+      }
+      const now = Date.now();
+      this.ctx.storage.sql
+        .exec(
+          `UPDATE print_jobs SET status = ?, printed_at = ?, printed_by_device_id = ?,
+             printed_by_label = (SELECT device_label FROM print_printers WHERE printer_id = ?),
+             error = ?, updated_at = ? WHERE job_id = ?`,
+          result,
+          result === 'printed' ? now : null,
+          deviceId,
+          job.assigned_printer_id,
+          error,
+          now,
+          jobId,
+        )
+        .toArray();
+      this.ctx.storage.sql
+        .exec(
+          'UPDATE print_printers SET busy_job_id = NULL, updated_at = ? WHERE printer_id = ?',
+          now,
+          job.assigned_printer_id,
+        )
+        .toArray();
+      this.ctx.storage.sql
+        .exec(
+          `INSERT INTO print_attempts (attempt_id, job_id, printer_id, device_id, result, error, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          crypto.randomUUID(),
+          jobId,
+          job.assigned_printer_id,
+          deviceId,
+          result,
+          error,
+          now,
+        )
+        .toArray();
+      return { success: true, status: result, completedAt: now };
+    });
+  }
+
+  #listPrintJobs(): JsonRecord {
+    const jobs = this.ctx.storage.sql
+      .exec(
+        `SELECT job_id, command_id, order_id, document_json, status, printed_by_label, attempts,
+                error, created_at, claimed_at, printed_at
+         FROM print_jobs ORDER BY created_at DESC LIMIT 100`,
+      )
+      .toArray()
+      .map((row) => ({
+        jobId: storedString(row.job_id, 'job_id'),
+        commandId: storedString(row.command_id, 'command_id'),
+        orderId: storedString(row.order_id, 'order_id'),
+        document: JSON.parse(
+          storedString(row.document_json, 'document_json'),
+        ) as CloudReceiptDocument,
+        status: storedString(row.status, 'status'),
+        printedByLabel:
+          row.printed_by_label === null
+            ? null
+            : storedString(row.printed_by_label, 'printed_by_label'),
+        attempts: Number(row.attempts),
+        error: row.error === null ? null : storedString(row.error, 'error'),
+        createdAt: Number(row.created_at),
+        claimedAt: row.claimed_at === null ? null : Number(row.claimed_at),
+        printedAt: row.printed_at === null ? null : Number(row.printed_at),
+      }));
+    return { jobs };
   }
 
   #recordJournalInMonitor(eventId: string, event: StreamEvent, idempotentReplay: boolean): void {
@@ -2371,7 +2863,7 @@ async function authorizeMobile(request: Request, env: Env): Promise<MobileAuthor
 }
 
 function eventRequest(url: URL): boolean {
-  return /^\/v1\/events\/[^/]+\/(stock|sales|journal|snapshot|stream|cashier\/(catalog|context|sales|stock|tickets|expenses|vouchers|reject-sale))$/.test(
+  return /^\/v1\/events\/[^/]+\/(stock|sales|journal|snapshot|stream|print\/(printers|claim|complete|jobs)|cashier\/(catalog|context|sales|stock|tickets|expenses|vouchers|reject-sale))$/.test(
     url.pathname,
   );
 }
@@ -2381,7 +2873,9 @@ function cashierApiRequest(url: URL): boolean {
 }
 
 function mobileApiRequest(url: URL): boolean {
-  return /^\/v1\/mobile\/(catalog|context|sales|stock|tickets|expenses|vouchers|stream|session|session\/stream)$/.test(url.pathname);
+  return /^\/v1\/mobile\/(catalog|context|sales|stock|tickets|expenses|vouchers|stream|session|session\/stream)$/.test(
+    url.pathname,
+  );
 }
 
 function monitorRequest(url: URL): boolean {
@@ -2425,6 +2919,10 @@ export default {
 
     if (request.method === 'GET' && url.pathname === '/monitor') {
       return monitorPage({ environment: isTestEnvironment(env) ? 'test' : 'production' });
+    }
+
+    if (request.method === 'GET' && url.pathname === '/print-queue') {
+      return printQueuePage();
     }
 
     if (request.method === 'GET' && url.pathname === '/cashier') {
@@ -2554,11 +3052,17 @@ export default {
         );
       }
       const permission =
-        url.pathname === '/v1/mobile/sales' ? 'sales' :
-        url.pathname === '/v1/mobile/stock' ? 'inventory' :
-        url.pathname === '/v1/mobile/tickets' ? 'tickets' :
-        url.pathname === '/v1/mobile/expenses' ? 'expenses' :
-        url.pathname === '/v1/mobile/vouchers' ? 'vouchers' : null;
+        url.pathname === '/v1/mobile/sales'
+          ? 'sales'
+          : url.pathname === '/v1/mobile/stock'
+            ? 'inventory'
+            : url.pathname === '/v1/mobile/tickets'
+              ? 'tickets'
+              : url.pathname === '/v1/mobile/expenses'
+                ? 'expenses'
+                : url.pathname === '/v1/mobile/vouchers'
+                  ? 'vouchers'
+                  : null;
       if (permission !== null && !mobile.permissions[permission]) {
         return json(
           {
@@ -2569,11 +3073,7 @@ export default {
       }
       const suffix = url.pathname.slice('/v1/mobile/'.length);
       const targetSuffix =
-        suffix === 'catalog'
-          ? 'catalog'
-          : suffix === 'stream'
-            ? 'stream'
-              : suffix;
+        suffix === 'catalog' ? 'catalog' : suffix === 'stream' ? 'stream' : suffix;
       const room = env.EVENT_ROOM.get(env.EVENT_ROOM.idFromName(`event:${mobile.eventId}`));
       const targetUrl = new URL(
         `https://event.internal/v1/events/${encodeURIComponent(mobile.eventId)}/cashier/${targetSuffix}`,

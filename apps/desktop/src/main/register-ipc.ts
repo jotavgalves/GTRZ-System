@@ -99,7 +99,7 @@ const CONTROL_CHANNELS = [
   IPC_CHANNELS.backupsVerify,
 ] as const;
 
-export function registerIpcHandlers(options: RegisterIpcOptions): void {
+export function registerIpcHandlers(options: RegisterIpcOptions): ThermalPrintService {
   for (const channel of CONTROL_CHANNELS) {
     ipcMain.removeHandler(channel);
   }
@@ -272,8 +272,15 @@ export function registerIpcHandlers(options: RegisterIpcOptions): void {
   registerPrintingIpcHandlers({ printService });
   registerOperationsIpcHandlers({
     getDatabase: options.getDatabase,
-    printAfterSale: (orderId) => printService.printAfterSale(orderId),
+    printAfterSale: async () => {
+      const database = options.getDatabase();
+      await options.cloudSyncService.flushOutbox(
+        database,
+        getSessionState(database).activeEvent?.id ?? null,
+      );
+    },
   });
   registerTicketIpcHandlers({ getDatabase: options.getDatabase });
   registerVoucherIpcHandlers({ getDatabase: options.getDatabase });
+  return printService;
 }

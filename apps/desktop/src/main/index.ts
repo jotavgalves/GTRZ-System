@@ -3,6 +3,7 @@ import path from 'node:path';
 
 import { IPC_EVENTS } from '@gtrz/contracts';
 import { getSessionState } from '@gtrz/database';
+import { getPrintingSettings } from '@gtrz/database/printing';
 
 import { BackupService } from './backup-service';
 import { CloudSyncService } from './cloud-sync-service';
@@ -74,15 +75,20 @@ if (!hasSingleInstanceLock) {
           }
         },
         cloudSyncEndpoint(runtimeEnvironment),
+        () => getPrintingSettings(requireDatabaseRuntime().get()).machineName,
       );
 
-      registerIpcHandlers({
+      const printService = registerIpcHandlers({
         getDatabase: () => requireDatabaseRuntime().get(),
         databaseReady: () => requireDatabaseRuntime().isReady(),
         backupService,
         cloudSyncService,
         receiptArchiveDirectory: path.join(documentsFolder, 'Notas'),
         runtimeEnvironment,
+      });
+      cloudSyncService.setPrintAgent(async (job) => {
+        const result = await printService.printCloudJob(job);
+        return { success: result.success, message: result.message };
       });
       cloudSyncService.start(
         () => getSessionState(requireDatabaseRuntime().get()).activeEvent?.id ?? null,

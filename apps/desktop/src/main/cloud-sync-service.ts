@@ -16,6 +16,7 @@ import {
   type CloudSyncStatus,
 } from '@gtrz/contracts';
 import type { DatabaseContext } from '@gtrz/database';
+import { getPrintingSettings } from '@gtrz/database/printing';
 
 const CONNECTION_TIMEOUT_MS = 5_000;
 const HEARTBEAT_INTERVAL_MS = 15_000;
@@ -83,6 +84,44 @@ interface RecoverableConflictRow {
   readonly command_id: string;
   readonly event_id: string;
   readonly payload_json: string;
+}
+
+export interface CloudPrintReceipt {
+  readonly orderId: string;
+  readonly eventName: string;
+  readonly servicePointLabel: string;
+  readonly servicePointType: 'counter' | 'table';
+  readonly subtotalCents: number;
+  readonly discountCents: number;
+  readonly totalCents: number;
+  readonly closedAt: number;
+  readonly operatorName: string;
+  readonly originLabel: string;
+  readonly items: readonly {
+    readonly name: string;
+    readonly quantity: number;
+    readonly unitPriceCents: number;
+    readonly totalCents: number;
+  }[];
+  readonly payments: readonly {
+    readonly method: 'cash' | 'pix' | 'credit-card' | 'debit-card';
+    readonly amountCents: number;
+    readonly receivedCents: number | null;
+    readonly changeCents: number;
+  }[];
+  readonly vouchers: readonly { readonly code: string; readonly amountCents: number }[];
+}
+
+export interface ClaimedCloudPrintJob {
+  readonly jobId: string;
+  readonly claimToken: string;
+  readonly printerLabel: string;
+  readonly document: CloudPrintReceipt;
+}
+
+interface PrintAgentResult {
+  readonly success: boolean;
+  readonly message: string;
 }
 
 const CATALOG_EVENT_ID = '_catalog';
@@ -167,6 +206,8 @@ export class CloudSyncService {
   readonly #deviceIdPath: string;
   readonly #onDataChanged: () => void;
   readonly #endpoint: string;
+  readonly #getDeviceLabel: () => string;
+  #printAgent: ((job: ClaimedCloudPrintJob) => Promise<PrintAgentResult>) | null = null;
   #heartbeatTimer: NodeJS.Timeout | null = null;
   #outboxTimer: NodeJS.Timeout | null = null;
   #stream: WebSocket | null = null;
@@ -178,11 +219,13 @@ export class CloudSyncService {
     deviceIdPath: string,
     onDataChanged: () => void = () => undefined,
     endpoint = 'https://gtrz-sync.jvgacontato.workers.dev',
+    getDeviceLabel: () => string = hostname,
   ) {
     this.#pairingKeyPath = pairingKeyPath;
     this.#deviceIdPath = deviceIdPath;
     this.#onDataChanged = onDataChanged;
     this.#endpoint = endpoint;
+    this.#getDeviceLabel = getDeviceLabel;
   }
 
   start(getActiveEventId: () => string | null): void {
@@ -219,6 +262,10 @@ export class CloudSyncService {
     };
     flush();
     this.#outboxTimer = setInterval(flush, OUTBOX_INTERVAL_MS);
+  }
+
+  setPrintAgent(agent: (job: ClaimedCloudPrintJob) => Promise<PrintAgentResult>): void {
+    this.#printAgent = agent;
   }
 
   async flushOutbox(database: DatabaseContext, activeEventId: string | null): Promise<void> {
@@ -279,6 +326,7 @@ export class CloudSyncService {
     }
 
     await this.#pullRemoteJournal(database, pairingKey, activeEventId, deviceId);
+    await this.#processPrintQueue(database, activeEventId, deviceId, pairingKey);
   }
 
   async getStatus(): Promise<CloudSyncStatus> {
@@ -372,7 +420,7 @@ export class CloudSyncService {
       headers: { 'Content-Type': 'application/json', 'X-GTRZ-Key': pairingKey },
       body: JSON.stringify({
         deviceId,
-        label: hostname(),
+        label: this.#getDeviceLabel(),
         activeEventId,
         latencyMs: this.#lastLatencyMs,
       }),
@@ -663,7 +711,11 @@ export class CloudSyncService {
         `SELECT id, label, active FROM service_points
          WHERE event_id = ? ORDER BY label COLLATE NOCASE`,
       )
-      .all(activeEventId) as readonly { readonly id: string; readonly label: string; readonly active: number }[];
+      .all(activeEventId) as readonly {
+      readonly id: string;
+      readonly label: string;
+      readonly active: number;
+    }[];
     const voucherCodes = database.sqlite
       .prepare('SELECT code FROM vouchers WHERE event_id = ?')
       .all(activeEventId) as readonly { readonly code: string }[];
@@ -677,7 +729,11 @@ export class CloudSyncService {
         courtesyQuantity: lot.courtesy_quantity,
         availableQuantity: Math.max(0, lot.capacity - lot.used_quantity),
       })),
-      servicePoints: servicePoints.map((point) => ({ id: point.id, label: point.label, active: point.active === 1 })),
+      servicePoints: servicePoints.map((point) => ({
+        id: point.id,
+        label: point.label,
+        active: point.active === 1,
+      })),
       voucherCodes: voucherCodes.map((voucher) => voucher.code),
     };
     const fingerprint = JSON.stringify(context);
@@ -703,6 +759,80 @@ export class CloudSyncService {
          ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
       )
       .run(stateKey, fingerprint, Date.now());
+  }
+
+  async #processPrintQueue(
+    database: DatabaseContext,
+    activeEventId: string | null,
+    deviceId: string,
+    pairingKey: string,
+  ): Promise<void> {
+    if (activeEventId === null) return;
+    const settings = getPrintingSettings(database);
+    const printerName = settings.deviceName ?? '__windows_default__';
+    const baseUrl = `${this.#endpoint}/v1/events/${encodeURIComponent(activeEventId)}/print`;
+    const register = await fetch(`${baseUrl}/printers`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-GTRZ-Key': pairingKey },
+      body: JSON.stringify({
+        deviceId,
+        deviceLabel: settings.machineName,
+        printerName,
+        paperWidthMm: settings.paperWidthMm,
+        enabled: settings.automaticPrinting,
+      }),
+      signal: AbortSignal.timeout(CONNECTION_TIMEOUT_MS),
+    });
+    if (!register.ok || !settings.automaticPrinting || this.#printAgent === null) return;
+
+    const claim = await fetch(`${baseUrl}/claim`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-GTRZ-Key': pairingKey },
+      body: JSON.stringify({ deviceId }),
+      signal: AbortSignal.timeout(CONNECTION_TIMEOUT_MS),
+    });
+    if (!claim.ok) return;
+    const payload: unknown = await claim.json();
+    if (!isRecord(payload) || !isRecord(payload.job)) return;
+    const rawJob = payload.job;
+    if (
+      typeof rawJob.jobId !== 'string' ||
+      typeof rawJob.claimToken !== 'string' ||
+      typeof rawJob.printerLabel !== 'string' ||
+      !isRecord(rawJob.document)
+    ) {
+      return;
+    }
+    let result: PrintAgentResult;
+    let completion: 'printed' | 'failed' | 'uncertain' = 'printed';
+    try {
+      result = await this.#printAgent({
+        jobId: rawJob.jobId,
+        claimToken: rawJob.claimToken,
+        printerLabel: rawJob.printerLabel,
+        document: rawJob.document as unknown as CloudPrintReceipt,
+      });
+      if (!result.success) completion = 'failed';
+    } catch (error: unknown) {
+      completion = 'uncertain';
+      result = {
+        success: false,
+        message:
+          error instanceof Error ? error.message : 'O agente de impressão parou sem confirmação.',
+      };
+    }
+    await fetch(`${baseUrl}/complete`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-GTRZ-Key': pairingKey },
+      body: JSON.stringify({
+        jobId: rawJob.jobId,
+        claimToken: rawJob.claimToken,
+        deviceId,
+        result: completion,
+        error: result.success ? undefined : result.message,
+      }),
+      signal: AbortSignal.timeout(CONNECTION_TIMEOUT_MS),
+    });
   }
 
   #enqueueNewAudits(database: DatabaseContext, deviceId: string): void {
@@ -744,6 +874,15 @@ export class CloudSyncService {
     database.sqlite.transaction(() => {
       for (const audit of audits) {
         if (!SYNCHRONIZED_ACTIONS.has(audit.action)) continue;
+        const eventName =
+          audit.event_id === null
+            ? null
+            : ((
+                database.sqlite
+                  .prepare('SELECT name FROM events WHERE id = ?')
+                  .get(audit.event_id) as { readonly name: string } | undefined
+              )?.name ?? null);
+        const rawDetails: unknown = JSON.parse(audit.details_json);
         const payload = {
           commandId: `${deviceId}:${String(audit.id)}`,
           deviceId,
@@ -752,7 +891,13 @@ export class CloudSyncService {
           action: audit.action,
           entityType: audit.entity_type,
           entityId: audit.entity_id,
-          details: JSON.parse(audit.details_json) as unknown,
+          details: isRecord(rawDetails)
+            ? {
+                ...rawDetails,
+                originMachineName: this.#getDeviceLabel(),
+                ...(eventName === null ? {} : { eventName }),
+              }
+            : rawDetails,
           createdAt: audit.created_at,
         };
         enqueue.run(
@@ -1744,10 +1889,17 @@ export class CloudSyncService {
       const label = stringField(payload.details, 'label');
       const initialBalanceCents = integerField(payload.details, 'initialBalanceCents');
       const servicePointId = stringField(payload.details, 'servicePointId');
-      if (code === null || label === null || initialBalanceCents === null || initialBalanceCents <= 0) {
+      if (
+        code === null ||
+        label === null ||
+        initialBalanceCents === null ||
+        initialBalanceCents <= 0
+      ) {
         throw new Error('Dados insuficientes para criar o voucher remoto.');
       }
-      const exists = database.sqlite.prepare('SELECT id FROM vouchers WHERE id = ?').get(payload.entityId);
+      const exists = database.sqlite
+        .prepare('SELECT id FROM vouchers WHERE id = ?')
+        .get(payload.entityId);
       if (exists === undefined) {
         database.sqlite
           .prepare(
@@ -1755,14 +1907,32 @@ export class CloudSyncService {
              (id, event_id, code, label, initial_balance_cents, remaining_balance_cents, status, created_at, updated_at)
              VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?)`,
           )
-          .run(payload.entityId, eventId, code, label, initialBalanceCents, initialBalanceCents, payload.createdAt, payload.createdAt);
+          .run(
+            payload.entityId,
+            eventId,
+            code,
+            label,
+            initialBalanceCents,
+            initialBalanceCents,
+            payload.createdAt,
+            payload.createdAt,
+          );
         database.sqlite
           .prepare(
             `INSERT INTO voucher_transactions
              (id, event_id, voucher_id, voucher_code, order_id, type, amount_cents, balance_before_cents, balance_after_cents, note, created_at)
              VALUES (?, ?, ?, ?, NULL, 'issue', ?, 0, ?, ?, ?)`,
           )
-          .run(randomUUID(), eventId, payload.entityId, code, initialBalanceCents, initialBalanceCents, label, payload.createdAt);
+          .run(
+            randomUUID(),
+            eventId,
+            payload.entityId,
+            code,
+            initialBalanceCents,
+            initialBalanceCents,
+            label,
+            payload.createdAt,
+          );
       }
       if (servicePointId !== null) {
         database.sqlite

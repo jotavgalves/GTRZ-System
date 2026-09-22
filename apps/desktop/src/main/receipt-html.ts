@@ -70,6 +70,17 @@ export function buildReceiptHtml(receipt: DatabaseOrderReceipt, paperWidthMm: 58
     )
     .join('');
   const servicePointType = receipt.servicePointType === 'counter' ? 'Balcão' : 'Mesa';
+  const sourceRows = [
+    receipt.operatorName === undefined
+      ? ''
+      : `<span>Operador: <strong>${escapeHtml(receipt.operatorName)}</strong></span>`,
+    receipt.originLabel === undefined
+      ? ''
+      : `<span>Origem: <strong>${escapeHtml(receipt.originLabel)}</strong></span>`,
+    receipt.printedByLabel === undefined
+      ? ''
+      : `<span>Impresso em: <strong>${escapeHtml(receipt.printedByLabel)}</strong></span>`,
+  ].join('');
 
   return `<!doctype html>
 <html lang="pt-BR">
@@ -106,6 +117,7 @@ export function buildReceiptHtml(receipt: DatabaseOrderReceipt, paperWidthMm: 58
     <strong>${escapeHtml(receipt.eventName)}</strong>
     <span>${escapeHtml(formatDate(receipt.closedAt))}</span>
     <span>${servicePointType}: <strong>${escapeHtml(receipt.servicePointLabel)}</strong></span>
+    ${sourceRows}
   </div>
   <div class="divider"></div>
   <table>
