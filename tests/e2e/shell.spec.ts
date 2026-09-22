@@ -57,6 +57,12 @@ test('SMK-BKP-001 — cria e verifica backup manual pela interface', async () =>
     const window = await electronApplication.firstWindow();
     await window.waitForLoadState('domcontentloaded');
 
+    const eventName = `Evento backup ${String(Date.now())}`;
+    await window.getByRole('link', { name: 'Eventos' }).click();
+    await window.getByPlaceholder('Ex.: La Rumba Neon — Agosto').fill(eventName);
+    await window.getByRole('button', { name: 'Criar evento' }).click();
+    await activateEvent(window, eventName);
+
     await window.getByRole('link', { name: 'Backups' }).click();
     await expect(window.getByRole('heading', { name: 'Backups' })).toBeVisible();
     await window.getByRole('button', { name: 'Criar backup' }).click();

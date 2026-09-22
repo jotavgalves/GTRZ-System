@@ -262,6 +262,13 @@ export function updateExpense(
     throw new Error('O valor da despesa deve ser positivo.');
   }
 
+  const alreadyPaidCents = paidCents(database, expense.id);
+  if (input.amountCents < alreadyPaidCents) {
+    throw new Error(
+      'O valor da despesa não pode ser menor que os pagamentos reais já registrados.',
+    );
+  }
+
   const category = input.category.trim();
   const description = input.description.trim();
   const note = normalizeOptionalText(input.note);
@@ -330,6 +337,12 @@ export function cancelExpense(
     throw new Error('Esta despesa já foi cancelada.');
   }
 
+  if (paidCents(database, expense.id) > 0) {
+    throw new Error(
+      'Não é possível cancelar uma despesa com pagamento registrado. Registre o estorno financeiro antes de cancelá-la.',
+    );
+  }
+
   const reason = input.reason.trim();
   const now = Date.now();
   database.sqlite.transaction(() => {
@@ -373,6 +386,12 @@ export function deleteExpense(
     throw new Error('Informe o motivo da exclusão da despesa.');
   }
 
+  if (paidCents(database, expense.id) > 0) {
+    throw new Error(
+      'Não é possível excluir uma despesa com pagamento registrado. Registre o estorno financeiro antes de excluí-la.',
+    );
+  }
+
   database.sqlite.transaction(() => {
     appendAudit(database, {
       action: 'expense.deleted',
@@ -390,7 +409,6 @@ export function deleteExpense(
         reason,
       },
     });
-    database.sqlite.prepare('DELETE FROM expense_payments WHERE expense_id = ?').run(expense.id);
     database.sqlite.prepare('DELETE FROM expenses WHERE id = ?').run(expense.id);
   })();
 

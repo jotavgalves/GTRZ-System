@@ -7,6 +7,9 @@ import { afterEach, describe, expect, it } from 'vitest';
 import {
   createCombo,
   createEvent,
+  configureFood,
+  createExternalFoodItem,
+  createFoodSupplier,
   createInventoryProduct,
   createProductCategory,
   listCombos,
@@ -161,6 +164,58 @@ describe('combo database', () => {
         components: [{ productId: beerId, quantity: 2 }],
       }),
     ).toThrow('Esta operação de combo exige o perfil Produção.');
+    database.close();
+  });
+
+  it('aceita componentes de comida externa em um combo de composição fixa', async () => {
+    const database = await createTemporaryDatabase();
+    createEvent(database, { name: 'Evento comida em combo', startsAt: Date.now() });
+    const category = createProductCategory(database, 'Cozinha externa', 'food');
+    configureFood(database, { supplierMode: 'external' });
+    const supplier = createFoodSupplier(database, { name: 'Cozinha parceira' });
+    createExternalFoodItem(database, {
+      categoryId: category.id,
+      supplierId: supplier.id,
+      name: 'Tequeño de queijo',
+      supplierUnitCents: 300,
+      commissionUnitCents: 100,
+      initialQuantity: 9,
+      comboOnly: true,
+    });
+    createExternalFoodItem(database, {
+      categoryId: category.id,
+      supplierId: supplier.id,
+      name: 'Tequeño Romeu e Julieta',
+      supplierUnitCents: 350,
+      commissionUnitCents: 100,
+      initialQuantity: 6,
+      comboOnly: true,
+    });
+    const products = listCombos(database);
+    expect(products).toEqual([]);
+
+    const foodProducts = database.sqlite
+      .prepare('SELECT id, name FROM products ORDER BY name')
+      .all() as readonly { readonly id: string; readonly name: string }[];
+    const cheese = foodProducts.find((product) => product.name === 'Tequeño de queijo');
+    const guava = foodProducts.find((product) => product.name === 'Tequeño Romeu e Julieta');
+    if (cheese === undefined || guava === undefined) throw new Error('Componentes de comida não criados.');
+
+    const combo = createCombo(database, {
+      name: 'Tequefest',
+      salePriceCents: 2400,
+      components: [
+        { productId: cheese.id, quantity: 3 },
+        { productId: guava.id, quantity: 2 },
+      ],
+    });
+    expect(combo).toMatchObject({
+      availableUnits: 3,
+      components: [
+        { productId: cheese.id, quantity: 3 },
+        { productId: guava.id, quantity: 2 },
+      ],
+    });
     database.close();
   });
 });

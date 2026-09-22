@@ -248,7 +248,7 @@ describe('deletion integrity', () => {
     expect(verifyDatabaseIntegrity(database)).toBe(true);
   });
 
-  it('does not leave payment rows behind when deleting a paid expense', async () => {
+  it('does not silently remove payment rows when deleting a paid expense', async () => {
     const database = await createTemporaryDatabase();
     createEvent(database, { name: 'Despesa removível', startsAt: Date.now() });
     const expense = createExpense(database, {
@@ -259,13 +259,12 @@ describe('deletion integrity', () => {
     });
     recordExpensePayment(database, { expenseId: expense.id, method: 'pix', amountCents: 1200 });
 
-    expect(deleteExpense(database, { expenseId: expense.id, reason: 'Lançamento duplicado' })).toEqual({
-      expenseId: expense.id,
-      deleted: true,
-    });
+    expect(() =>
+      deleteExpense(database, { expenseId: expense.id, reason: 'Lançamento duplicado' }),
+    ).toThrow('Registre o estorno financeiro antes');
     expect(
       database.sqlite.prepare('SELECT id FROM expense_payments WHERE expense_id = ?').all(expense.id),
-    ).toHaveLength(0);
+    ).toHaveLength(1);
     expect(verifyDatabaseIntegrity(database)).toBe(true);
   });
 
