@@ -30,6 +30,14 @@ export const orderItemSchema = z.object({
   quantity: z.number().int().positive(),
   unitPriceCents: z.number().int().nonnegative(),
   totalCents: z.number().int().nonnegative(),
+  componentAllocations: z.array(
+    z.object({
+      productId: z.uuid(),
+      productName: z.string().trim().min(1).max(120),
+      choiceGroup: z.string().trim().min(1).max(60).nullable(),
+      quantity: z.number().int().positive(),
+    }),
+  ),
   createdAt: z.number().int().nonnegative(),
 });
 
@@ -90,6 +98,22 @@ export const operationCatalogItemSchema = z.object({
   active: z.boolean(),
   imageDataUrl: productImageDataUrlSchema,
   fallbackIcon: productFallbackIconSchema,
+  choiceGroups: z.array(
+    z.object({
+      id: z.string().trim().min(1).max(60),
+      label: z.string().trim().min(1).max(80),
+      quantity: z.number().int().positive(),
+      options: z
+        .array(
+          z.object({
+            productId: z.uuid(),
+            productName: z.string().trim().min(1).max(120),
+            availableQuantity: z.number().int().nonnegative(),
+          }),
+        )
+        .min(2),
+    }),
+  ),
 });
 
 export const operationStateSchema = z.object({
@@ -144,6 +168,21 @@ export const addOrderItemInputSchema = z.object({
   itemKind: orderItemKindSchema,
   itemId: z.uuid(),
   quantity: z.number().int().positive(),
+  componentSelections: z
+    .array(
+      z.object({
+        choiceGroup: z.string().trim().min(1).max(60),
+        productId: z.uuid(),
+        quantity: z.number().int().positive(),
+      }),
+    )
+    .optional(),
+});
+
+export const comboComponentSelectionSchema = z.object({
+  choiceGroup: z.string().trim().min(1).max(60),
+  productId: z.uuid(),
+  quantity: z.number().int().positive(),
 });
 
 export const startOrderWithItemInputSchema = z.object({
@@ -151,6 +190,7 @@ export const startOrderWithItemInputSchema = z.object({
   itemKind: orderItemKindSchema,
   itemId: z.uuid(),
   quantity: z.number().int().positive(),
+  componentSelections: addOrderItemInputSchema.shape.componentSelections,
 });
 
 export const removeOrderItemInputSchema = z.object({
@@ -197,7 +237,9 @@ export const closeOrderInputSchema = z
 export const cancelOrderInputSchema = z.object({
   orderId: z.uuid(),
   reason: z.string().trim().min(3).max(240),
-  refunds: z.array(z.object({ method: paymentMethodSchema, amountCents: z.number().int().positive() })).optional(),
+  refunds: z
+    .array(z.object({ method: paymentMethodSchema, amountCents: z.number().int().positive() }))
+    .optional(),
 });
 
 export type ServicePointType = z.infer<typeof servicePointTypeSchema>;
@@ -222,6 +264,7 @@ export type ServicePointDeletionResult = z.infer<typeof servicePointDeletionResu
 export type OpenOrderInput = z.infer<typeof openOrderInputSchema>;
 export type GetOrderInput = z.infer<typeof getOrderInputSchema>;
 export type AddOrderItemInput = z.infer<typeof addOrderItemInputSchema>;
+export type ComboComponentSelection = z.infer<typeof comboComponentSelectionSchema>;
 export type StartOrderWithItemInput = z.infer<typeof startOrderWithItemInputSchema>;
 export type RemoveOrderItemInput = z.infer<typeof removeOrderItemInputSchema>;
 export type BindOrderVoucherInput = z.infer<typeof bindOrderVoucherInputSchema>;

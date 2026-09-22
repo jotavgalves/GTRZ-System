@@ -23,6 +23,12 @@ interface ComboComponentRow {
   readonly quantity: number;
 }
 
+interface ComponentAllocationRow {
+  readonly product_id: string;
+  readonly product_name: string;
+  readonly quantity: number;
+}
+
 export interface StockRequirement {
   readonly productId: string;
   readonly productName: string;
@@ -32,27 +38,6 @@ export interface StockRequirement {
 interface SaleMovementRow {
   readonly product_id: string;
   readonly quantity: number;
-}
-
-function isComboAvailableInEvent(
-  database: DatabaseContext,
-  eventId: string,
-  comboId: string,
-): boolean {
-  const row = database.sqlite
-    .prepare(
-      `SELECT
-         COUNT(*) AS component_count,
-         COALESCE(SUM(CASE WHEN es.product_id IS NULL THEN 0 ELSE 1 END), 0) AS pulled_count
-       FROM combo_components cc
-       LEFT JOIN event_stock es
-         ON es.product_id = cc.product_id
-        AND es.event_id = ?
-       WHERE cc.combo_id = ?`,
-    )
-    .get(eventId, comboId) as { readonly component_count: number; readonly pulled_count: number };
-
-  return row.component_count > 0 && row.component_count === row.pulled_count;
 }
 
 export function listOperationCatalog(
@@ -88,13 +73,14 @@ export function listOperationCatalog(
       active: product.active === 1,
       imageDataUrl: presentation.imageDataUrl,
       fallbackIcon: presentation.fallbackIcon,
+      choiceGroups: [],
     };
   });
   const comboItems =
     eventId === null
       ? []
       : listCombos(database)
-          .filter((combo) => isComboAvailableInEvent(database, eventId, combo.id))
+          .filter((combo) => combo.availableUnits > 0)
           .map((combo) => ({
             id: combo.id,
             kind: 'combo' as const,
@@ -104,6 +90,27 @@ export function listOperationCatalog(
             active: combo.active,
             imageDataUrl: null,
             fallbackIcon: 'package' as const,
+            choiceGroups: [
+              ...new Map(
+                combo.components
+                  .filter((component) => component.choiceGroup !== null)
+                  .map((component) => [
+                    component.choiceGroup as string,
+                    {
+                      id: component.choiceGroup as string,
+                      label: component.choiceLabel as string,
+                      quantity: component.quantity,
+                      options: combo.components
+                        .filter((option) => option.choiceGroup === component.choiceGroup)
+                        .map((option) => ({
+                          productId: option.productId,
+                          productName: option.productName,
+                          availableQuantity: option.availableQuantity,
+                        })),
+                    },
+                  ]),
+              ).values(),
+            ],
           }));
 
   return [...productItems, ...comboItems].sort((left, right) =>
@@ -167,6 +174,12 @@ export function buildStockRequirements(
      INNER JOIN products p ON p.id = cc.product_id
      WHERE cc.combo_id = ?`,
   );
+  const listAllocations = database.sqlite.prepare(
+    `SELECT allocation.product_id, product.name AS product_name, allocation.quantity
+     FROM order_item_component_allocations allocation
+     INNER JOIN products product ON product.id = allocation.product_id
+     WHERE allocation.order_item_id = ?`,
+  );
 
   for (const item of items) {
     if (item.itemKind === 'product') {
@@ -177,6 +190,19 @@ export function buildStockRequirements(
       }
 
       addRequirement(requirements, item.itemId, product.name, item.quantity);
+      continue;
+    }
+
+    const allocations = listAllocations.all(item.id) as ComponentAllocationRow[];
+    if (allocations.length > 0) {
+      for (const allocation of allocations) {
+        addRequirement(
+          requirements,
+          allocation.product_id,
+          allocation.product_name,
+          allocation.quantity,
+        );
+      }
       continue;
     }
 

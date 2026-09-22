@@ -960,6 +960,8 @@ export class CloudSyncService {
           components: combo.components.map((component) => ({
             productId: component.productId,
             quantity: component.quantity,
+            choiceGroup: component.choiceGroup,
+            choiceLabel: component.choiceLabel,
           })),
           unitPriceCents: combo.salePriceCents,
           quantity: combo.availableUnits,
@@ -1501,7 +1503,11 @@ export class CloudSyncService {
     if (payload.action === 'inventory.category-created') {
       const name = stringField(payload.details, 'name');
       const engine = stringField(payload.details, 'engine');
-      if (payload.entityId === null || name === null || (engine !== 'catalog' && engine !== 'food')) {
+      if (
+        payload.entityId === null ||
+        name === null ||
+        (engine !== 'catalog' && engine !== 'food')
+      ) {
         throw new Error('Dados insuficientes para criar a categoria remota.');
       }
       database.sqlite
@@ -1524,7 +1530,8 @@ export class CloudSyncService {
     }
 
     if (payload.action === 'inventory.category-deleted') {
-      if (payload.entityId === null) throw new Error('Exclusão remota de categoria sem identificador.');
+      if (payload.entityId === null)
+        throw new Error('Exclusão remota de categoria sem identificador.');
       database.sqlite.prepare('DELETE FROM product_categories WHERE id = ?').run(payload.entityId);
       return;
     }
@@ -1621,7 +1628,8 @@ export class CloudSyncService {
     }
 
     if (payload.action === 'inventory.product-deleted') {
-      if (payload.entityId === null) throw new Error('Exclusão remota de produto sem identificador.');
+      if (payload.entityId === null)
+        throw new Error('Exclusão remota de produto sem identificador.');
       const localOpenOrders = database.sqlite
         .prepare(
           `SELECT DISTINCT o.id FROM orders o
@@ -1639,21 +1647,42 @@ export class CloudSyncService {
           .prepare('DELETE FROM order_voucher_allocations WHERE order_id = ?')
           .run(order.id);
         database.sqlite
-          .prepare("UPDATE orders SET status = 'cancelled', closed_at = ?, updated_at = ? WHERE id = ?")
+          .prepare(
+            "UPDATE orders SET status = 'cancelled', closed_at = ?, updated_at = ? WHERE id = ?",
+          )
           .run(payload.createdAt, payload.createdAt, order.id);
       }
       database.sqlite
-        .prepare('UPDATE combos SET active = 0, updated_at = ? WHERE id IN (SELECT combo_id FROM combo_components WHERE product_id = ?)')
+        .prepare(
+          'UPDATE combos SET active = 0, updated_at = ? WHERE id IN (SELECT combo_id FROM combo_components WHERE product_id = ?)',
+        )
         .run(payload.createdAt, payload.entityId);
-      database.sqlite.prepare('DELETE FROM combo_components WHERE product_id = ?').run(payload.entityId);
-      database.sqlite.prepare('DELETE FROM stock_transfers WHERE product_id = ?').run(payload.entityId);
       database.sqlite
-        .prepare('DELETE FROM stock_purchase_lot_voids WHERE movement_id IN (SELECT movement_id FROM stock_purchase_lots WHERE product_id = ?)')
+        .prepare('DELETE FROM combo_components WHERE product_id = ?')
         .run(payload.entityId);
-      database.sqlite.prepare('DELETE FROM stock_purchase_lots WHERE product_id = ?').run(payload.entityId);
-      database.sqlite.prepare('DELETE FROM food_sale_settlements WHERE product_id = ?').run(payload.entityId);
-      database.sqlite.prepare('DELETE FROM food_product_terms WHERE product_id = ?').run(payload.entityId);
-      database.sqlite.prepare('DELETE FROM stock_movements WHERE product_id = ?').run(payload.entityId);
+      database.sqlite
+        .prepare('DELETE FROM stock_transfers WHERE product_id = ?')
+        .run(payload.entityId);
+      database.sqlite
+        .prepare(
+          'DELETE FROM stock_purchase_lot_voids WHERE movement_id IN (SELECT movement_id FROM stock_purchase_lots WHERE product_id = ?)',
+        )
+        .run(payload.entityId);
+      database.sqlite
+        .prepare('DELETE FROM stock_purchase_lots WHERE product_id = ?')
+        .run(payload.entityId);
+      database.sqlite
+        .prepare('DELETE FROM food_sale_settlements WHERE product_id = ?')
+        .run(payload.entityId);
+      database.sqlite
+        .prepare('DELETE FROM food_product_terms WHERE product_id = ?')
+        .run(payload.entityId);
+      database.sqlite
+        .prepare('DELETE FROM order_item_component_allocations WHERE product_id = ?')
+        .run(payload.entityId);
+      database.sqlite
+        .prepare('DELETE FROM stock_movements WHERE product_id = ?')
+        .run(payload.entityId);
       database.sqlite.prepare('DELETE FROM event_stock WHERE product_id = ?').run(payload.entityId);
       database.sqlite
         .prepare('DELETE FROM app_meta WHERE key IN (?, ?)')
@@ -1701,15 +1730,19 @@ export class CloudSyncService {
     }
 
     if (payload.action === 'food.supplier-archived') {
-      if (payload.entityId === null) throw new Error('Arquivamento remoto de fornecedor sem identificador.');
+      if (payload.entityId === null)
+        throw new Error('Arquivamento remoto de fornecedor sem identificador.');
       database.sqlite
-        .prepare('UPDATE food_suppliers SET active = 0, updated_at = ? WHERE id = ? AND event_id = ?')
+        .prepare(
+          'UPDATE food_suppliers SET active = 0, updated_at = ? WHERE id = ? AND event_id = ?',
+        )
         .run(payload.createdAt, payload.entityId, eventId);
       return;
     }
 
     if (payload.action === 'food.supplier-deleted') {
-      if (payload.entityId === null) throw new Error('Exclusão remota de fornecedor sem identificador.');
+      if (payload.entityId === null)
+        throw new Error('Exclusão remota de fornecedor sem identificador.');
       database.sqlite
         .prepare('DELETE FROM food_suppliers WHERE id = ? AND event_id = ?')
         .run(payload.entityId, eventId);
@@ -1835,7 +1868,9 @@ export class CloudSyncService {
         .prepare('SELECT id FROM stock_movements WHERE id = ?')
         .get(payload.entityId);
       if (alreadyApplied !== undefined) return;
-      const productExists = database.sqlite.prepare('SELECT id FROM products WHERE id = ?').get(productId);
+      const productExists = database.sqlite
+        .prepare('SELECT id FROM products WHERE id = ?')
+        .get(productId);
       if (productExists === undefined) {
         throw new Error('O produto rejeitado pela central não existe neste computador.');
       }
@@ -1949,7 +1984,9 @@ export class CloudSyncService {
       if (payload.entityId === null || label === null)
         throw new Error('Renomeação remota de mesa incompleta.');
       database.sqlite
-        .prepare('UPDATE service_points SET label = ?, updated_at = ? WHERE id = ? AND event_id = ?')
+        .prepare(
+          'UPDATE service_points SET label = ?, updated_at = ? WHERE id = ? AND event_id = ?',
+        )
         .run(label, payload.createdAt, payload.entityId, eventId);
       database.sqlite
         .prepare(
@@ -1988,10 +2025,14 @@ export class CloudSyncService {
         )
         .run(payload.entityId);
       database.sqlite
-        .prepare("UPDATE orders SET status = 'cancelled', closed_at = ?, updated_at = ? WHERE service_point_id = ? AND status = 'open'")
+        .prepare(
+          "UPDATE orders SET status = 'cancelled', closed_at = ?, updated_at = ? WHERE service_point_id = ? AND status = 'open'",
+        )
         .run(payload.createdAt, payload.createdAt, payload.entityId);
       database.sqlite
-        .prepare('UPDATE service_points SET active = 0, updated_at = ? WHERE id = ? AND event_id = ?')
+        .prepare(
+          'UPDATE service_points SET active = 0, updated_at = ? WHERE id = ? AND event_id = ?',
+        )
         .run(payload.createdAt, payload.entityId, eventId);
       database.sqlite
         .prepare('DELETE FROM app_meta WHERE key = ?')
@@ -2094,9 +2135,10 @@ export class CloudSyncService {
         throw new Error('Uso remoto de voucher incompleto.');
       return { code, amountCents };
     });
-    const paymentCents = payments.reduce((total, raw) =>
-      total + (isRecord(raw) ? (integerField(raw, 'amountCents') ?? 0) : 0),
-    0);
+    const paymentCents = payments.reduce(
+      (total, raw) => total + (isRecord(raw) ? (integerField(raw, 'amountCents') ?? 0) : 0),
+      0,
+    );
     const voucherCents = voucherUses.reduce((total, voucher) => total + voucher.amountCents, 0);
     if (paymentCents + voucherCents !== totalCents) {
       throw new Error('Os pagamentos e vouchers remotos não somam o total da venda.');
@@ -2188,6 +2230,11 @@ export class CloudSyncService {
        (id, order_id, item_kind, item_id, item_name, quantity, unit_price_cents, total_cents, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
+    const insertComponentAllocation = database.sqlite.prepare(
+      `INSERT INTO order_item_component_allocations
+       (id, order_item_id, product_id, choice_group, quantity, created_at)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+    );
     for (const raw of items) {
       if (!isRecord(raw)) throw new Error('Item de venda remoto inválido.');
       const id = stringField(raw, 'id');
@@ -2218,6 +2265,32 @@ export class CloudSyncService {
         itemTotal,
         payload.createdAt,
       );
+      if (Array.isArray(raw.componentAllocations)) {
+        for (const rawAllocation of raw.componentAllocations) {
+          if (!isRecord(rawAllocation)) throw new Error('Componente remoto inválido.');
+          const productId = stringField(rawAllocation, 'productId');
+          const choiceGroup =
+            rawAllocation.choiceGroup === null ? null : stringField(rawAllocation, 'choiceGroup');
+          const allocationQuantity = integerField(rawAllocation, 'quantity');
+          if (productId === null || allocationQuantity === null || allocationQuantity <= 0) {
+            throw new Error('Componente remoto incompleto.');
+          }
+          if (
+            database.sqlite.prepare('SELECT id FROM products WHERE id = ?').get(productId) ===
+            undefined
+          ) {
+            throw new Error('O componente remoto ainda não existe neste computador.');
+          }
+          insertComponentAllocation.run(
+            randomUUID(),
+            id,
+            productId,
+            choiceGroup,
+            allocationQuantity,
+            payload.createdAt,
+          );
+        }
+      }
     }
     const insertPayment = database.sqlite.prepare(
       `INSERT INTO payments (id, order_id, method, amount_cents, received_cents, change_cents, fee_rate_basis_points, fee_cents, created_at)
@@ -2460,7 +2533,9 @@ export class CloudSyncService {
       return;
     }
     if (payload.action === 'expense.deleted') {
-      database.sqlite.prepare('DELETE FROM expense_payments WHERE expense_id = ?').run(payload.entityId);
+      database.sqlite
+        .prepare('DELETE FROM expense_payments WHERE expense_id = ?')
+        .run(payload.entityId);
       database.sqlite.prepare('DELETE FROM expenses WHERE id = ?').run(payload.entityId);
       return;
     }
@@ -2550,7 +2625,9 @@ export class CloudSyncService {
       if (code === null || label === null || servicePointId === null)
         throw new Error('Atualização remota de voucher incompleta.');
       database.sqlite
-        .prepare('UPDATE vouchers SET code = ?, label = ?, updated_at = ? WHERE id = ? AND event_id = ?')
+        .prepare(
+          'UPDATE vouchers SET code = ?, label = ?, updated_at = ? WHERE id = ? AND event_id = ?',
+        )
         .run(code, label, payload.createdAt, payload.entityId, eventId);
       database.sqlite
         .prepare(
@@ -2578,30 +2655,51 @@ export class CloudSyncService {
     if (payload.action === 'voucher.cancelled' || payload.action === 'voucher.active') {
       database.sqlite
         .prepare('UPDATE vouchers SET status = ?, updated_at = ? WHERE id = ? AND event_id = ?')
-        .run(payload.action === 'voucher.active' ? 'active' : 'cancelled', payload.createdAt, payload.entityId, eventId);
+        .run(
+          payload.action === 'voucher.active' ? 'active' : 'cancelled',
+          payload.createdAt,
+          payload.entityId,
+          eventId,
+        );
       return;
     }
     if (payload.action === 'voucher.deleted') {
-      database.sqlite.prepare('DELETE FROM order_voucher_allocations WHERE voucher_id = ?').run(payload.entityId);
-      database.sqlite.prepare('DELETE FROM voucher_transactions WHERE voucher_id = ?').run(payload.entityId);
+      database.sqlite
+        .prepare('DELETE FROM order_voucher_allocations WHERE voucher_id = ?')
+        .run(payload.entityId);
+      database.sqlite
+        .prepare('DELETE FROM voucher_transactions WHERE voucher_id = ?')
+        .run(payload.entityId);
       database.sqlite
         .prepare('DELETE FROM app_meta WHERE key IN (?, ?)')
         .run(`voucher.service-point:${payload.entityId}`, `voucher.deleted-at:${payload.entityId}`);
-      database.sqlite.prepare('DELETE FROM vouchers WHERE id = ? AND event_id = ?').run(payload.entityId, eventId);
+      database.sqlite
+        .prepare('DELETE FROM vouchers WHERE id = ? AND event_id = ?')
+        .run(payload.entityId, eventId);
       return;
     }
     if (payload.action === 'voucher.deleted-with-reversal') {
-      database.sqlite.prepare('DELETE FROM order_voucher_allocations WHERE voucher_id = ?').run(payload.entityId);
       database.sqlite
-        .prepare("UPDATE vouchers SET status = 'cancelled', updated_at = ? WHERE id = ? AND event_id = ?")
+        .prepare('DELETE FROM order_voucher_allocations WHERE voucher_id = ?')
+        .run(payload.entityId);
+      database.sqlite
+        .prepare(
+          "UPDATE vouchers SET status = 'cancelled', updated_at = ? WHERE id = ? AND event_id = ?",
+        )
         .run(payload.createdAt, payload.entityId, eventId);
-      database.sqlite.prepare('DELETE FROM app_meta WHERE key = ?').run(`voucher.service-point:${payload.entityId}`);
+      database.sqlite
+        .prepare('DELETE FROM app_meta WHERE key = ?')
+        .run(`voucher.service-point:${payload.entityId}`);
       database.sqlite
         .prepare(
           `INSERT INTO app_meta (key, value, updated_at) VALUES (?, ?, ?)
            ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
         )
-        .run(`voucher.deleted-at:${payload.entityId}`, String(payload.createdAt), payload.createdAt);
+        .run(
+          `voucher.deleted-at:${payload.entityId}`,
+          String(payload.createdAt),
+          payload.createdAt,
+        );
       return;
     }
     throw new Error(`Ação de voucher sem aplicador: ${payload.action}.`);
@@ -2968,15 +3066,23 @@ export class CloudSyncService {
     }
     if (payload.action === 'ticket.sale-deleted') {
       database.sqlite.prepare('DELETE FROM ticket_codes WHERE sale_id = ?').run(payload.entityId);
-      database.sqlite.prepare('DELETE FROM ticket_sales WHERE id = ? AND event_id = ?').run(payload.entityId, eventId);
+      database.sqlite
+        .prepare('DELETE FROM ticket_sales WHERE id = ? AND event_id = ?')
+        .run(payload.entityId, eventId);
       return;
     }
     if (payload.action === 'ticket.lot-deleted') {
       database.sqlite
-        .prepare('DELETE FROM ticket_codes WHERE sale_id IN (SELECT id FROM ticket_sales WHERE lot_id = ? AND event_id = ?)')
+        .prepare(
+          'DELETE FROM ticket_codes WHERE sale_id IN (SELECT id FROM ticket_sales WHERE lot_id = ? AND event_id = ?)',
+        )
         .run(payload.entityId, eventId);
-      database.sqlite.prepare('DELETE FROM ticket_sales WHERE lot_id = ? AND event_id = ?').run(payload.entityId, eventId);
-      database.sqlite.prepare('DELETE FROM ticket_lots WHERE id = ? AND event_id = ?').run(payload.entityId, eventId);
+      database.sqlite
+        .prepare('DELETE FROM ticket_sales WHERE lot_id = ? AND event_id = ?')
+        .run(payload.entityId, eventId);
+      database.sqlite
+        .prepare('DELETE FROM ticket_lots WHERE id = ? AND event_id = ?')
+        .run(payload.entityId, eventId);
       return;
     }
     throw new Error(`Ação de ingresso sem aplicador: ${payload.action}.`);

@@ -3,6 +3,8 @@ import { z } from 'zod';
 export const comboComponentInputSchema = z.object({
   productId: z.uuid(),
   quantity: z.number().int().positive().max(10_000),
+  choiceGroup: z.string().trim().min(1).max(60).optional(),
+  choiceLabel: z.string().trim().min(1).max(80).optional(),
 });
 
 const comboWriteFields = {
@@ -12,7 +14,10 @@ const comboWriteFields = {
 } as const;
 
 interface ComponentCollection {
-  readonly components: readonly { readonly productId: string }[];
+  readonly components: readonly {
+    readonly productId: string;
+    readonly choiceGroup?: string | undefined;
+  }[];
 }
 
 function validateUniqueComponents(value: ComponentCollection, context: z.RefinementCtx): void {
@@ -45,6 +50,22 @@ export const comboComponentSchema = z.object({
   quantity: z.number().int().positive(),
   salePriceCents: z.number().int().nonnegative(),
   availableQuantity: z.number().int().nonnegative(),
+  choiceGroup: z
+    .string()
+    .trim()
+    .min(1)
+    .max(60)
+    .nullable()
+    .optional()
+    .transform((value) => value ?? null),
+  choiceLabel: z
+    .string()
+    .trim()
+    .min(1)
+    .max(80)
+    .nullable()
+    .optional()
+    .transform((value) => value ?? null),
 });
 
 export const comboFinancialsSchema = z.object({

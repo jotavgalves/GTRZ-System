@@ -47,6 +47,12 @@ function initialComponents(combo: InventoryCombo | undefined): ComboComponentInp
     combo?.components.map((component) => ({
       productId: component.productId,
       quantity: component.quantity,
+      ...(component.choiceGroup === null
+        ? {}
+        : {
+            choiceGroup: component.choiceGroup,
+            choiceLabel: component.choiceLabel ?? component.choiceGroup,
+          }),
     })) ?? []
   );
 }
@@ -63,6 +69,9 @@ export function ComboForm(props: ComboFormProps): React.JSX.Element {
   );
   const [selectedProductId, setSelectedProductId] = useState(activeProducts[0]?.id ?? '');
   const [selectedQuantity, setSelectedQuantity] = useState('1');
+  const [choiceEnabled, setChoiceEnabled] = useState(false);
+  const [choiceGroup, setChoiceGroup] = useState('');
+  const [choiceLabel, setChoiceLabel] = useState('');
   const [active, setActive] = useState(props.combo?.active ?? true);
   const [error, setError] = useState<string | null>(null);
 
@@ -79,7 +88,29 @@ export function ComboForm(props: ComboFormProps): React.JSX.Element {
       return;
     }
 
-    setComponents((current) => [...current, { productId: selectedProductId, quantity }]);
+    const normalizedGroup = choiceGroup.trim();
+    const normalizedLabel = choiceLabel.trim();
+    if (choiceEnabled && (normalizedGroup.length === 0 || normalizedLabel.length === 0)) {
+      setError(
+        'Informe o identificador e o rótulo da escolha, como “arepas” e “Escolha as arepas”.',
+      );
+      return;
+    }
+    const groupQuantity = choiceEnabled
+      ? components.find((component) => component.choiceGroup === normalizedGroup)?.quantity
+      : undefined;
+    if (groupQuantity !== undefined && groupQuantity !== quantity) {
+      setError('Todas as opções da mesma escolha precisam usar a mesma quantidade.');
+      return;
+    }
+    setComponents((current) => [
+      ...current,
+      {
+        productId: selectedProductId,
+        quantity,
+        ...(choiceEnabled ? { choiceGroup: normalizedGroup, choiceLabel: normalizedLabel } : {}),
+      },
+    ]);
     const nextProduct = availableProducts.find((product) => product.id !== selectedProductId);
     setSelectedProductId(nextProduct?.id ?? '');
     setSelectedQuantity('1');
@@ -94,7 +125,12 @@ export function ComboForm(props: ComboFormProps): React.JSX.Element {
 
     setComponents((current) =>
       current.map((component) =>
-        component.productId === productId ? { ...component, quantity } : component,
+        component.productId === productId ||
+        (component.choiceGroup !== undefined &&
+          component.choiceGroup ===
+            current.find((item) => item.productId === productId)?.choiceGroup)
+          ? { ...component, quantity }
+          : component,
       ),
     );
   }
@@ -185,6 +221,42 @@ export function ComboForm(props: ComboFormProps): React.JSX.Element {
           </select>
         </label>
 
+        <label className="combo-choice-toggle">
+          <input
+            checked={choiceEnabled}
+            onChange={(event) => {
+              setChoiceEnabled(event.target.checked);
+            }}
+            type="checkbox"
+          />
+          <span>É uma escolha?</span>
+        </label>
+
+        {choiceEnabled ? (
+          <>
+            <label className="form-field">
+              <span>Grupo da escolha</span>
+              <input
+                onChange={(event) => {
+                  setChoiceGroup(event.target.value);
+                }}
+                placeholder="Ex.: arepas"
+                value={choiceGroup}
+              />
+            </label>
+            <label className="form-field">
+              <span>Rótulo para o caixa</span>
+              <input
+                onChange={(event) => {
+                  setChoiceLabel(event.target.value);
+                }}
+                placeholder="Ex.: Escolha as arepas"
+                value={choiceLabel}
+              />
+            </label>
+          </>
+        ) : null}
+
         <label className="form-field">
           <span>Quantidade</span>
           <input
@@ -219,7 +291,12 @@ export function ComboForm(props: ComboFormProps): React.JSX.Element {
 
             return (
               <div className="combo-component-row" key={component.productId}>
-                <span>{product?.name ?? 'Produto indisponível'}</span>
+                <span>
+                  {product?.name ?? 'Produto indisponível'}
+                  {component.choiceLabel === undefined ? null : (
+                    <small>Escolha: {component.choiceLabel}</small>
+                  )}
+                </span>
                 <label>
                   <span className="sr-only">Quantidade de {product?.name ?? 'produto'}</span>
                   <input

@@ -7,6 +7,8 @@ import type { DatabaseContext } from './types';
 export interface DatabaseComboComponentInput {
   readonly productId: string;
   readonly quantity: number;
+  readonly choiceGroup?: string | undefined;
+  readonly choiceLabel?: string | undefined;
 }
 
 interface ComboWriteInput {
@@ -21,6 +23,8 @@ export interface DatabaseComboComponent {
   readonly quantity: number;
   readonly salePriceCents: number;
   readonly availableQuantity: number;
+  readonly choiceGroup: string | null;
+  readonly choiceLabel: string | null;
 }
 
 export interface DatabaseComboFinancials {
@@ -61,6 +65,8 @@ interface ComponentRow {
   readonly cost_cents: number;
   readonly product_active: number;
   readonly available_quantity: number;
+  readonly choice_group: string | null;
+  readonly choice_label: string | null;
 }
 
 interface ProductValidationRow {
@@ -99,6 +105,7 @@ function validateComponents(
   }
 
   const uniqueIds = new Set<string>();
+  const choices = new Map<string, { quantity: number; label: string; optionCount: number }>();
 
   for (const component of components) {
     if (!Number.isInteger(component.quantity) || component.quantity <= 0) {
@@ -110,6 +117,29 @@ function validateComponents(
     }
 
     uniqueIds.add(component.productId);
+    const choiceGroup = component.choiceGroup?.trim();
+    const choiceLabel = component.choiceLabel?.trim();
+    if ((choiceGroup === undefined) !== (choiceLabel === undefined)) {
+      throw new Error('Uma escolha de componente precisa informar o grupo e o rótulo.');
+    }
+    if (choiceGroup !== undefined && choiceLabel !== undefined) {
+      const current = choices.get(choiceGroup);
+      if (current === undefined) {
+        choices.set(choiceGroup, {
+          quantity: component.quantity,
+          label: choiceLabel,
+          optionCount: 1,
+        });
+      } else {
+        if (current.quantity !== component.quantity) {
+          throw new Error(`Todas as opções de ${choiceLabel} precisam usar a mesma quantidade.`);
+        }
+        if (current.label !== choiceLabel) {
+          throw new Error(`O grupo ${choiceGroup} possui rótulos de escolha diferentes.`);
+        }
+        current.optionCount += 1;
+      }
+    }
     const product = database.sqlite
       .prepare('SELECT id, name, active FROM products WHERE id = ?')
       .get(component.productId) as ProductValidationRow | undefined;
@@ -120,6 +150,12 @@ function validateComponents(
 
     if (product.active !== 1) {
       throw new Error(`O produto ${product.name} está inativo e não pode compor o combo.`);
+    }
+  }
+
+  for (const choice of choices.values()) {
+    if (choice.optionCount < 2) {
+      throw new Error(`A escolha ${choice.label} precisa ter pelo menos duas opções.`);
     }
   }
 }
@@ -146,7 +182,9 @@ function listComponentRows(
          p.sale_price_cents,
          p.cost_cents,
          p.active AS product_active,
-         COALESCE(es.quantity, 0) AS available_quantity
+         COALESCE(es.quantity, 0) AS available_quantity,
+         cc.choice_group,
+         cc.choice_label
        FROM combo_components cc
        INNER JOIN products p ON p.id = cc.product_id
        LEFT JOIN event_stock es
@@ -169,24 +207,55 @@ function mapCombo(
     quantity: component.required_quantity,
     salePriceCents: component.sale_price_cents,
     availableQuantity: component.available_quantity,
+    choiceGroup: component.choice_group,
+    choiceLabel: component.choice_label,
   }));
-  const individualSaleTotalCents = componentRows.reduce(
-    (total, component) => total + component.sale_price_cents * component.required_quantity,
-    0,
-  );
-  const costCents = componentRows.reduce(
-    (total, component) => total + component.cost_cents * component.required_quantity,
-    0,
-  );
+  const fixedComponents = componentRows.filter((component) => component.choice_group === null);
+  const choiceComponents = new Map<string, ComponentRow[]>();
+  for (const component of componentRows) {
+    if (component.choice_group === null) continue;
+    const grouped = choiceComponents.get(component.choice_group) ?? [];
+    grouped.push(component);
+    choiceComponents.set(component.choice_group, grouped);
+  }
+  // A group represents alternatives, not a bundle of every option. Use the most expensive
+  // valid choice for a conservative comparison shown before the operator picks one.
+  const individualSaleTotalCents =
+    fixedComponents.reduce(
+      (total, component) => total + component.sale_price_cents * component.required_quantity,
+      0,
+    ) +
+    [...choiceComponents.values()].reduce((total, options) => {
+      const requiredQuantity = options[0]?.required_quantity ?? 0;
+      const highestSalePrice = Math.max(...options.map((option) => option.sale_price_cents));
+      return total + highestSalePrice * requiredQuantity;
+    }, 0);
+  const costCents =
+    fixedComponents.reduce(
+      (total, component) => total + component.cost_cents * component.required_quantity,
+      0,
+    ) +
+    [...choiceComponents.values()].reduce((total, options) => {
+      const requiredQuantity = options[0]?.required_quantity ?? 0;
+      const highestCost = Math.max(...options.map((option) => option.cost_cents));
+      return total + highestCost * requiredQuantity;
+    }, 0);
   const hasUnavailableComponent = componentRows.some((component) => component.product_active !== 1);
+  const availabilityLimits = [
+    ...fixedComponents.map((component) =>
+      Math.floor(component.available_quantity / component.required_quantity),
+    ),
+    ...[...choiceComponents.values()].map((options) =>
+      Math.floor(
+        options.reduce((total, option) => total + option.available_quantity, 0) /
+          (options[0]?.required_quantity ?? 1),
+      ),
+    ),
+  ];
   const availableUnits =
-    activeEventId === null || componentRows.length === 0 || hasUnavailableComponent
+    activeEventId === null || availabilityLimits.length === 0 || hasUnavailableComponent
       ? 0
-      : Math.min(
-          ...componentRows.map((component) =>
-            Math.floor(component.available_quantity / component.required_quantity),
-          ),
-        );
+      : Math.min(...availabilityLimits);
   const grossProfitCents = row.sale_price_cents - costCents;
 
   return {
@@ -251,12 +320,18 @@ function insertComponents(
   components: readonly DatabaseComboComponentInput[],
 ): void {
   const insert = database.sqlite.prepare(
-    `INSERT INTO combo_components (combo_id, product_id, quantity)
-     VALUES (?, ?, ?)`,
+    `INSERT INTO combo_components (combo_id, product_id, quantity, choice_group, choice_label)
+     VALUES (?, ?, ?, ?, ?)`,
   );
 
   for (const component of components) {
-    insert.run(comboId, component.productId, component.quantity);
+    insert.run(
+      comboId,
+      component.productId,
+      component.quantity,
+      component.choiceGroup?.trim() ?? null,
+      component.choiceLabel?.trim() ?? null,
+    );
   }
 }
 

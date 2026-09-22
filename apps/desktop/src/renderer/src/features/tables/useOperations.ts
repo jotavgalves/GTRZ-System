@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 
 import type {
   CloseOrderInput,
+  ComboComponentSelection,
   OperationCatalogItem,
   OperationState,
   Order,
@@ -25,7 +26,10 @@ interface OperationsViewState {
   readonly setServicePointPinned: (servicePointId: string, pinned: boolean) => Promise<void>;
   readonly deleteServicePoint: (input: DeleteServicePointInput) => Promise<void>;
   readonly openServicePoint: (servicePoint: ServicePoint) => Promise<void>;
-  readonly addItem: (item: OperationCatalogItem) => Promise<void>;
+  readonly addItem: (
+    item: OperationCatalogItem,
+    componentSelections?: readonly ComboComponentSelection[],
+  ) => Promise<void>;
   readonly removeItem: (orderItemId: string) => Promise<void>;
   readonly bindVoucher: (code: string) => Promise<void>;
   readonly unbindVoucher: () => Promise<void>;
@@ -167,7 +171,10 @@ export function useOperations(): OperationsViewState {
   );
 
   const addItem = useCallback(
-    async (item: OperationCatalogItem): Promise<void> => {
+    async (
+      item: OperationCatalogItem,
+      componentSelections?: readonly ComboComponentSelection[],
+    ): Promise<void> => {
       if (selectedServicePoint === null) {
         throw new Error('Selecione uma mesa ou o balcão antes de adicionar itens.');
       }
@@ -179,12 +186,18 @@ export function useOperations(): OperationsViewState {
               itemKind: item.kind,
               itemId: item.id,
               quantity: 1,
+              ...(componentSelections === undefined
+                ? {}
+                : { componentSelections: [...componentSelections] }),
             })
           : window.gtrz.operations.addItem({
               orderId: order.id,
               itemKind: item.kind,
               itemId: item.id,
               quantity: 1,
+              ...(componentSelections === undefined
+                ? {}
+                : { componentSelections: [...componentSelections] }),
             }),
       );
       setOrder(updated);
@@ -247,11 +260,20 @@ export function useOperations(): OperationsViewState {
   const cancelOrder = useCallback(
     async (orderId: string, reason: string): Promise<void> => {
       const paidOrder = state?.recentOrders.find((candidate) => candidate.id === orderId);
-      const refunds = paidOrder?.status === 'paid'
-        ? paidOrder.payments.map((payment) => ({ method: payment.method, amountCents: payment.amountCents }))
-        : undefined;
+      const refunds =
+        paidOrder?.status === 'paid'
+          ? paidOrder.payments.map((payment) => ({
+              method: payment.method,
+              amountCents: payment.amountCents,
+            }))
+          : undefined;
       await run(
-        () => window.gtrz.operations.cancelOrder({ orderId, reason, ...(refunds === undefined ? {} : { refunds }) }),
+        () =>
+          window.gtrz.operations.cancelOrder({
+            orderId,
+            reason,
+            ...(refunds === undefined ? {} : { refunds }),
+          }),
         'Comanda cancelada e operação auditada.',
       );
 

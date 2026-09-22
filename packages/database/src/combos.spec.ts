@@ -5,6 +5,9 @@ import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import {
+  addOrderItem,
+  cancelOrder,
+  closeOrder,
   createCombo,
   createEvent,
   configureFood,
@@ -12,7 +15,9 @@ import {
   createFoodSupplier,
   createInventoryProduct,
   createProductCategory,
+  createServicePoint,
   listCombos,
+  openOrder,
   openDatabase,
   recordStockMovement,
   switchProfile,
@@ -199,7 +204,8 @@ describe('combo database', () => {
       .all() as readonly { readonly id: string; readonly name: string }[];
     const cheese = foodProducts.find((product) => product.name === 'Tequeño de queijo');
     const guava = foodProducts.find((product) => product.name === 'Tequeño Romeu e Julieta');
-    if (cheese === undefined || guava === undefined) throw new Error('Componentes de comida não criados.');
+    if (cheese === undefined || guava === undefined)
+      throw new Error('Componentes de comida não criados.');
 
     const combo = createCombo(database, {
       name: 'Tequefest',
@@ -216,6 +222,137 @@ describe('combo database', () => {
         { productId: guava.id, quantity: 2 },
       ],
     });
+    database.close();
+  });
+
+  it('registra a escolha variável, baixa somente os sabores escolhidos e os restaura no estorno', async () => {
+    const database = await createTemporaryDatabase();
+    const event = createEvent(database, { name: 'Evento prato variável', startsAt: Date.now() });
+    const category = createProductCategory(database, 'Cozinha própria', 'food');
+    const queijo = createInventoryProduct(database, {
+      categoryId: category.id,
+      name: 'Tequeño de queijo',
+      kind: 'food',
+      costCents: 150,
+      salePriceCents: 0,
+      lowStockThreshold: 0,
+      comboOnly: true,
+    });
+    const frango = createInventoryProduct(database, {
+      categoryId: category.id,
+      name: 'Arepa de frango',
+      kind: 'food',
+      costCents: 700,
+      salePriceCents: 0,
+      lowStockThreshold: 0,
+      comboOnly: true,
+    });
+    const carne = createInventoryProduct(database, {
+      categoryId: category.id,
+      name: 'Arepa de carne',
+      kind: 'food',
+      costCents: 800,
+      salePriceCents: 0,
+      lowStockThreshold: 0,
+      comboOnly: true,
+    });
+    for (const product of [queijo, frango, carne]) {
+      recordStockMovement(database, { productId: product.id, type: 'purchase', quantity: 10 });
+    }
+    const combo = createCombo(database, {
+      name: 'Pasaporte Latino',
+      salePriceCents: 2400,
+      components: [
+        { productId: queijo.id, quantity: 2 },
+        {
+          productId: frango.id,
+          quantity: 2,
+          choiceGroup: 'arepa',
+          choiceLabel: 'Escolha as arepas',
+        },
+        {
+          productId: carne.id,
+          quantity: 2,
+          choiceGroup: 'arepa',
+          choiceLabel: 'Escolha as arepas',
+        },
+      ],
+    });
+    expect(combo.availableUnits).toBe(5);
+
+    const counter = createServicePoint(database, { label: 'Balcão escolhas', type: 'counter' });
+    const order = openOrder(database, counter.id);
+    expect(() =>
+      addOrderItem(database, {
+        orderId: order.id,
+        itemKind: 'combo',
+        itemId: combo.id,
+        quantity: 1,
+      }),
+    ).toThrow('Escolha 2 unidade(s) para Escolha as arepas');
+
+    const selected = addOrderItem(database, {
+      orderId: order.id,
+      itemKind: 'combo',
+      itemId: combo.id,
+      quantity: 1,
+      componentSelections: [
+        { choiceGroup: 'arepa', productId: frango.id, quantity: 1 },
+        { choiceGroup: 'arepa', productId: carne.id, quantity: 1 },
+      ],
+    });
+    expect(selected.items[0]?.componentAllocations).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ productId: queijo.id, choiceGroup: null, quantity: 2 }),
+        expect.objectContaining({ productId: frango.id, choiceGroup: 'arepa', quantity: 1 }),
+        expect.objectContaining({ productId: carne.id, choiceGroup: 'arepa', quantity: 1 }),
+      ]),
+    );
+
+    closeOrder(database, {
+      orderId: order.id,
+      discountCents: 0,
+      payments: [{ method: 'pix', amountCents: 2400 }],
+    });
+    expect(
+      database.sqlite
+        .prepare('SELECT quantity FROM event_stock WHERE event_id = ? AND product_id = ?')
+        .get(event.id, queijo.id),
+    ).toEqual({ quantity: 8 });
+    expect(
+      database.sqlite
+        .prepare('SELECT quantity FROM event_stock WHERE event_id = ? AND product_id = ?')
+        .get(event.id, frango.id),
+    ).toEqual({ quantity: 9 });
+    expect(
+      database.sqlite
+        .prepare('SELECT quantity FROM event_stock WHERE event_id = ? AND product_id = ?')
+        .get(event.id, carne.id),
+    ).toEqual({ quantity: 9 });
+
+    updateCombo(database, {
+      comboId: combo.id,
+      name: combo.name,
+      salePriceCents: combo.salePriceCents,
+      active: true,
+      components: [{ productId: queijo.id, quantity: 1 }],
+    });
+    cancelOrder(database, { orderId: order.id, reason: 'Teste de estorno com receita alterada' });
+    expect(
+      database.sqlite
+        .prepare('SELECT quantity FROM event_stock WHERE event_id = ? AND product_id = ?')
+        .get(event.id, queijo.id),
+    ).toEqual({ quantity: 10 });
+    expect(
+      database.sqlite
+        .prepare('SELECT quantity FROM event_stock WHERE event_id = ? AND product_id = ?')
+        .get(event.id, frango.id),
+    ).toEqual({ quantity: 10 });
+    expect(
+      database.sqlite
+        .prepare('SELECT quantity FROM event_stock WHERE event_id = ? AND product_id = ?')
+        .get(event.id, carne.id),
+    ).toEqual({ quantity: 10 });
     database.close();
   });
 });

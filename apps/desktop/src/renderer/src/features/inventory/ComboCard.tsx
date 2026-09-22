@@ -28,6 +28,7 @@ export function ComboCard({
   onUpdate,
 }: ComboCardProps): React.JSX.Element {
   const [editing, setEditing] = useState(false);
+  const hasChoices = combo.components.some((component) => component.choiceGroup !== null);
 
   if (editing) {
     return (
@@ -67,7 +68,7 @@ export function ComboCard({
           <strong>{formatMoney(combo.salePriceCents)}</strong>
         </div>
         <div>
-          <span>Venda individual</span>
+          <span>{hasChoices ? 'Venda individual máxima' : 'Venda individual'}</span>
           <strong>{formatMoney(combo.individualSaleTotalCents)}</strong>
         </div>
         <div>
@@ -77,11 +78,11 @@ export function ComboCard({
         {combo.financials === null ? null : (
           <>
             <div>
-              <span>Custo consolidado</span>
+              <span>{hasChoices ? 'Custo máximo possível' : 'Custo consolidado'}</span>
               <strong>{formatMoney(combo.financials.costCents)}</strong>
             </div>
             <div>
-              <span>Lucro bruto</span>
+              <span>{hasChoices ? 'Lucro mínimo possível' : 'Lucro bruto'}</span>
               <strong>{formatMoney(combo.financials.grossProfitCents)}</strong>
             </div>
             <div>
@@ -94,8 +95,12 @@ export function ComboCard({
 
       <div className="combo-card__components">
         {combo.components.map((component) => (
-          <div key={component.productId}>
-            <span>{component.productName}</span>
+          <div key={`${component.choiceGroup ?? 'fixed'}-${component.productId}`}>
+            <span>
+              {component.choiceGroup === null
+                ? component.productName
+                : `${component.choiceLabel ?? 'Escolha'}: ${component.productName}`}
+            </span>
             <strong>{component.quantity} un.</strong>
           </div>
         ))}

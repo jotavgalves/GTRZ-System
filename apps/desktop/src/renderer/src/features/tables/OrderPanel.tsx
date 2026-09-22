@@ -94,6 +94,17 @@ export function OrderPanel({
                     <small>
                       {item.quantity} × {formatMoney(item.unitPriceCents)}
                     </small>
+                    {item.componentAllocations.filter(
+                      (allocation) => allocation.choiceGroup !== null,
+                    ).length === 0 ? null : (
+                      <small>
+                        Escolhas:{' '}
+                        {item.componentAllocations
+                          .filter((allocation) => allocation.choiceGroup !== null)
+                          .map((allocation) => `${allocation.quantity}× ${allocation.productName}`)
+                          .join(' · ')}
+                      </small>
+                    )}
                   </span>
                   <strong>{formatMoney(item.totalCents)}</strong>
                   <button

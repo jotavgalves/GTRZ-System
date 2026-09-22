@@ -30,6 +30,12 @@ export interface DatabaseOrderItem {
   readonly quantity: number;
   readonly unitPriceCents: number;
   readonly totalCents: number;
+  readonly componentAllocations: readonly {
+    readonly productId: string;
+    readonly productName: string;
+    readonly choiceGroup: string | null;
+    readonly quantity: number;
+  }[];
   readonly createdAt: number;
 }
 
@@ -74,6 +80,22 @@ export interface DatabaseOperationCatalogItem {
   readonly active: boolean;
   readonly imageDataUrl: string | null;
   readonly fallbackIcon: DatabaseProductFallbackIcon;
+  readonly choiceGroups: readonly {
+    readonly id: string;
+    readonly label: string;
+    readonly quantity: number;
+    readonly options: readonly {
+      readonly productId: string;
+      readonly productName: string;
+      readonly availableQuantity: number;
+    }[];
+  }[];
+}
+
+export interface DatabaseComboComponentSelectionInput {
+  readonly choiceGroup: string;
+  readonly productId: string;
+  readonly quantity: number;
 }
 
 export interface DatabaseOperationState {

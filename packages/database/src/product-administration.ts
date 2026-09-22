@@ -59,7 +59,11 @@ export function getProductEconomics(
 ): DatabaseProductEconomics {
   const product = requireProduct(database, productId);
   if (eventId === null) {
-    return { averagePurchaseCostCents: product.costCents, currentStockValueCents: 0, contributedCostCents: 0 };
+    return {
+      averagePurchaseCostCents: product.costCents,
+      currentStockValueCents: 0,
+      contributedCostCents: 0,
+    };
   }
 
   const stock = database.sqlite
@@ -79,9 +83,10 @@ export function getProductEconomics(
          AND void.movement_id IS NULL`,
     )
     .get(eventId, productId) as { readonly units: number; readonly total_cost_cents: number };
-  const averagePurchaseCostCents = contribution.units === 0
-    ? product.costCents
-    : Math.round(contribution.total_cost_cents / contribution.units);
+  const averagePurchaseCostCents =
+    contribution.units === 0
+      ? product.costCents
+      : Math.round(contribution.total_cost_cents / contribution.units);
 
   return {
     averagePurchaseCostCents,
@@ -212,10 +217,19 @@ export function deleteInventoryProduct(
 
     database.sqlite.prepare('DELETE FROM combo_components WHERE product_id = ?').run(product.id);
     database.sqlite.prepare('DELETE FROM stock_transfers WHERE product_id = ?').run(product.id);
-    database.sqlite.prepare('DELETE FROM stock_purchase_lot_voids WHERE movement_id IN (SELECT movement_id FROM stock_purchase_lots WHERE product_id = ?)').run(product.id);
+    database.sqlite
+      .prepare(
+        'DELETE FROM stock_purchase_lot_voids WHERE movement_id IN (SELECT movement_id FROM stock_purchase_lots WHERE product_id = ?)',
+      )
+      .run(product.id);
     database.sqlite.prepare('DELETE FROM stock_purchase_lots WHERE product_id = ?').run(product.id);
-    database.sqlite.prepare('DELETE FROM food_sale_settlements WHERE product_id = ?').run(product.id);
+    database.sqlite
+      .prepare('DELETE FROM food_sale_settlements WHERE product_id = ?')
+      .run(product.id);
     database.sqlite.prepare('DELETE FROM food_product_terms WHERE product_id = ?').run(product.id);
+    database.sqlite
+      .prepare('DELETE FROM order_item_component_allocations WHERE product_id = ?')
+      .run(product.id);
     database.sqlite.prepare('DELETE FROM stock_movements WHERE product_id = ?').run(product.id);
     database.sqlite.prepare('DELETE FROM event_stock WHERE product_id = ?').run(product.id);
     clearProductPresentation(database, product.id);
