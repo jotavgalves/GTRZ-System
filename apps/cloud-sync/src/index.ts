@@ -1930,10 +1930,7 @@ export class EventRoom extends DurableObject<Env> {
     const distinct = new Set(requested.map((item) => `${item.itemKind}:${item.productId}`));
     if (distinct.size !== requested.length)
       throw new ApiError(400, 'INVALID_INPUT', 'Produto repetido na venda.');
-    const requestedServicePointId =
-      payload.servicePointId === undefined
-        ? null
-        : requiredString(payload.servicePointId, 'servicePointId');
+    const requestedServicePointId = requiredString(payload.servicePointId, 'servicePointId');
     const existing = this.#existingCommand(commandId);
     if (existing !== null) return existing;
 
@@ -2087,23 +2084,20 @@ export class EventRoom extends DurableObject<Env> {
       const selectedServicePoint = servicePoints.find(
         (point) => isRecord(point) && point.id === requestedServicePointId && point.active === true,
       );
-      if (requestedServicePointId !== null && !isRecord(selectedServicePoint)) {
+      if (!isRecord(selectedServicePoint)) {
         throw new ApiError(
           409,
           'SERVICE_POINT_UNAVAILABLE',
           'A mesa selecionada não está disponível.',
         );
       }
-      const servicePointId = isRecord(selectedServicePoint)
-        ? requiredString(selectedServicePoint.id, 'servicePoint.id')
-        : `cashier-mobile:${deviceId}`;
-      const servicePointLabel = isRecord(selectedServicePoint)
-        ? requiredString(selectedServicePoint.label, 'servicePoint.label', 40)
-        : `Caixa mobile · ${deviceLabel}`;
-      const servicePointType =
-        isRecord(selectedServicePoint) && selectedServicePoint.type === 'table'
-          ? 'table'
-          : 'counter';
+      const servicePointId = requiredString(selectedServicePoint.id, 'servicePoint.id');
+      const servicePointLabel = requiredString(
+        selectedServicePoint.label,
+        'servicePoint.label',
+        40,
+      );
+      const servicePointType = selectedServicePoint.type === 'table' ? 'table' : 'counter';
       const orderItems = items.map((item) => ({
         id: crypto.randomUUID(),
         itemKind: item.itemKind,
