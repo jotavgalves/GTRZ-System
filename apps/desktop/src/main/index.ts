@@ -81,6 +81,7 @@ if (!hasSingleInstanceLock) {
         databaseReady: () => requireDatabaseRuntime().isReady(),
         backupService,
         cloudSyncService,
+        receiptArchiveDirectory: path.join(documentsFolder, 'Notas'),
         runtimeEnvironment,
       });
       cloudSyncService.start(

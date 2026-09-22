@@ -63,6 +63,7 @@ import { registerVoucherIpcHandlers } from './register-voucher-ipc';
 import { ThermalPrintService } from './thermal-print-service';
 
 interface RegisterIpcOptions {
+  readonly receiptArchiveDirectory: string;
   readonly getDatabase: () => DatabaseContext;
   readonly databaseReady: () => boolean;
   readonly backupService: BackupService;
@@ -103,7 +104,10 @@ export function registerIpcHandlers(options: RegisterIpcOptions): void {
     ipcMain.removeHandler(channel);
   }
 
-  const printService = new ThermalPrintService({ getDatabase: options.getDatabase });
+  const printService = new ThermalPrintService({
+    archiveDirectory: options.receiptArchiveDirectory,
+    getDatabase: options.getDatabase,
+  });
   registerFoodIpcHandlers({ getDatabase: options.getDatabase });
 
   ipcMain.handle(IPC_CHANNELS.systemGetInfo, (): SystemInfo => {

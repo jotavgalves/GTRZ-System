@@ -1,4 +1,6 @@
 import { BrowserWindow } from 'electron';
+import { mkdir, writeFile } from 'node:fs/promises';
+import path from 'node:path';
 
 import type {
   PrinterInfo,
@@ -16,6 +18,7 @@ import {
 import { buildReceiptHtml, estimateReceiptHeightMm } from './receipt-html';
 
 interface ThermalPrintServiceOptions {
+  readonly archiveDirectory: string;
   readonly getDatabase: () => DatabaseContext;
 }
 
@@ -32,9 +35,11 @@ function createHiddenWindow(): BrowserWindow {
 
 export class ThermalPrintService {
   readonly #getDatabase: () => DatabaseContext;
+  readonly #archiveDirectory: string;
 
   constructor(options: ThermalPrintServiceOptions) {
     this.#getDatabase = options.getDatabase;
+    this.#archiveDirectory = options.archiveDirectory;
   }
 
   getSettings(): PrintingSettings {
@@ -83,6 +88,7 @@ export class ThermalPrintService {
 
       try {
         await window.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`);
+        await this.#archiveReceipt(window, receipt.orderId, receipt.closedAt);
         const success = await new Promise<boolean>((resolve) => {
           const printOptions = {
             silent: true,
@@ -116,5 +122,16 @@ export class ThermalPrintService {
         message: error instanceof Error ? error.message : 'Falha ao imprimir a nota de retirada.',
       };
     }
+  }
+
+  async #archiveReceipt(window: BrowserWindow, orderId: string, closedAt: number): Promise<void> {
+    const occurredAt = new Date(closedAt);
+    const folder = path.join(
+      this.#archiveDirectory,
+      String(occurredAt.getFullYear()),
+      `${String(occurredAt.getMonth() + 1).padStart(2, '0')}-${String(occurredAt.getDate()).padStart(2, '0')}`,
+    );
+    await mkdir(folder, { recursive: true });
+    await writeFile(path.join(folder, `Pedido-${orderId}.pdf`), await window.webContents.printToPDF({ printBackground: true }));
   }
 }
