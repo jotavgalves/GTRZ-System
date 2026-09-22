@@ -409,6 +409,22 @@ export class MonitorRoom extends DurableObject<Env> {
       );
       CREATE INDEX IF NOT EXISTS mobile_sessions_operator_idx
         ON mobile_sessions (operator_id, revoked_at, last_seen_at DESC);
+      CREATE TABLE IF NOT EXISTS global_event_control (
+        control_id INTEGER PRIMARY KEY CHECK (control_id = 1),
+        active_event_id TEXT,
+        active_event_name TEXT,
+        revision INTEGER NOT NULL DEFAULT 0,
+        updated_at INTEGER NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS global_event_commands (
+        sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+        command_id TEXT NOT NULL UNIQUE,
+        type TEXT NOT NULL CHECK (type IN ('event.activated', 'event.reset')),
+        event_id TEXT NOT NULL,
+        event_name TEXT NOT NULL,
+        reason TEXT,
+        created_at INTEGER NOT NULL
+      );
       DELETE FROM flow_log WHERE type = 'connection.heartbeat';
     `);
     const columns = this.ctx.storage.sql.exec('PRAGMA table_info(mobile_operators)').toArray();
@@ -450,6 +466,18 @@ export class MonitorRoom extends DurableObject<Env> {
 
       if (request.method === 'POST' && url.pathname === '/v1/monitor/conflict') {
         return json(this.#recordConflict(await readJson(request)));
+      }
+
+      if (request.method === 'GET' && url.pathname === '/v1/monitor/global-control') {
+        return json(this.#globalControl(parseAfter(url.searchParams.get('after'))));
+      }
+
+      if (request.method === 'POST' && url.pathname === '/v1/monitor/global-event') {
+        return json(this.#setGlobalEvent(await readJson(request)));
+      }
+
+      if (request.method === 'POST' && url.pathname === '/v1/monitor/global-event/reset') {
+        return json(await this.#resetGlobalEvent(await readJson(request)));
       }
 
       if (request.method === 'POST' && url.pathname === '/v1/cashier/enroll') {
@@ -1154,6 +1182,10 @@ export class MonitorRoom extends DurableObject<Env> {
   }
 
   #activeEventId(): string | null {
+    const control = this.ctx.storage.sql
+      .exec('SELECT active_event_id FROM global_event_control WHERE control_id = 1')
+      .toArray()[0] as { readonly active_event_id: string | null } | undefined;
+    if (typeof control?.active_event_id === 'string') return control.active_event_id;
     const row = this.ctx.storage.sql
       .exec(
         `SELECT active_event_id FROM devices
@@ -1161,6 +1193,100 @@ export class MonitorRoom extends DurableObject<Env> {
       )
       .toArray()[0] as { readonly active_event_id: string } | undefined;
     return row?.active_event_id ?? null;
+  }
+
+  #globalControl(after: number): JsonRecord {
+    const current = this.ctx.storage.sql
+      .exec(
+        `SELECT active_event_id, active_event_name, revision, updated_at
+         FROM global_event_control WHERE control_id = 1`,
+      )
+      .toArray()[0] as Record<string, unknown> | undefined;
+    const commands = this.ctx.storage.sql
+      .exec(
+        `SELECT sequence, command_id, type, event_id, event_name, reason, created_at
+         FROM global_event_commands WHERE sequence > ? ORDER BY sequence ASC LIMIT 100`,
+        after,
+      )
+      .toArray()
+      .map((row) => ({
+        sequence: Number(row.sequence),
+        commandId: storedString(row.command_id, 'command_id'),
+        type: storedString(row.type, 'type'),
+        eventId: storedString(row.event_id, 'event_id'),
+        eventName: storedString(row.event_name, 'event_name'),
+        reason: typeof row.reason === 'string' ? row.reason : null,
+        createdAt: Number(row.created_at),
+      }));
+    return {
+      activeEventId: typeof current?.active_event_id === 'string' ? current.active_event_id : null,
+      activeEventName:
+        typeof current?.active_event_name === 'string' ? current.active_event_name : null,
+      revision: Number(current?.revision ?? 0),
+      commands,
+    };
+  }
+
+  #setGlobalEvent(payload: JsonRecord): JsonRecord {
+    const eventId = requiredString(payload.eventId, 'eventId', 160);
+    const eventName = requiredString(payload.eventName, 'eventName', 100);
+    const now = Date.now();
+    const commandId = crypto.randomUUID();
+    this.ctx.storage.transactionSync(() => {
+      this.ctx.storage.sql
+        .exec(
+          `INSERT INTO global_event_control (control_id, active_event_id, active_event_name, revision, updated_at)
+           VALUES (1, ?, ?, 1, ?)
+           ON CONFLICT(control_id) DO UPDATE SET active_event_id = excluded.active_event_id,
+             active_event_name = excluded.active_event_name, revision = revision + 1, updated_at = excluded.updated_at`,
+          eventId,
+          eventName,
+          now,
+        )
+        .toArray();
+      this.ctx.storage.sql
+        .exec(
+          `INSERT INTO global_event_commands (command_id, type, event_id, event_name, reason, created_at)
+           VALUES (?, 'event.activated', ?, ?, NULL, ?)`,
+          commandId,
+          eventId,
+          eventName,
+          now,
+        )
+        .toArray();
+    });
+    return this.#globalControl(0);
+  }
+
+  async #resetGlobalEvent(payload: JsonRecord): Promise<JsonRecord> {
+    const eventId = requiredString(payload.eventId, 'eventId', 160);
+    const eventName = requiredString(payload.eventName, 'eventName', 100);
+    const reason = requiredString(payload.reason, 'reason', 240);
+    const room = this.env.EVENT_ROOM.get(this.env.EVENT_ROOM.idFromName(`event:${eventId}`));
+    const reset = await room.fetch(
+      new Request(`https://event.internal/v1/events/${encodeURIComponent(eventId)}/reset`, {
+        method: 'POST',
+      }),
+    );
+    if (!reset.ok)
+      throw new ApiError(502, 'EVENT_RESET_FAILED', 'A central não conseguiu limpar o evento.');
+
+    const now = Date.now();
+    this.ctx.storage.sql
+      .exec(
+        `INSERT INTO global_event_commands (command_id, type, event_id, event_name, reason, created_at)
+         VALUES (?, 'event.reset', ?, ?, ?, ?)`,
+        crypto.randomUUID(),
+        eventId,
+        eventName,
+        reason,
+        now,
+      )
+      .toArray();
+    for (const socket of this.ctx.getWebSockets('mobile')) {
+      sendSocket(socket, { type: 'mobile.event-reset', eventId, reason });
+    }
+    return this.#globalControl(0);
   }
 }
 
@@ -1289,6 +1415,10 @@ export class EventRoom extends DurableObject<Env> {
 
       if (request.method === 'GET' && url.pathname.endsWith('/snapshot')) {
         return json(this.#snapshot(parseAfter(url.searchParams.get('after'))));
+      }
+
+      if (request.method === 'POST' && url.pathname.endsWith('/reset')) {
+        return json(this.#resetEvent());
       }
 
       if (request.method === 'GET' && url.pathname.endsWith('/cashier/catalog')) {
@@ -1540,6 +1670,34 @@ export class EventRoom extends DurableObject<Env> {
       .exec('SELECT COALESCE(MAX(sequence), 0) AS sequence FROM event_log')
       .one() as { readonly sequence: number };
     return { products, currentSequence: current.sequence };
+  }
+
+  #resetEvent(): JsonRecord {
+    const now = Date.now();
+    this.ctx.storage.transactionSync(() => {
+      this.ctx.storage.sql.exec(`
+        DELETE FROM commands;
+        DELETE FROM stock;
+        DELETE FROM sales;
+        DELETE FROM event_log;
+        DELETE FROM cashier_products;
+        DELETE FROM cashier_rejections;
+        DELETE FROM mobile_context;
+        DELETE FROM print_attempts;
+        DELETE FROM print_jobs;
+        UPDATE print_printers SET busy_job_id = NULL, updated_at = ${now};
+        DELETE FROM print_counter;
+      `);
+    });
+    const event: StreamEvent = {
+      sequence: 0,
+      commandId: crypto.randomUUID(),
+      type: 'event.reset',
+      payload: { resetAt: now },
+      createdAt: now,
+    };
+    this.#broadcast(event);
+    return { success: true, resetAt: now };
   }
 
   #mobileContextPayload(): JsonRecord {
@@ -3195,7 +3353,7 @@ async function authorizeMobile(request: Request, env: Env): Promise<MobileAuthor
 }
 
 function eventRequest(url: URL): boolean {
-  return /^\/v1\/events\/[^/]+\/(stock|sales|journal|snapshot|stream|print\/(printers|claim|complete|jobs)|cashier\/(catalog|context|sales|stock|tickets|expenses|vouchers|reject-sale))$/.test(
+  return /^\/v1\/events\/[^/]+\/(stock|sales|journal|snapshot|stream|reset|print\/(printers|claim|complete|jobs)|cashier\/(catalog|context|sales|stock|tickets|expenses|vouchers|reject-sale))$/.test(
     url.pathname,
   );
 }
@@ -3211,7 +3369,9 @@ function mobileApiRequest(url: URL): boolean {
 }
 
 function monitorRequest(url: URL): boolean {
-  return /^\/v1\/monitor\/(heartbeat|snapshot|command|transport|conflict)$/.test(url.pathname);
+  return /^\/v1\/monitor\/(heartbeat|snapshot|command|transport|conflict|global-control|global-event|global-event\/reset)$/.test(
+    url.pathname,
+  );
 }
 
 export function legacyMonitorPage(): Response {

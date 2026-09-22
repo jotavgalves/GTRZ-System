@@ -21,10 +21,12 @@ import {
   IPC_CHANNELS,
   operationResultSchema,
   paymentTerminalSettingsSchema,
+  resetGlobalEventInputSchema,
   renameEventInputSchema,
   restoreBackupResultSchema,
   sessionStateSchema,
   setActiveEventInputSchema,
+  setGlobalEventInputSchema,
   switchProfileInputSchema,
   switchRuntimeEnvironmentInputSchema,
   systemInfoSchema,
@@ -52,6 +54,8 @@ import {
   type RestoreBackupResult,
   type SessionState,
   type SetActiveEventInput,
+  type SetGlobalEventInput,
+  type ResetGlobalEventInput,
   type SwitchProfileInput,
   type SwitchRuntimeEnvironmentInput,
   type SystemInfo,
@@ -177,6 +181,20 @@ const api: GtrzDesktopApi = {
       const payload: unknown = await ipcRenderer.invoke(IPC_CHANNELS.settingsGetCloudMonitor);
       return cloudMonitorSchema.parse(payload);
     },
+    async setGlobalEvent(input: SetGlobalEventInput): Promise<SessionState> {
+      const payload: unknown = await ipcRenderer.invoke(
+        IPC_CHANNELS.settingsSetGlobalEvent,
+        setGlobalEventInputSchema.parse(input),
+      );
+      return sessionStateSchema.parse(payload);
+    },
+    async resetGlobalEvent(input: ResetGlobalEventInput): Promise<OperationResult> {
+      const payload: unknown = await ipcRenderer.invoke(
+        IPC_CHANNELS.settingsResetGlobalEvent,
+        resetGlobalEventInputSchema.parse(input),
+      );
+      return operationResultSchema.parse(payload);
+    },
     async listMobileOperators(): Promise<readonly MobileOperator[]> {
       const payload: unknown = await ipcRenderer.invoke(IPC_CHANNELS.settingsListMobileOperators);
       return mobileOperatorListSchema.parse(payload);
@@ -195,7 +213,9 @@ const api: GtrzDesktopApi = {
       );
       return mobileOperatorSchema.parse(payload);
     },
-    async endMobileOperatorSessions(input: EndMobileOperatorSessionsInput): Promise<OperationResult> {
+    async endMobileOperatorSessions(
+      input: EndMobileOperatorSessionsInput,
+    ): Promise<OperationResult> {
       const payload: unknown = await ipcRenderer.invoke(
         IPC_CHANNELS.settingsEndMobileOperatorSessions,
         endMobileOperatorSessionsInputSchema.parse(input),

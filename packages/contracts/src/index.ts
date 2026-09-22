@@ -42,6 +42,8 @@ export const IPC_CHANNELS = {
   settingsUpdatePaymentTerminal: 'settings:update-payment-terminal',
   settingsGetCloudSyncStatus: 'settings:get-cloud-sync-status',
   settingsGetCloudMonitor: 'settings:get-cloud-monitor',
+  settingsSetGlobalEvent: 'settings:set-global-event',
+  settingsResetGlobalEvent: 'settings:reset-global-event',
   settingsListMobileOperators: 'settings:list-mobile-operators',
   settingsCreateMobileOperator: 'settings:create-mobile-operator',
   settingsUpdateMobileOperator: 'settings:update-mobile-operator',
@@ -191,6 +193,13 @@ export const eventDeletionResultSchema = z.object({
 
 export const setActiveEventInputSchema = z.object({
   eventId: z.uuid().nullable(),
+});
+
+export const setGlobalEventInputSchema = z.object({ eventId: z.uuid() });
+export const resetGlobalEventInputSchema = z.object({
+  eventId: z.uuid(),
+  confirmationName: z.string().trim().min(2).max(100),
+  reason: z.string().trim().min(3).max(240),
 });
 
 export const sessionStateSchema = z.object({
@@ -385,6 +394,8 @@ export type ChangeEventStatusInput = z.infer<typeof changeEventStatusInputSchema
 export type DeleteEventInput = z.infer<typeof deleteEventInputSchema>;
 export type EventDeletionResult = z.infer<typeof eventDeletionResultSchema>;
 export type SetActiveEventInput = z.infer<typeof setActiveEventInputSchema>;
+export type SetGlobalEventInput = z.infer<typeof setGlobalEventInputSchema>;
+export type ResetGlobalEventInput = z.infer<typeof resetGlobalEventInputSchema>;
 export type SessionState = z.infer<typeof sessionStateSchema>;
 export type SwitchProfileInput = z.infer<typeof switchProfileInputSchema>;
 export type ChangeProductionPasswordInput = z.infer<typeof changeProductionPasswordInputSchema>;
@@ -438,6 +449,8 @@ export interface GtrzDesktopApi {
     ): Promise<PaymentTerminalSettings>;
     getCloudSyncStatus(): Promise<CloudSyncStatus>;
     getCloudMonitor(): Promise<CloudMonitor>;
+    setGlobalEvent(input: SetGlobalEventInput): Promise<SessionState>;
+    resetGlobalEvent(input: ResetGlobalEventInput): Promise<OperationResult>;
     listMobileOperators(): Promise<readonly MobileOperator[]>;
     createMobileOperator(input: CreateMobileOperatorInput): Promise<MobileOperator>;
     updateMobileOperator(input: UpdateMobileOperatorInput): Promise<MobileOperator>;

@@ -18,10 +18,12 @@ import {
   IPC_CHANNELS,
   operationResultSchema,
   paymentTerminalSettingsSchema,
+  resetGlobalEventInputSchema,
   renameEventInputSchema,
   restoreBackupResultSchema,
   sessionStateSchema,
   setActiveEventInputSchema,
+  setGlobalEventInputSchema,
   switchProfileInputSchema,
   switchRuntimeEnvironmentInputSchema,
   systemInfoSchema,
@@ -87,6 +89,8 @@ const CONTROL_CHANNELS = [
   IPC_CHANNELS.settingsUpdatePaymentTerminal,
   IPC_CHANNELS.settingsGetCloudSyncStatus,
   IPC_CHANNELS.settingsGetCloudMonitor,
+  IPC_CHANNELS.settingsSetGlobalEvent,
+  IPC_CHANNELS.settingsResetGlobalEvent,
   IPC_CHANNELS.settingsListMobileOperators,
   IPC_CHANNELS.settingsCreateMobileOperator,
   IPC_CHANNELS.settingsUpdateMobileOperator,
@@ -209,6 +213,22 @@ export function registerIpcHandlers(options: RegisterIpcOptions): ThermalPrintSe
       localQueue: options.cloudSyncService.getQueueState(database),
       localConflicts: options.cloudSyncService.getConflicts(database),
     });
+  });
+
+  ipcMain.handle(IPC_CHANNELS.settingsSetGlobalEvent, async (_event, payload: unknown) => {
+    const database = options.getDatabase();
+    const input = setGlobalEventInputSchema.parse(payload);
+    await options.cloudSyncService.setGlobalEvent(database, input.eventId);
+    return sessionStateSchema.parse(getSessionState(database));
+  });
+
+  ipcMain.handle(IPC_CHANNELS.settingsResetGlobalEvent, async (_event, payload: unknown) => {
+    const database = options.getDatabase();
+    await options.cloudSyncService.resetGlobalEvent(
+      database,
+      resetGlobalEventInputSchema.parse(payload),
+    );
+    return operationResultSchema.parse({ success: true });
   });
 
   ipcMain.handle(IPC_CHANNELS.settingsListMobileOperators, async () =>

@@ -15,7 +15,7 @@ import {
   type CloudMonitor,
   type CloudSyncStatus,
 } from '@gtrz/contracts';
-import { listCombos, type DatabaseContext } from '@gtrz/database';
+import { listCombos, resetEventData, setActiveEvent, type DatabaseContext } from '@gtrz/database';
 import { getProductPresentation } from '@gtrz/database/product-presentation';
 import { getPrintingSettings } from '@gtrz/database/printing';
 
@@ -85,6 +85,15 @@ interface RecoverableConflictRow {
   readonly command_id: string;
   readonly event_id: string;
   readonly payload_json: string;
+}
+
+interface GlobalEventCommand {
+  readonly sequence: number;
+  readonly commandId: string;
+  readonly type: 'event.activated' | 'event.reset';
+  readonly eventId: string;
+  readonly eventName: string;
+  readonly reason: string | null;
 }
 
 export interface CloudPrintReceipt {
@@ -333,6 +342,41 @@ export class CloudSyncService {
 
     await this.#pullRemoteJournal(database, pairingKey, activeEventId, deviceId);
     await this.#processPrintQueue(database, activeEventId, deviceId, pairingKey);
+    await this.#pullGlobalControl(database, pairingKey, deviceId);
+  }
+
+  async setGlobalEvent(database: DatabaseContext, eventId: string): Promise<void> {
+    const event = database.sqlite
+      .prepare("SELECT id, name FROM events WHERE id = ? AND status = 'open'")
+      .get(eventId) as { readonly id: string; readonly name: string } | undefined;
+    if (event === undefined)
+      throw new Error('O evento selecionado não está disponível neste computador.');
+    await this.#globalControlRequest('/v1/monitor/global-event', {
+      eventId: event.id,
+      eventName: event.name,
+    });
+    setActiveEvent(database, event.id);
+    this.#onDataChanged();
+  }
+
+  async resetGlobalEvent(
+    database: DatabaseContext,
+    input: { readonly eventId: string; readonly confirmationName: string; readonly reason: string },
+  ): Promise<void> {
+    const event = database.sqlite
+      .prepare('SELECT id, name FROM events WHERE id = ?')
+      .get(input.eventId) as { readonly id: string; readonly name: string } | undefined;
+    if (event === undefined) throw new Error('O evento informado não existe neste computador.');
+    if (input.confirmationName.trim() !== event.name) {
+      throw new Error('Digite exatamente o nome do evento para confirmar a limpeza.');
+    }
+    await this.#globalControlRequest('/v1/monitor/global-event/reset', {
+      eventId: event.id,
+      eventName: event.name,
+      reason: input.reason.trim(),
+    });
+    resetEventData(database, { ...input, system: true });
+    this.#onDataChanged();
   }
 
   async getStatus(): Promise<CloudSyncStatus> {
@@ -581,6 +625,114 @@ export class CloudSyncService {
       throw new Error(message);
     }
     return schema === undefined ? (payload as TResult) : schema.parse(payload);
+  }
+
+  async #globalControlRequest(path: string, body: Record<string, unknown>): Promise<void> {
+    const pairingKey = await this.#readPairingKey();
+    if (pairingKey === null)
+      throw new Error('A chave da nuvem não foi encontrada neste computador.');
+    const response = await fetch(`${this.#endpoint}${path}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-GTRZ-Key': pairingKey },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(CONNECTION_TIMEOUT_MS),
+    });
+    const payload: unknown = await response.json().catch(() => null);
+    if (response.ok) return;
+    const message =
+      isRecord(payload) && isRecord(payload.error) && typeof payload.error.message === 'string'
+        ? payload.error.message
+        : 'A central não confirmou o comando global.';
+    throw new Error(message);
+  }
+
+  async #pullGlobalControl(
+    database: DatabaseContext,
+    pairingKey: string,
+    deviceId: string,
+  ): Promise<void> {
+    const cursorKey = 'global.event-control.cursor';
+    const cursorRow = database.sqlite
+      .prepare('SELECT value FROM sync_state WHERE key = ?')
+      .get(cursorKey) as { readonly value: string } | undefined;
+    const after = Number.parseInt(cursorRow?.value ?? '0', 10) || 0;
+    const response = await fetch(
+      `${this.#endpoint}/v1/monitor/global-control?after=${String(after)}`,
+      {
+        headers: { 'X-GTRZ-Key': pairingKey },
+        signal: AbortSignal.timeout(CONNECTION_TIMEOUT_MS),
+      },
+    );
+    if (!response.ok) return;
+    const payload: unknown = await response.json();
+    if (!isRecord(payload) || !Array.isArray(payload.commands)) return;
+    let cursor = after;
+    for (const candidate of payload.commands) {
+      if (!isRecord(candidate)) continue;
+      if (
+        typeof candidate.sequence !== 'number' ||
+        typeof candidate.commandId !== 'string' ||
+        (candidate.type !== 'event.activated' && candidate.type !== 'event.reset') ||
+        typeof candidate.eventId !== 'string' ||
+        typeof candidate.eventName !== 'string'
+      )
+        continue;
+      const command: GlobalEventCommand = {
+        sequence: candidate.sequence,
+        commandId: candidate.commandId,
+        type: candidate.type,
+        eventId: candidate.eventId,
+        eventName: candidate.eventName,
+        reason: typeof candidate.reason === 'string' ? candidate.reason : null,
+      };
+      const appliedKey = `global.event-command:${command.commandId}`;
+      const alreadyApplied = database.sqlite
+        .prepare('SELECT 1 FROM sync_state WHERE key = ?')
+        .get(appliedKey) as { readonly value: number } | undefined;
+      if (alreadyApplied !== undefined) {
+        cursor = Math.max(cursor, command.sequence);
+        continue;
+      }
+      const event = database.sqlite
+        .prepare('SELECT id, name FROM events WHERE id = ?')
+        .get(command.eventId) as { readonly id: string; readonly name: string } | undefined;
+      if (event === undefined) {
+        this.#reportConflict({
+          commandId: command.commandId,
+          eventId: command.eventId,
+          deviceId,
+          action: command.type,
+          entityId: command.eventId,
+          reason: 'O evento global ainda não existe nesta cópia local.',
+        });
+      } else if (command.type === 'event.activated') {
+        setActiveEvent(database, event.id);
+        this.#onDataChanged();
+      } else {
+        resetEventData(database, {
+          eventId: event.id,
+          confirmationName: event.name,
+          reason: command.reason ?? 'Limpeza global do evento.',
+          system: true,
+        });
+        this.#onDataChanged();
+      }
+      database.sqlite
+        .prepare(
+          `INSERT INTO sync_state (key, value, updated_at) VALUES (?, 'applied', ?)
+           ON CONFLICT(key) DO UPDATE SET updated_at = excluded.updated_at`,
+        )
+        .run(appliedKey, Date.now());
+      cursor = Math.max(cursor, command.sequence);
+    }
+    if (cursor !== after) {
+      database.sqlite
+        .prepare(
+          `INSERT INTO sync_state (key, value, updated_at) VALUES (?, ?, ?)
+           ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+        )
+        .run(cursorKey, String(cursor), Date.now());
+    }
   }
 
   #reportConflict(conflict: {

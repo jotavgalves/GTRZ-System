@@ -121,6 +121,44 @@
   margin: 0;
 }
 
+.cloud-event__reset {
+  grid-column: 1 / -1;
+  border-top: 1px solid var(--color-border);
+  padding-top: var(--space-3);
+}
+
+.cloud-event__reset summary {
+  display: flex;
+  cursor: pointer;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--color-danger);
+  font-weight: 700;
+}
+
+.cloud-event__reset p {
+  max-width: 48rem;
+  color: var(--color-text-muted);
+  font-size: 0.78rem;
+}
+
+.cloud-event__reset label {
+  display: grid;
+  max-width: 30rem;
+  gap: 0.35rem;
+  margin-top: var(--space-3);
+  color: var(--color-text-muted);
+  font-size: 0.75rem;
+}
+
+.cloud-event__reset input {
+  min-height: 2.5rem;
+}
+
+.cloud-event__reset .button {
+  margin-top: var(--space-3);
+}
+
 .cloud-monitor-summary,
 .cloud-monitor-grid {
   display: grid;
@@ -178,10 +216,9 @@
 
 .cloud-flow {
   display: grid;
-  grid-template-columns: minmax(9rem, 1fr) minmax(3rem, 0.4fr) minmax(9rem, 1fr) minmax(
-      3rem,
-      0.4fr
-    ) minmax(9rem, 1fr);
+  grid-template-columns:
+    minmax(9rem, 1fr) minmax(3rem, 0.4fr) minmax(9rem, 1fr) minmax(3rem, 0.4fr)
+    minmax(9rem, 1fr);
   align-items: center;
   gap: var(--space-3);
   padding: var(--space-6);
