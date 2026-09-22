@@ -271,6 +271,24 @@ function storedString(value: unknown, field: string): string {
   return value;
 }
 
+function parseCashierComponents(
+  value: string,
+): readonly { readonly productId: string; readonly quantity: number }[] {
+  try {
+    const parsed: unknown = JSON.parse(value);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.flatMap((component) => {
+      if (!isRecord(component) || typeof component.productId !== 'string') return [];
+      const quantity = component.quantity;
+      if (typeof quantity !== 'number' || !Number.isSafeInteger(quantity) || quantity < 1)
+        return [];
+      return [{ productId: component.productId, quantity }];
+    });
+  } catch {
+    return [];
+  }
+}
+
 function websocketRequested(request: Request): boolean {
   return request.headers.get('Upgrade')?.toLowerCase() === 'websocket';
 }
@@ -1178,6 +1196,12 @@ export class EventRoom extends DurableObject<Env> {
         product_id TEXT PRIMARY KEY,
         label TEXT NOT NULL,
         kind TEXT NOT NULL,
+        item_kind TEXT NOT NULL DEFAULT 'product',
+        visible INTEGER NOT NULL DEFAULT 1,
+        category_label TEXT NOT NULL DEFAULT 'Produtos',
+        image_data_url TEXT,
+        fallback_icon TEXT NOT NULL DEFAULT 'package',
+        components_json TEXT NOT NULL DEFAULT '[]',
         unit_price_cents INTEGER NOT NULL CHECK (unit_price_cents >= 0),
         quantity INTEGER NOT NULL CHECK (quantity >= 0),
         active INTEGER NOT NULL CHECK (active IN (0, 1)),
@@ -1237,6 +1261,22 @@ export class EventRoom extends DurableObject<Env> {
         created_at INTEGER NOT NULL
       );
     `);
+    const cashierColumns = this.ctx.storage.sql
+      .exec('PRAGMA table_info(cashier_products)')
+      .toArray();
+    const cashierMigrations: readonly [string, string][] = [
+      ['item_kind', "item_kind TEXT NOT NULL DEFAULT 'product'"],
+      ['visible', 'visible INTEGER NOT NULL DEFAULT 1'],
+      ['category_label', "category_label TEXT NOT NULL DEFAULT 'Produtos'"],
+      ['image_data_url', 'image_data_url TEXT'],
+      ['fallback_icon', "fallback_icon TEXT NOT NULL DEFAULT 'package'"],
+      ['components_json', "components_json TEXT NOT NULL DEFAULT '[]'"],
+    ];
+    for (const [name, definition] of cashierMigrations) {
+      if (!cashierColumns.some((column) => column.name === name)) {
+        this.ctx.storage.sql.exec(`ALTER TABLE cashier_products ADD COLUMN ${definition}`);
+      }
+    }
   }
 
   override async fetch(request: Request): Promise<Response> {
@@ -1477,7 +1517,8 @@ export class EventRoom extends DurableObject<Env> {
   #cashierCatalog(): JsonRecord {
     const products = this.ctx.storage.sql
       .exec(
-        `SELECT product_id, label, kind, unit_price_cents, quantity
+        `SELECT product_id, label, kind, item_kind, visible, category_label, image_data_url,
+                fallback_icon, components_json, unit_price_cents, quantity
          FROM cashier_products WHERE active = 1 ORDER BY label COLLATE NOCASE`,
       )
       .toArray()
@@ -1485,6 +1526,13 @@ export class EventRoom extends DurableObject<Env> {
         productId: storedString(row.product_id, 'product_id'),
         label: storedString(row.label, 'label'),
         kind: storedString(row.kind, 'kind'),
+        itemKind: storedString(row.item_kind, 'item_kind'),
+        visible: Number(row.visible) === 1,
+        categoryLabel: storedString(row.category_label, 'category_label'),
+        imageDataUrl:
+          row.image_data_url === null ? null : storedString(row.image_data_url, 'image_data_url'),
+        fallbackIcon: storedString(row.fallback_icon, 'fallback_icon'),
+        components: parseCashierComponents(storedString(row.components_json, 'components_json')),
         unitPriceCents: Number(row.unit_price_cents),
         quantity: Number(row.quantity),
       }));
@@ -1752,10 +1800,66 @@ export class EventRoom extends DurableObject<Env> {
       if (productIds.has(productId))
         throw new ApiError(400, 'INVALID_INPUT', 'Produto duplicado no catálogo.');
       productIds.add(productId);
+      const itemKind =
+        raw.itemKind === undefined
+          ? 'product'
+          : requiredString(raw.itemKind, `products[${String(index)}].itemKind`, 16);
+      if (itemKind !== 'product' && itemKind !== 'combo') {
+        throw new ApiError(400, 'INVALID_INPUT', 'Tipo de item do catálogo inválido.');
+      }
+      const rawComponents = raw.components === undefined ? [] : raw.components;
+      if (!Array.isArray(rawComponents) || rawComponents.length > 100) {
+        throw new ApiError(400, 'INVALID_INPUT', 'Componentes do catálogo inválidos.');
+      }
+      const componentIds = new Set<string>();
+      const components = rawComponents.map((component, componentIndex) => {
+        if (!isRecord(component)) {
+          throw new ApiError(
+            400,
+            'INVALID_INPUT',
+            `components[${String(componentIndex)}] é inválido.`,
+          );
+        }
+        const componentProductId = requiredString(
+          component.productId,
+          `components[${String(componentIndex)}].productId`,
+        );
+        if (componentIds.has(componentProductId)) {
+          throw new ApiError(400, 'INVALID_INPUT', 'Um componente não pode repetir no combo.');
+        }
+        componentIds.add(componentProductId);
+        return {
+          productId: componentProductId,
+          quantity: positiveInteger(
+            component.quantity,
+            `components[${String(componentIndex)}].quantity`,
+          ),
+        };
+      });
+      if (itemKind === 'combo' && components.length === 0) {
+        throw new ApiError(400, 'INVALID_INPUT', 'Um combo precisa de componentes.');
+      }
       return {
         productId,
         label: requiredString(raw.label, `products[${String(index)}].label`, 120),
         kind: requiredString(raw.kind, `products[${String(index)}].kind`, 24),
+        itemKind,
+        visible: raw.visible === undefined ? true : raw.visible === true,
+        categoryLabel:
+          raw.categoryLabel === undefined
+            ? itemKind === 'combo'
+              ? 'Combos'
+              : 'Produtos'
+            : requiredString(raw.categoryLabel, `products[${String(index)}].categoryLabel`, 80),
+        imageDataUrl:
+          raw.imageDataUrl === undefined || raw.imageDataUrl === null
+            ? null
+            : requiredString(raw.imageDataUrl, `products[${String(index)}].imageDataUrl`, 750_000),
+        fallbackIcon:
+          raw.fallbackIcon === undefined
+            ? 'package'
+            : requiredString(raw.fallbackIcon, `products[${String(index)}].fallbackIcon`, 32),
+        components,
         unitPriceCents: nonNegativeInteger(
           raw.unitPriceCents,
           `products[${String(index)}].unitPriceCents`,
@@ -1770,11 +1874,18 @@ export class EventRoom extends DurableObject<Env> {
         this.ctx.storage.sql
           .exec(
             `INSERT INTO cashier_products
-             (product_id, label, kind, unit_price_cents, quantity, active, updated_at)
-             VALUES (?, ?, ?, ?, ?, 1, ?)`,
+             (product_id, label, kind, item_kind, visible, category_label, image_data_url,
+              fallback_icon, components_json, unit_price_cents, quantity, active, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)`,
             product.productId,
             product.label,
             product.kind,
+            product.itemKind,
+            product.visible ? 1 : 0,
+            product.categoryLabel,
+            product.imageDataUrl,
+            product.fallbackIcon,
+            JSON.stringify(product.components),
             product.unitPriceCents,
             product.quantity,
             now,
@@ -1804,14 +1915,25 @@ export class EventRoom extends DurableObject<Env> {
     const requested = rawItems.map((raw, index) => {
       if (!isRecord(raw))
         throw new ApiError(400, 'INVALID_INPUT', `items[${String(index)}] é inválido.`);
+      const itemKind =
+        raw.itemKind === undefined
+          ? 'product'
+          : requiredString(raw.itemKind, `items[${String(index)}].itemKind`, 16);
+      if (itemKind !== 'product' && itemKind !== 'combo')
+        throw new ApiError(400, 'INVALID_INPUT', 'Tipo de item da venda inválido.');
       return {
         productId: requiredString(raw.productId, `items[${String(index)}].productId`),
+        itemKind,
         quantity: positiveInteger(raw.quantity, `items[${String(index)}].quantity`),
       };
     });
-    const distinct = new Set(requested.map((item) => item.productId));
+    const distinct = new Set(requested.map((item) => `${item.itemKind}:${item.productId}`));
     if (distinct.size !== requested.length)
       throw new ApiError(400, 'INVALID_INPUT', 'Produto repetido na venda.');
+    const requestedServicePointId =
+      payload.servicePointId === undefined
+        ? null
+        : requiredString(payload.servicePointId, 'servicePointId');
     const existing = this.#existingCommand(commandId);
     if (existing !== null) return existing;
 
@@ -1820,7 +1942,8 @@ export class EventRoom extends DurableObject<Env> {
       const items = requested.map((request) => {
         const product = this.ctx.storage.sql
           .exec(
-            `SELECT label, kind, unit_price_cents, quantity, active FROM cashier_products
+            `SELECT label, kind, item_kind, visible, components_json, unit_price_cents, quantity, active
+             FROM cashier_products
              WHERE product_id = ?`,
             request.productId,
           )
@@ -1828,19 +1951,40 @@ export class EventRoom extends DurableObject<Env> {
           | {
               readonly label: string;
               readonly kind: string;
+              readonly item_kind: string;
+              readonly visible: number;
+              readonly components_json: string;
               readonly unit_price_cents: number;
               readonly quantity: number;
               readonly active: number;
             }
           | undefined;
-        if (product?.active !== 1) {
+        if (product?.active !== 1 || product.item_kind !== request.itemKind) {
           throw new ApiError(
             409,
             'PRODUCT_UNAVAILABLE',
             'Um produto da venda não está disponível neste caixa.',
           );
         }
-        if (product.quantity < request.quantity) {
+        if (request.itemKind === 'product' && product.visible !== 1) {
+          throw new ApiError(
+            409,
+            'PRODUCT_UNAVAILABLE',
+            'Este produto é vendido somente em combos.',
+          );
+        }
+        const components =
+          request.itemKind === 'combo'
+            ? parseCashierComponents(product.components_json)
+            : [{ productId: request.productId, quantity: 1 }];
+        if (components.length === 0) {
+          throw new ApiError(
+            409,
+            'PRODUCT_UNAVAILABLE',
+            'O combo não possui componentes disponíveis.',
+          );
+        }
+        if (request.itemKind === 'product' && product.quantity < request.quantity) {
           throw new ApiError(
             409,
             'INSUFFICIENT_STOCK',
@@ -1848,8 +1992,44 @@ export class EventRoom extends DurableObject<Env> {
           );
         }
         const totalCents = product.unit_price_cents * request.quantity;
-        return { ...product, ...request, totalCents };
+        return { ...product, ...request, components, totalCents };
       });
+      const componentQuantities = new Map<string, number>();
+      for (const item of items) {
+        for (const component of item.components) {
+          componentQuantities.set(
+            component.productId,
+            (componentQuantities.get(component.productId) ?? 0) +
+              component.quantity * item.quantity,
+          );
+        }
+      }
+      for (const [productId, quantity] of componentQuantities) {
+        const product = this.ctx.storage.sql
+          .exec(
+            `SELECT label, quantity, active, item_kind FROM cashier_products WHERE product_id = ?`,
+            productId,
+          )
+          .toArray()[0] as
+          | {
+              readonly label: string;
+              readonly quantity: number;
+              readonly active: number;
+              readonly item_kind: string;
+            }
+          | undefined;
+        if (
+          product?.active !== 1 ||
+          product.item_kind !== 'product' ||
+          product.quantity < quantity
+        ) {
+          throw new ApiError(
+            409,
+            'INSUFFICIENT_STOCK',
+            `Estoque insuficiente para ${product?.label ?? 'um componente'}.`,
+          );
+        }
+      }
       const totalCents = items.reduce((total, item) => total + item.totalCents, 0);
       const receivedCents =
         paymentMethod === 'cash'
@@ -1859,31 +2039,85 @@ export class EventRoom extends DurableObject<Env> {
         throw new ApiError(400, 'INVALID_INPUT', 'O valor recebido não cobre o total da venda.');
       }
       const changeCents = receivedCents === null ? 0 : receivedCents - totalCents;
-      for (const item of items) {
+      for (const [productId, quantity] of componentQuantities) {
         this.ctx.storage.sql
           .exec(
             `UPDATE cashier_products SET quantity = quantity - ?, updated_at = ? WHERE product_id = ?`,
-            item.quantity,
+            quantity,
             now,
-            item.productId,
+            productId,
           )
           .toArray();
       }
-      const servicePointId = `cashier-mobile:${deviceId}`;
+      const comboRows = this.ctx.storage.sql
+        .exec(
+          `SELECT product_id, components_json FROM cashier_products WHERE item_kind = 'combo' AND active = 1`,
+        )
+        .toArray() as unknown as readonly {
+        readonly product_id: string;
+        readonly components_json: string;
+      }[];
+      for (const combo of comboRows) {
+        const components = parseCashierComponents(combo.components_json);
+        const available =
+          components.length === 0
+            ? 0
+            : Math.min(
+                ...components.map((component) => {
+                  const componentRow = this.ctx.storage.sql
+                    .exec(
+                      'SELECT quantity FROM cashier_products WHERE product_id = ?',
+                      component.productId,
+                    )
+                    .toArray()[0] as { readonly quantity: number } | undefined;
+                  return Math.floor((componentRow?.quantity ?? 0) / component.quantity);
+                }),
+              );
+        this.ctx.storage.sql
+          .exec(
+            'UPDATE cashier_products SET quantity = ?, updated_at = ? WHERE product_id = ?',
+            available,
+            now,
+            combo.product_id,
+          )
+          .toArray();
+      }
+      const context = this.#mobileContextPayload();
+      const servicePoints = Array.isArray(context.servicePoints) ? context.servicePoints : [];
+      const selectedServicePoint = servicePoints.find(
+        (point) => isRecord(point) && point.id === requestedServicePointId && point.active === true,
+      );
+      if (requestedServicePointId !== null && !isRecord(selectedServicePoint)) {
+        throw new ApiError(
+          409,
+          'SERVICE_POINT_UNAVAILABLE',
+          'A mesa selecionada não está disponível.',
+        );
+      }
+      const servicePointId = isRecord(selectedServicePoint)
+        ? requiredString(selectedServicePoint.id, 'servicePoint.id')
+        : `cashier-mobile:${deviceId}`;
+      const servicePointLabel = isRecord(selectedServicePoint)
+        ? requiredString(selectedServicePoint.label, 'servicePoint.label', 40)
+        : `Caixa mobile · ${deviceLabel}`;
+      const servicePointType =
+        isRecord(selectedServicePoint) && selectedServicePoint.type === 'table'
+          ? 'table'
+          : 'counter';
       const orderItems = items.map((item) => ({
         id: crypto.randomUUID(),
-        itemKind: 'product',
+        itemKind: item.itemKind,
         itemId: item.productId,
         itemName: item.label,
         quantity: item.quantity,
         unitPriceCents: item.unit_price_cents,
         totalCents: item.totalCents,
       }));
-      const stockMovements = items.map((item) => ({
+      const stockMovements = [...componentQuantities.entries()].map(([productId, quantity]) => ({
         id: crypto.randomUUID(),
-        product_id: item.productId,
-        quantity: item.quantity,
-        delta: -item.quantity,
+        product_id: productId,
+        quantity,
+        delta: -quantity,
         note: `Venda no Caixa Mobile ${deviceLabel}`,
         created_at: now,
       }));
@@ -1902,7 +2136,8 @@ export class EventRoom extends DurableObject<Env> {
             id: saleId,
             openedAt: now,
             servicePointId,
-            servicePointLabel: `Caixa mobile · ${deviceLabel}`,
+            servicePointLabel,
+            servicePointType,
           },
           items: orderItems,
           payments: [
@@ -1920,7 +2155,7 @@ export class EventRoom extends DurableObject<Env> {
           stockMovements,
           vouchers: [],
           operatorName: deviceLabel,
-          originLabel: `Caixa mobile · ${deviceLabel}`,
+          originLabel: servicePointLabel,
         },
       };
       const result = this.#recordCommand(commandId, 'journal.committed', journalPayload, now);
@@ -3203,7 +3438,10 @@ export default {
             json({
               ...context,
               ticketLots: mobile.permissions.tickets ? context.ticketLots : [],
-              servicePoints: mobile.permissions.vouchers ? context.servicePoints : [],
+              servicePoints:
+                mobile.permissions.sales || mobile.permissions.vouchers
+                  ? context.servicePoints
+                  : [],
               voucherCodes: mobile.permissions.vouchers ? context.voucherCodes : [],
             }),
             mobile.token,

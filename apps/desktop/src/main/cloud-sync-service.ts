@@ -15,7 +15,8 @@ import {
   type CloudMonitor,
   type CloudSyncStatus,
 } from '@gtrz/contracts';
-import type { DatabaseContext } from '@gtrz/database';
+import { listCombos, type DatabaseContext } from '@gtrz/database';
+import { getProductPresentation } from '@gtrz/database/product-presentation';
 import { getPrintingSettings } from '@gtrz/database/printing';
 
 const CONNECTION_TIMEOUT_MS = 5_000;
@@ -638,8 +639,10 @@ export class CloudSyncService {
     if (activeEventId === null) return;
     const products = database.sqlite
       .prepare(
-        `SELECT p.id AS product_id, p.name, p.kind, p.sale_price_cents, COALESCE(es.quantity, 0) AS quantity
+        `SELECT p.id AS product_id, p.name, p.kind, p.combo_only, p.sale_price_cents,
+                c.name AS category_name, COALESCE(es.quantity, 0) AS quantity
          FROM products p
+         INNER JOIN product_categories c ON c.id = p.category_id
          LEFT JOIN event_stock es ON es.product_id = p.id AND es.event_id = ?
          WHERE p.active = 1 ORDER BY p.name COLLATE NOCASE`,
       )
@@ -647,16 +650,47 @@ export class CloudSyncService {
       readonly product_id: string;
       readonly name: string;
       readonly kind: string;
+      readonly combo_only: number;
       readonly sale_price_cents: number;
+      readonly category_name: string;
       readonly quantity: number;
     }[];
-    const catalog = products.map((product) => ({
-      productId: product.product_id,
-      label: product.name,
-      kind: product.kind,
-      unitPriceCents: product.sale_price_cents,
-      quantity: product.quantity,
-    }));
+    const catalog = [
+      ...products.map((product) => {
+        const presentation = getProductPresentation(database, product.product_id);
+        return {
+          productId: product.product_id,
+          label: product.name,
+          kind: product.kind,
+          itemKind: 'product',
+          visible: product.combo_only !== 1,
+          categoryLabel: product.category_name,
+          imageDataUrl: presentation.imageDataUrl,
+          fallbackIcon: presentation.fallbackIcon,
+          components: [],
+          unitPriceCents: product.sale_price_cents,
+          quantity: product.quantity,
+        };
+      }),
+      ...listCombos(database)
+        .filter((combo) => combo.active)
+        .map((combo) => ({
+          productId: combo.id,
+          label: combo.name,
+          kind: 'combo',
+          itemKind: 'combo',
+          visible: true,
+          categoryLabel: 'Combos',
+          imageDataUrl: null,
+          fallbackIcon: 'package',
+          components: combo.components.map((component) => ({
+            productId: component.productId,
+            quantity: component.quantity,
+          })),
+          unitPriceCents: combo.salePriceCents,
+          quantity: combo.availableUnits,
+        })),
+    ];
     const fingerprint = JSON.stringify(catalog);
     const stateKey = `cashier.catalog:${activeEventId}`;
     const current = database.sqlite
@@ -713,18 +747,20 @@ export class CloudSyncService {
     }[];
     const servicePoints = database.sqlite
       .prepare(
-        `SELECT id, label, active FROM service_points
+        `SELECT id, label, type, active FROM service_points
          WHERE event_id = ? ORDER BY label COLLATE NOCASE`,
       )
       .all(activeEventId) as readonly {
       readonly id: string;
       readonly label: string;
+      readonly type: 'counter' | 'table';
       readonly active: number;
     }[];
     const voucherCodes = database.sqlite
       .prepare('SELECT code FROM vouchers WHERE event_id = ?')
       .all(activeEventId) as readonly { readonly code: string }[];
     const context = {
+      eventId: activeEventId,
       ticketLots: ticketLots.map((lot) => ({
         id: lot.id,
         name: lot.name,
@@ -737,6 +773,7 @@ export class CloudSyncService {
       servicePoints: servicePoints.map((point) => ({
         id: point.id,
         label: point.label,
+        type: point.type,
         active: point.active === 1,
       })),
       voucherCodes: voucherCodes.map((voucher) => voucher.code),
@@ -1522,6 +1559,8 @@ export class CloudSyncService {
     const orderId = stringField(order, 'id');
     const servicePointId = stringField(order, 'servicePointId');
     const servicePointLabel = stringField(order, 'servicePointLabel');
+    const rawServicePointType = stringField(order, 'servicePointType');
+    const servicePointType = rawServicePointType === 'table' ? 'table' : 'counter';
     const openedAt = integerField(order, 'openedAt');
     if (
       orderId === null ||
@@ -1541,22 +1580,29 @@ export class CloudSyncService {
       database.sqlite.prepare('SELECT id FROM service_points WHERE id = ?').get(servicePointId) ===
       undefined
     ) {
-      const localCounter = database.sqlite
+      const matchingPoint = database.sqlite
         .prepare(
           `SELECT id FROM service_points
-           WHERE event_id = ? AND type = 'counter' AND active = 1
+           WHERE event_id = ? AND label = ? COLLATE NOCASE AND type = ? AND active = 1
            ORDER BY created_at LIMIT 1`,
         )
-        .get(eventId) as { readonly id: string } | undefined;
-      if (localCounter !== undefined) {
-        localServicePointId = localCounter.id;
+        .get(eventId, servicePointLabel, servicePointType) as { readonly id: string } | undefined;
+      if (matchingPoint !== undefined) {
+        localServicePointId = matchingPoint.id;
       } else {
         database.sqlite
           .prepare(
             `INSERT INTO service_points (id, event_id, label, type, active, created_at, updated_at)
-             VALUES (?, ?, ?, 'counter', 1, ?, ?)`,
+             VALUES (?, ?, ?, ?, 1, ?, ?)`,
           )
-          .run(servicePointId, eventId, servicePointLabel, openedAt, payload.createdAt);
+          .run(
+            servicePointId,
+            eventId,
+            servicePointLabel,
+            servicePointType,
+            openedAt,
+            payload.createdAt,
+          );
       }
     }
     const parsedMovements = movements.map((raw) => {
