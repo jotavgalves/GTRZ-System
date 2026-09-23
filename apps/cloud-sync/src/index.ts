@@ -4078,8 +4078,9 @@ export class EventRoom extends DurableObject<Env> {
   }
 
   #broadcast(event: StreamEvent, eventId?: string): void {
+    const printQueued = eventId !== undefined && this.#hasQueuedPrintForCommand(event.commandId);
     for (const socket of this.ctx.getWebSockets('event')) {
-      sendSocket(socket, { type: 'event', event });
+      sendSocket(socket, { type: 'event', event, printQueued });
       if (eventId !== undefined) {
         const attachment = socket.deserializeAttachment() as { readonly deviceId?: unknown } | null;
         const deviceId = typeof attachment?.deviceId === 'string' ? attachment.deviceId : null;
@@ -4088,6 +4089,17 @@ export class EventRoom extends DurableObject<Env> {
         }
       }
     }
+  }
+
+  #hasQueuedPrintForCommand(commandId: string): boolean {
+    return (
+      this.ctx.storage.sql
+        .exec(
+          "SELECT 1 FROM print_jobs WHERE command_id = ? AND status = 'queued' LIMIT 1",
+          commandId,
+        )
+        .toArray().length > 0
+    );
   }
 
   #recordSocketPushInMonitor(eventId: string, event: StreamEvent, deviceId: string): void {

@@ -57,6 +57,11 @@ interface RemoteJournalEvent {
   readonly payload: unknown;
 }
 
+interface StreamMessageResult {
+  readonly accepted: boolean;
+  readonly printQueued: boolean;
+}
+
 interface QueueCountsRow {
   readonly outbox_pending: number;
   readonly outbox_accepted: number;
@@ -1297,12 +1302,12 @@ export class CloudSyncService {
       }
     });
     stream.on('message', (message) => {
-      const applied = this.#applyStreamMessage(database, eventId, deviceId, message);
-      if (!applied) {
+      const result = this.#applyStreamMessage(database, eventId, deviceId, message);
+      if (!result.accepted) {
         stream.close();
         return;
       }
-      if (eventId === getSessionState(database).activeEvent?.id) {
+      if (result.printQueued && eventId === getSessionState(database).activeEvent?.id) {
         void this.#processPrintQueue(database, eventId, deviceId, pairingKey, false).catch(
           () => undefined,
         );
@@ -1322,36 +1327,41 @@ export class CloudSyncService {
     eventId: string,
     deviceId: string,
     message: RawData,
-  ): boolean {
+  ): StreamMessageResult {
     try {
       const envelope: unknown = JSON.parse(websocketMessageText(message));
-      if (!isRecord(envelope)) return false;
+      if (!isRecord(envelope)) return { accepted: false, printQueued: false };
+      const printQueued = envelope.type === 'event' && envelope.printQueued === true;
       const events =
         envelope.type === 'event'
           ? [envelope.event]
           : envelope.type === 'sync' && Array.isArray(envelope.events)
             ? envelope.events
             : null;
-      if (events === null) return true;
+      if (events === null) return { accepted: true, printQueued: false };
       const journalEvents = events.filter(isRemoteJournalEvent);
       const cursor = this.#getInboxCursor(database, eventId);
       const newEvents = journalEvents.filter((event) => event.sequence > cursor);
-      if (newEvents.length === 0) return true;
-      if (newEvents[0]?.sequence !== cursor + 1) return false;
+      if (newEvents.length === 0) return { accepted: true, printQueued };
+      if (newEvents[0]?.sequence !== cursor + 1) return { accepted: false, printQueued: false };
       for (let index = 1; index < newEvents.length; index += 1) {
         const previous = newEvents[index - 1];
         const current = newEvents[index];
-        if (previous === undefined || current?.sequence !== previous.sequence + 1) return false;
+        if (previous === undefined || current?.sequence !== previous.sequence + 1) {
+          return { accepted: false, printQueued: false };
+        }
       }
       this.#storeRemoteJournalEvents(database, eventId, newEvents);
       this.#applyInbox(database, deviceId);
       const currentSequence = integerField(envelope, 'currentSequence');
       const latest = newEvents.at(-1);
-      return (
-        latest !== undefined && (currentSequence === null || latest.sequence >= currentSequence)
-      );
+      return {
+        accepted:
+          latest !== undefined && (currentSequence === null || latest.sequence >= currentSequence),
+        printQueued,
+      };
     } catch {
-      return false;
+      return { accepted: false, printQueued: false };
     }
   }
 
