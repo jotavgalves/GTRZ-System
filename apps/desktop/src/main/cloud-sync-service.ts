@@ -129,6 +129,11 @@ export interface CloudPrintReceipt {
     readonly quantity: number;
     readonly unitPriceCents: number;
     readonly totalCents: number;
+    readonly preparation?: readonly {
+      readonly label: string;
+      readonly productName: string;
+      readonly quantity: number;
+    }[];
   }[];
   readonly payments: readonly {
     readonly method: 'cash' | 'pix' | 'credit-card' | 'debit-card';
@@ -2232,8 +2237,8 @@ export class CloudSyncService {
     );
     const insertComponentAllocation = database.sqlite.prepare(
       `INSERT INTO order_item_component_allocations
-       (id, order_item_id, product_id, choice_group, quantity, created_at)
-       VALUES (?, ?, ?, ?, ?, ?)`,
+       (id, order_item_id, product_id, choice_group, choice_label, quantity, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
     );
     for (const raw of items) {
       if (!isRecord(raw)) throw new Error('Item de venda remoto inválido.');
@@ -2271,8 +2276,17 @@ export class CloudSyncService {
           const productId = stringField(rawAllocation, 'productId');
           const choiceGroup =
             rawAllocation.choiceGroup === null ? null : stringField(rawAllocation, 'choiceGroup');
+          const choiceLabel =
+            rawAllocation.choiceLabel === null || rawAllocation.choiceLabel === undefined
+              ? null
+              : stringField(rawAllocation, 'choiceLabel');
           const allocationQuantity = integerField(rawAllocation, 'quantity');
-          if (productId === null || allocationQuantity === null || allocationQuantity <= 0) {
+          if (
+            productId === null ||
+            allocationQuantity === null ||
+            allocationQuantity <= 0 ||
+            (choiceGroup === null) !== (choiceLabel === null)
+          ) {
             throw new Error('Componente remoto incompleto.');
           }
           if (
@@ -2286,6 +2300,7 @@ export class CloudSyncService {
             id,
             productId,
             choiceGroup,
+            choiceLabel,
             allocationQuantity,
             payload.createdAt,
           );

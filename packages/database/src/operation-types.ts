@@ -34,6 +34,7 @@ export interface DatabaseOrderItem {
     readonly productId: string;
     readonly productName: string;
     readonly choiceGroup: string | null;
+    readonly choiceLabel: string | null;
     readonly quantity: number;
   }[];
   readonly createdAt: number;

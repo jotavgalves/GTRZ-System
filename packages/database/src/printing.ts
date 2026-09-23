@@ -19,6 +19,11 @@ export interface DatabaseReceiptItem {
   readonly quantity: number;
   readonly unitPriceCents: number;
   readonly totalCents: number;
+  readonly preparation?: readonly {
+    readonly label: string;
+    readonly productName: string;
+    readonly quantity: number;
+  }[];
 }
 
 export interface DatabaseReceiptPayment {
@@ -149,12 +154,22 @@ export function getOrderReceipt(database: DatabaseContext, orderId: string): Dat
     discountCents: order.discountCents,
     totalCents: order.totalCents,
     closedAt: order.closedAt,
-    items: order.items.map((item) => ({
-      name: item.itemName,
-      quantity: item.quantity,
-      unitPriceCents: item.unitPriceCents,
-      totalCents: item.totalCents,
-    })),
+    items: order.items.map((item) => {
+      const preparation = item.componentAllocations
+        .filter((allocation) => allocation.choiceGroup !== null)
+        .map((allocation) => ({
+          label: allocation.choiceLabel ?? 'Escolha',
+          productName: allocation.productName,
+          quantity: allocation.quantity,
+        }));
+      return {
+        name: item.itemName,
+        quantity: item.quantity,
+        unitPriceCents: item.unitPriceCents,
+        totalCents: item.totalCents,
+        ...(preparation.length === 0 ? {} : { preparation }),
+      };
+    }),
     payments: order.payments.map((payment) => ({
       method: payment.method,
       amountCents: payment.amountCents,

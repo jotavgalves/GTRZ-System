@@ -19,6 +19,10 @@ const receipt: DatabaseOrderReceipt = {
       quantity: 2,
       unitPriceCents: 1000,
       totalCents: 2000,
+      preparation: [
+        { label: 'Escolha as arepas', productName: 'Arepa de frango', quantity: 1 },
+        { label: 'Escolha as arepas', productName: 'Arepa de carne', quantity: 1 },
+      ],
     },
   ],
   payments: [
@@ -42,6 +46,8 @@ describe('thermal receipt html', () => {
     expect(html).toContain('VALE DE RETIRADA');
     expect(html).toContain('La Rumba Teste');
     expect(html).toContain('2× Budweiser');
+    expect(html).toContain('Escolha as arepas: 1× Arepa de frango');
+    expect(html).toContain('Escolha as arepas: 1× Arepa de carne');
     expect(html).toContain('JOÃO');
     expect(html).toContain('ATENDENTE:');
     expect(html).toContain('Dinheiro');

@@ -309,21 +309,36 @@ describe('combo database', () => {
       ]),
     );
 
+    const twoConfigurations = addOrderItem(database, {
+      orderId: order.id,
+      itemKind: 'combo',
+      itemId: combo.id,
+      quantity: 1,
+      componentSelections: [{ choiceGroup: 'arepa', productId: frango.id, quantity: 2 }],
+    });
+    expect(twoConfigurations.items).toHaveLength(2);
+    expect(twoConfigurations.items[1]?.componentAllocations).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ productId: queijo.id, choiceGroup: null, quantity: 2 }),
+        expect.objectContaining({ productId: frango.id, choiceGroup: 'arepa', quantity: 2 }),
+      ]),
+    );
+
     closeOrder(database, {
       orderId: order.id,
       discountCents: 0,
-      payments: [{ method: 'pix', amountCents: 2400 }],
+      payments: [{ method: 'pix', amountCents: 4800 }],
     });
     expect(
       database.sqlite
         .prepare('SELECT quantity FROM event_stock WHERE event_id = ? AND product_id = ?')
         .get(event.id, queijo.id),
-    ).toEqual({ quantity: 8 });
+    ).toEqual({ quantity: 6 });
     expect(
       database.sqlite
         .prepare('SELECT quantity FROM event_stock WHERE event_id = ? AND product_id = ?')
         .get(event.id, frango.id),
-    ).toEqual({ quantity: 9 });
+    ).toEqual({ quantity: 7 });
     expect(
       database.sqlite
         .prepare('SELECT quantity FROM event_stock WHERE event_id = ? AND product_id = ?')

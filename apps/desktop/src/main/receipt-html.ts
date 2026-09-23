@@ -78,10 +78,15 @@ function eventBlock(receipt: DatabaseOrderReceipt): string {
 
 function itemRows(receipt: DatabaseOrderReceipt, withValue: boolean): string {
   return receipt.items
-    .map(
-      (item) =>
-        `<tr><td>${String(item.quantity)}</td><td>${escapeHtml(item.name)}</td>${withValue ? `<td class="right">${money(item.unitPriceCents)}</td>` : ''}</tr>`,
-    )
+    .map((item) => {
+      const preparation = (item.preparation ?? [])
+        .map(
+          (choice) =>
+            `<tr class="preparation"><td></td><td${withValue ? '' : ' colspan="2"'}>↳ ${escapeHtml(choice.label)}: ${String(choice.quantity)}× ${escapeHtml(choice.productName)}</td>${withValue ? '<td></td>' : ''}</tr>`,
+        )
+        .join('');
+      return `<tr><td>${String(item.quantity)}</td><td>${escapeHtml(item.name)}</td>${withValue ? `<td class="right">${money(item.unitPriceCents)}</td>` : ''}</tr>${preparation}`;
+    })
     .join('');
 }
 
@@ -126,7 +131,11 @@ function internalReceipt(receipt: DatabaseOrderReceipt, logo: string): string {
 }
 
 export function estimateReceiptHeightMm(receipt: DatabaseOrderReceipt): number {
-  return Math.max(115, Math.min(145 + receipt.items.length * 8, 360));
+  const preparationLines = receipt.items.reduce(
+    (total, item) => total + (item.preparation?.length ?? 0),
+    0,
+  );
+  return Math.max(115, Math.min(145 + receipt.items.length * 8 + preparationLines * 5, 360));
 }
 
 export async function buildReceiptHtml(

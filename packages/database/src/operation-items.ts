@@ -39,6 +39,12 @@ export function addOrderItem(
     choices.push(definition);
     choiceDefinitions.set(definition.choice_group, choices);
   }
+  const choiceLabels = new Map(
+    [...choiceDefinitions.entries()].map(([choiceGroup, options]) => [
+      choiceGroup,
+      options[0]?.choice_label ?? choiceGroup,
+    ]),
+  );
   const selections = input.componentSelections ?? [];
   if (input.itemKind === 'combo') {
     const byGroup = new Map<string, DatabaseComboComponentSelectionInput[]>();
@@ -137,8 +143,8 @@ export function addOrderItem(
       if (input.itemKind === 'combo') {
         const insertAllocation = database.sqlite.prepare(
           `INSERT INTO order_item_component_allocations
-           (id, order_item_id, product_id, choice_group, quantity, created_at)
-           VALUES (?, ?, ?, ?, ?, ?)`,
+           (id, order_item_id, product_id, choice_group, choice_label, quantity, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
         );
         for (const definition of definitions.filter(
           (component) => component.choice_group === null,
@@ -147,6 +153,7 @@ export function addOrderItem(
             randomUUID(),
             orderItemId,
             definition.product_id,
+            null,
             null,
             definition.quantity * input.quantity,
             now,
@@ -158,6 +165,7 @@ export function addOrderItem(
             orderItemId,
             selection.productId,
             selection.choiceGroup,
+            choiceLabels.get(selection.choiceGroup) ?? selection.choiceGroup,
             selection.quantity,
             now,
           );
@@ -174,8 +182,8 @@ export function addOrderItem(
       if (input.itemKind === 'combo') {
         const insertAllocation = database.sqlite.prepare(
           `INSERT INTO order_item_component_allocations
-           (id, order_item_id, product_id, choice_group, quantity, created_at)
-           VALUES (?, ?, ?, ?, ?, ?)`,
+           (id, order_item_id, product_id, choice_group, choice_label, quantity, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
         );
         for (const definition of definitions.filter(
           (component) => component.choice_group === null,
@@ -184,6 +192,7 @@ export function addOrderItem(
             randomUUID(),
             existing.id,
             definition.product_id,
+            null,
             null,
             definition.quantity * input.quantity,
             now,

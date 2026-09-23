@@ -60,6 +60,11 @@ interface CloudReceiptDocument {
     readonly quantity: number;
     readonly unitPriceCents: number;
     readonly totalCents: number;
+    readonly preparation?: readonly {
+      readonly label: string;
+      readonly productName: string;
+      readonly quantity: number;
+    }[];
   }[];
   readonly payments: readonly {
     readonly method: 'cash' | 'pix' | 'credit-card' | 'debit-card';
@@ -2410,9 +2415,25 @@ export class EventRoom extends DurableObject<Env> {
               })(),
       };
     });
-    const distinct = new Set(requested.map((item) => `${item.itemKind}:${item.productId}`));
+    const distinct = new Set(
+      requested.map((item) =>
+        item.itemKind === 'product'
+          ? `product:${item.productId}`
+          : `combo:${item.productId}:${JSON.stringify(
+              [...item.componentSelections].sort((left, right) =>
+                `${left.choiceGroup}:${left.productId}`.localeCompare(
+                  `${right.choiceGroup}:${right.productId}`,
+                ),
+              ),
+            )}`,
+      ),
+    );
     if (distinct.size !== requested.length)
-      throw new ApiError(400, 'INVALID_INPUT', 'Produto repetido na venda.');
+      throw new ApiError(
+        400,
+        'INVALID_INPUT',
+        'A mesma configuração de item foi repetida na venda.',
+      );
     const requestedServicePointId = requiredString(payload.servicePointId, 'servicePointId');
     const existing = this.#existingCommand(commandId);
     if (existing !== null) return existing;
@@ -2469,15 +2490,24 @@ export class EventRoom extends DurableObject<Env> {
           readonly productId: string;
           readonly quantity: number;
           readonly choiceGroup: string | null;
+          readonly choiceLabel: string | null;
         }[] =
           request.itemKind === 'product'
-            ? [{ productId: request.productId, quantity: request.quantity, choiceGroup: null }]
+            ? [
+                {
+                  productId: request.productId,
+                  quantity: request.quantity,
+                  choiceGroup: null,
+                  choiceLabel: null,
+                },
+              ]
             : definitions
                 .filter((component) => component.choiceGroup === null)
                 .map((component) => ({
                   productId: component.productId,
                   quantity: component.quantity * request.quantity,
                   choiceGroup: null,
+                  choiceLabel: null,
                 }));
         const choiceGroups = new Map<string, typeof definitions>();
         for (const definition of definitions) {
@@ -2500,13 +2530,15 @@ export class EventRoom extends DurableObject<Env> {
             );
           }
           for (const selection of selected) {
-            if (!options.some((option) => option.productId === selection.productId)) {
+            const option = options.find((candidate) => candidate.productId === selection.productId);
+            if (option === undefined) {
               throw new ApiError(400, 'INVALID_INPUT', 'Uma escolha não pertence a este combo.');
             }
             components.push({
               productId: selection.productId,
               quantity: selection.quantity,
               choiceGroup,
+              choiceLabel: option.choiceLabel,
             });
           }
         }
@@ -2526,6 +2558,7 @@ export class EventRoom extends DurableObject<Env> {
         return { ...product, ...request, components, totalCents };
       });
       const componentQuantities = new Map<string, number>();
+      const componentLabels = new Map<string, string>();
       for (const item of items) {
         for (const component of item.components) {
           componentQuantities.set(
@@ -2559,6 +2592,7 @@ export class EventRoom extends DurableObject<Env> {
             `Estoque insuficiente para ${product?.label ?? 'um componente'}.`,
           );
         }
+        componentLabels.set(productId, product.label);
       }
       const totalCents = items.reduce((total, item) => total + item.totalCents, 0);
       const receivedCents =
@@ -2612,6 +2646,8 @@ export class EventRoom extends DurableObject<Env> {
             ? item.components.map((component) => ({
                 productId: component.productId,
                 choiceGroup: component.choiceGroup,
+                choiceLabel: component.choiceLabel,
+                productName: componentLabels.get(component.productId) ?? component.productId,
                 quantity: component.quantity,
               }))
             : [],
@@ -2989,9 +3025,7 @@ export class EventRoom extends DurableObject<Env> {
     }
   }
 
-  #readJournalStockMovements(
-    details: JsonRecord,
-  ):
+  #readJournalStockMovements(details: JsonRecord):
     | readonly {
         readonly id: string;
         readonly productId: string;
@@ -3430,7 +3464,34 @@ export class EventRoom extends DurableObject<Env> {
             unitPriceCents === null ||
             totalCents === null
             ? []
-            : [{ name, quantity, unitPriceCents, totalCents }];
+            : [
+                {
+                  name,
+                  quantity,
+                  unitPriceCents,
+                  totalCents,
+                  preparation: Array.isArray(entry.componentAllocations)
+                    ? entry.componentAllocations.flatMap((allocation) => {
+                        if (!isRecord(allocation) || allocation.choiceGroup === null) return [];
+                        const label =
+                          typeof allocation.choiceLabel === 'string'
+                            ? allocation.choiceLabel
+                            : 'Escolha';
+                        const productName =
+                          typeof allocation.productName === 'string'
+                            ? allocation.productName
+                            : null;
+                        const choiceQuantity =
+                          typeof allocation.quantity === 'number' ? allocation.quantity : null;
+                        return productName === null ||
+                          choiceQuantity === null ||
+                          choiceQuantity <= 0
+                          ? []
+                          : [{ label, productName, quantity: choiceQuantity }];
+                      })
+                    : [],
+                },
+              ];
         })
       : [];
     const payments: CloudReceiptDocument['payments'] = Array.isArray(details.payments)

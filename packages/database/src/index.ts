@@ -12,6 +12,7 @@ import { foodFinanceMigration } from './food-finance-migration';
 import { foodCategoryMigration } from './food-category-migration';
 import { categoryEngineMigration } from './category-engine-migration';
 import { comboChoicesMigration } from './combo-choices-migration';
+import { comboChoiceLabelMigration } from './combo-choice-label-migration';
 import { syncMigration } from './sync-migration';
 import { syncInboxMigration } from './sync-inbox-migration';
 import { syncConflictMigration } from './sync-conflict-migration';
@@ -321,6 +322,7 @@ const migrations: readonly Migration[] = [
   foodCategoryMigration,
   categoryEngineMigration,
   comboChoicesMigration,
+  comboChoiceLabelMigration,
 ];
 
 function ensureMigrationTable(sqlite: BetterSqlite3.Database): void {

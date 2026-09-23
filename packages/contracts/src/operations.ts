@@ -35,6 +35,14 @@ export const orderItemSchema = z.object({
       productId: z.uuid(),
       productName: z.string().trim().min(1).max(120),
       choiceGroup: z.string().trim().min(1).max(60).nullable(),
+      choiceLabel: z
+        .string()
+        .trim()
+        .min(1)
+        .max(80)
+        .nullable()
+        .optional()
+        .transform((value) => value ?? null),
       quantity: z.number().int().positive(),
     }),
   ),

@@ -72,6 +72,7 @@ interface ComponentAllocationRow {
   readonly product_id: string;
   readonly product_name: string;
   readonly choice_group: string | null;
+  readonly choice_label: string | null;
   readonly quantity: number;
 }
 
@@ -110,6 +111,7 @@ function mapOrderItem(database: DatabaseContext, row: OrderItemRow): DatabaseOrd
   const componentAllocations = database.sqlite
     .prepare(
       `SELECT allocation.product_id, product.name AS product_name, allocation.choice_group,
+              allocation.choice_label,
               allocation.quantity
        FROM order_item_component_allocations allocation
        INNER JOIN products product ON product.id = allocation.product_id
@@ -130,6 +132,7 @@ function mapOrderItem(database: DatabaseContext, row: OrderItemRow): DatabaseOrd
       productId: allocation.product_id,
       productName: allocation.product_name,
       choiceGroup: allocation.choice_group,
+      choiceLabel: allocation.choice_label,
       quantity: allocation.quantity,
     })),
     createdAt: row.created_at,
