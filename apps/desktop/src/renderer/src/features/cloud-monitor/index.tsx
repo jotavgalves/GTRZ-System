@@ -16,8 +16,6 @@ import { MobileOperatorsPanel } from './MobileOperatorsPanel';
 import { CloudEventSelector } from './CloudEventSelector';
 import { EnvironmentSelector } from './EnvironmentSelector';
 
-const REFRESH_INTERVAL_MS = 5_000;
-
 function formatTime(timestamp: number): string {
   return new Intl.DateTimeFormat('pt-BR', {
     hour: '2-digit',
@@ -203,10 +201,6 @@ export function CloudMonitorPage(): React.JSX.Element {
 
   useEffect(() => {
     void load();
-    const interval = window.setInterval(() => void load(), REFRESH_INTERVAL_MS);
-    return () => {
-      window.clearInterval(interval);
-    };
   }, [load]);
 
   const averageLatency =

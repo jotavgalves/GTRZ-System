@@ -485,6 +485,10 @@ export class MonitorRoom extends DurableObject<Env> {
     try {
       const url = new URL(request.url);
 
+      if (request.method === 'GET' && url.pathname === '/v1/monitor/stream') {
+        return this.#openDesktopStream(request, parseAfter(url.searchParams.get('after')));
+      }
+
       if (request.method === 'POST' && url.pathname === '/v1/monitor/heartbeat') {
         return json(this.#heartbeat(await readJson(request)));
       }
@@ -595,6 +599,63 @@ export class MonitorRoom extends DurableObject<Env> {
         500,
       );
     }
+  }
+
+  override webSocketMessage(socket: WebSocket, message: string | ArrayBuffer): void {
+    const attachment = socket.deserializeAttachment() as { readonly kind?: unknown } | null;
+    if (attachment?.kind !== 'desktop' || typeof message !== 'string') return;
+    try {
+      const input: unknown = JSON.parse(message);
+      if (!isRecord(input) || input.type !== 'global.sync') return;
+      const after =
+        typeof input.after === 'number' || typeof input.after === 'string'
+          ? parseAfter(String(input.after))
+          : 0;
+      sendSocket(socket, { type: 'global.sync', ...this.#globalControl(after) });
+    } catch {
+      sendSocket(socket, { type: 'error', code: 'INVALID_MESSAGE' });
+    }
+  }
+
+  override webSocketClose(socket: WebSocket): void {
+    const attachment = socket.deserializeAttachment() as { readonly deviceId?: unknown } | null;
+    if (typeof attachment?.deviceId === 'string') {
+      this.ctx.storage.sql
+        .exec('UPDATE devices SET last_seen_at = 0 WHERE device_id = ?', attachment.deviceId)
+        .toArray();
+    }
+    socket.close(1000, 'Sessão encerrada.');
+  }
+
+  #openDesktopStream(request: Request, after: number): Response {
+    if (!websocketRequested(request)) {
+      throw new ApiError(426, 'WEBSOCKET_REQUIRED', 'Esta rota exige WebSocket.');
+    }
+    const deviceId = requiredString(
+      request.headers.get('X-GTRZ-Device-Id'),
+      'X-GTRZ-Device-Id',
+      80,
+    );
+    const label = requiredString(
+      request.headers.get('X-GTRZ-Device-Label'),
+      'X-GTRZ-Device-Label',
+      80,
+    );
+    const pair = new WebSocketPair();
+    const [client, server] = Object.values(pair);
+    if (client === undefined || server === undefined) {
+      throw new Error('Não foi possível iniciar o canal de controle.');
+    }
+    server.serializeAttachment({ kind: 'desktop', deviceId });
+    this.ctx.acceptWebSocket(server, ['desktop']);
+    this.#heartbeat({ deviceId, label, activeEventId: null, latencyMs: 0 });
+    sendSocket(server, { type: 'global.sync', ...this.#globalControl(after) });
+    return new Response(null, { status: 101, webSocket: client });
+  }
+
+  #broadcastDesktopControl(): void {
+    const payload = { type: 'global.sync', ...this.#globalControl(0) };
+    for (const socket of this.ctx.getWebSockets('desktop')) sendSocket(socket, payload);
   }
 
   #heartbeat(payload: JsonRecord): JsonRecord {
@@ -1321,6 +1382,7 @@ export class MonitorRoom extends DurableObject<Env> {
     for (const socket of this.ctx.getWebSockets('mobile')) {
       sendSocket(socket, { type: 'mobile.event-changed', eventId, eventName });
     }
+    this.#broadcastDesktopControl();
     return this.#globalControl(0);
   }
 
@@ -1389,6 +1451,7 @@ export class MonitorRoom extends DurableObject<Env> {
         now,
       )
       .toArray();
+    this.#broadcastDesktopControl();
     return this.#globalControl(0);
   }
 
@@ -1506,6 +1569,7 @@ export class MonitorRoom extends DurableObject<Env> {
         reason: storedString(reset.reason, 'reason'),
       });
     }
+    this.#broadcastDesktopControl();
   }
 }
 
@@ -3707,13 +3771,15 @@ export class EventRoom extends DurableObject<Env> {
     const deviceId = requiredString(payload.deviceId, 'deviceId', 80);
     return this.ctx.storage.transactionSync(() => {
       const now = Date.now();
+      // Printer registration happens when a desktop stream opens. A job may only
+      // be claimed while that same device still owns a live event WebSocket.
+      if (!this.#hasLiveDesktopStream(deviceId)) return { job: null };
       const printer = this.ctx.storage.sql
         .exec(
           `SELECT printer_id, device_label FROM print_printers
-           WHERE device_id = ? AND enabled = 1 AND busy_job_id IS NULL AND last_seen_at >= ?
+           WHERE device_id = ? AND enabled = 1 AND busy_job_id IS NULL
            ORDER BY last_seen_at DESC LIMIT 1`,
           deviceId,
-          now - 45_000,
         )
         .toArray()[0] as { readonly printer_id: string; readonly device_label: string } | undefined;
       if (printer === undefined) return { job: null };
@@ -3764,6 +3830,13 @@ export class EventRoom extends DurableObject<Env> {
           document: JSON.parse(job.document_json) as CloudReceiptDocument,
         } satisfies ClaimedPrintJob & { readonly printerLabel: string },
       };
+    });
+  }
+
+  #hasLiveDesktopStream(deviceId: string): boolean {
+    return this.ctx.getWebSockets('event').some((socket) => {
+      const attachment = socket.deserializeAttachment() as { readonly deviceId?: unknown } | null;
+      return attachment?.deviceId === deviceId;
     });
   }
 
@@ -4166,7 +4239,7 @@ function mobileApiRequest(url: URL): boolean {
 }
 
 function monitorRequest(url: URL): boolean {
-  return /^\/v1\/monitor\/(heartbeat|snapshot|command|transport|conflict|global-control|global-event|global-event\/reset|reset-backup\/[^/]+)$/.test(
+  return /^\/v1\/monitor\/(stream|heartbeat|snapshot|command|transport|conflict|global-control|global-event|global-event\/reset|reset-backup\/[^/]+)$/.test(
     url.pathname,
   );
 }

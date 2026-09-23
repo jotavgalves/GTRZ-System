@@ -65,6 +65,7 @@ export function AppShell(): React.JSX.Element {
     };
 
     loadCloudStatus();
+    // This is a local IPC read. It refreshes the visible connection state without polling Cloudflare.
     const interval = window.setInterval(loadCloudStatus, 15_000);
     return () => {
       mounted = false;

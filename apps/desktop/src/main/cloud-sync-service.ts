@@ -29,8 +29,8 @@ import { getProductPresentation } from '@gtrz/database/product-presentation';
 import { getPrintingSettings } from '@gtrz/database/printing';
 
 const CONNECTION_TIMEOUT_MS = 5_000;
-const HEARTBEAT_INTERVAL_MS = 15_000;
 const OUTBOX_INTERVAL_MS = 3_000;
+const STREAM_RECONNECT_MAX_MS = 60_000;
 
 interface AuditRow {
   readonly id: number;
@@ -265,10 +265,15 @@ export class CloudSyncService {
   readonly #getDeviceLabel: () => string;
   #printAgent: ((job: ClaimedCloudPrintJob) => Promise<PrintAgentResult>) | null = null;
   #resetBackupAgent: (() => Promise<BackupRecord>) | null = null;
-  #heartbeatTimer: NodeJS.Timeout | null = null;
   #outboxTimer: NodeJS.Timeout | null = null;
-  #stream: WebSocket | null = null;
-  #streamEventId: string | null = null;
+  readonly #eventStreams = new Map<string, WebSocket>();
+  readonly #eventReconnectTimers = new Map<string, NodeJS.Timeout>();
+  readonly #eventReconnectDelays = new Map<string, number>();
+  #controlStream: WebSocket | null = null;
+  #controlReconnectTimer: NodeJS.Timeout | null = null;
+  #controlReconnectDelayMs = 1_000;
+  #flushInFlight = false;
+  #cloudConnected = false;
   #lastLatencyMs = 0;
 
   constructor(
@@ -286,28 +291,24 @@ export class CloudSyncService {
   }
 
   start(getActiveEventId: () => string | null): void {
-    this.stop();
-    const heartbeat = (): void => {
-      void this.getMonitor(getActiveEventId()).catch(() => undefined);
-    };
-    heartbeat();
-    this.#heartbeatTimer = setInterval(heartbeat, HEARTBEAT_INTERVAL_MS);
+    // Replication owns the persistent WebSocket streams once the local database is ready.
+    void getActiveEventId;
   }
 
   stop(): void {
-    if (this.#heartbeatTimer !== null) {
-      clearInterval(this.#heartbeatTimer);
-      this.#heartbeatTimer = null;
-    }
     if (this.#outboxTimer !== null) {
       clearInterval(this.#outboxTimer);
       this.#outboxTimer = null;
     }
-    if (this.#stream !== null) {
-      this.#stream.close();
-      this.#stream = null;
-      this.#streamEventId = null;
-    }
+    if (this.#controlReconnectTimer !== null) clearTimeout(this.#controlReconnectTimer);
+    this.#controlReconnectTimer = null;
+    this.#controlStream?.close();
+    this.#controlStream = null;
+    for (const timer of this.#eventReconnectTimers.values()) clearTimeout(timer);
+    this.#eventReconnectTimers.clear();
+    for (const stream of this.#eventStreams.values()) stream.close();
+    this.#eventStreams.clear();
+    this.#cloudConnected = false;
   }
 
   startReplication(
@@ -330,68 +331,71 @@ export class CloudSyncService {
   }
 
   async flushOutbox(database: DatabaseContext, activeEventId: string | null): Promise<void> {
-    const deviceId = await this.#readOrCreateDeviceId();
-    const pairingKey = await this.#readPairingKey();
-    this.#enqueueNewAudits(database, deviceId);
+    if (this.#flushInFlight) return;
+    this.#flushInFlight = true;
+    try {
+      const deviceId = await this.#readOrCreateDeviceId();
+      const pairingKey = await this.#readPairingKey();
+      this.#enqueueNewAudits(database, deviceId);
 
-    if (pairingKey === null) return;
+      if (pairingKey === null) return;
 
-    // A reset must be applied before this machine has a chance to replay offline commands.
-    await this.#pullGlobalControl(database, pairingKey, deviceId);
-    const effectiveActiveEventId = getSessionState(database).activeEvent?.id ?? activeEventId;
+      const effectiveActiveEventId = getSessionState(database).activeEvent?.id ?? activeEventId;
 
-    this.#retryRecoverablePaidOrders(database);
-    await this.#publishCashierCatalog(database, effectiveActiveEventId, pairingKey);
-    await this.#publishMobileContext(database, effectiveActiveEventId, pairingKey);
-    this.#ensureStream(database, effectiveActiveEventId, deviceId, pairingKey);
+      this.#retryRecoverablePaidOrders(database);
+      this.#ensureControlStream(database, deviceId, pairingKey);
+      this.#ensureEventStreams(database, effectiveActiveEventId, deviceId, pairingKey);
+      await this.#publishCashierCatalog(database, effectiveActiveEventId, pairingKey);
+      await this.#publishMobileContext(database, effectiveActiveEventId, pairingKey);
+      this.#applyInbox(database, deviceId);
 
-    const pending = database.sqlite
-      .prepare(
-        `SELECT audit_id, operation_id, event_id, payload_json
+      const pending = database.sqlite
+        .prepare(
+          `SELECT audit_id, operation_id, event_id, payload_json
          FROM sync_outbox WHERE status IN ('pending', 'failed')
          ORDER BY audit_id ASC LIMIT 30`,
-      )
-      .all() as OutboxRow[];
+        )
+        .all() as OutboxRow[];
 
-    for (const item of pending) {
-      try {
-        const response = await fetch(
-          `${this.#endpoint}/v1/events/${encodeURIComponent(item.event_id)}/journal`,
-          {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'X-GTRZ-Key': pairingKey },
-            body: item.payload_json,
-            signal: AbortSignal.timeout(CONNECTION_TIMEOUT_MS),
-          },
-        );
+      for (const item of pending) {
+        try {
+          const response = await fetch(
+            `${this.#endpoint}/v1/events/${encodeURIComponent(item.event_id)}/journal`,
+            {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', 'X-GTRZ-Key': pairingKey },
+              body: item.payload_json,
+              signal: AbortSignal.timeout(CONNECTION_TIMEOUT_MS),
+            },
+          );
 
-        if (!response.ok) {
-          throw new Error(`A central respondeu ${String(response.status)}.`);
-        }
+          if (!response.ok) {
+            throw new Error(`A central respondeu ${String(response.status)}.`);
+          }
 
-        database.sqlite
-          .prepare(
-            `UPDATE sync_outbox
+          database.sqlite
+            .prepare(
+              `UPDATE sync_outbox
              SET status = 'accepted', accepted_at = ?, attempts = attempts + 1,
                  last_error = NULL, updated_at = ?
              WHERE audit_id = ?`,
-          )
-          .run(Date.now(), Date.now(), item.audit_id);
-      } catch (error: unknown) {
-        const message = error instanceof Error ? error.message.slice(0, 240) : 'Falha de rede.';
-        database.sqlite
-          .prepare(
-            `UPDATE sync_outbox
+            )
+            .run(Date.now(), Date.now(), item.audit_id);
+        } catch (error: unknown) {
+          const message = error instanceof Error ? error.message.slice(0, 240) : 'Falha de rede.';
+          database.sqlite
+            .prepare(
+              `UPDATE sync_outbox
              SET status = 'failed', attempts = attempts + 1, last_error = ?, updated_at = ?
              WHERE audit_id = ?`,
-          )
-          .run(message, Date.now(), item.audit_id);
-        return;
+            )
+            .run(message, Date.now(), item.audit_id);
+          return;
+        }
       }
+    } finally {
+      this.#flushInFlight = false;
     }
-
-    await this.#pullRemoteJournal(database, pairingKey, effectiveActiveEventId, deviceId);
-    await this.#processPrintQueue(database, effectiveActiveEventId, deviceId, pairingKey);
   }
 
   async setGlobalEvent(database: DatabaseContext, eventId: string): Promise<void> {
@@ -435,78 +439,26 @@ export class CloudSyncService {
   async getStatus(): Promise<CloudSyncStatus> {
     const checkedAt = Date.now();
     const pairingKey = await this.#readPairingKey();
-
-    try {
-      const health = await fetch(`${this.#endpoint}/health`, {
-        signal: AbortSignal.timeout(CONNECTION_TIMEOUT_MS),
-      });
-
-      if (!health.ok) {
-        return this.#status({
-          checkedAt,
-          connection: 'offline',
-          apiReachable: false,
-          credentialPresent: pairingKey !== null,
-          credentialAccepted: false,
-          message: 'A API da nuvem respondeu com erro.',
-        });
-      }
-    } catch {
-      return this.#status({
-        checkedAt,
-        connection: 'offline',
-        apiReachable: false,
-        credentialPresent: pairingKey !== null,
-        credentialAccepted: false,
-        message: 'Não foi possível alcançar a API da nuvem.',
-      });
-    }
-
     if (pairingKey === null) {
       return this.#status({
         checkedAt,
         connection: 'attention',
-        apiReachable: true,
+        apiReachable: this.#cloudConnected,
         credentialPresent: false,
         credentialAccepted: false,
         message: 'API online, mas a chave de pareamento não foi encontrada neste computador.',
       });
     }
 
-    try {
-      const verification = await fetch(`${this.#endpoint}/v1/verify`, {
-        headers: { 'X-GTRZ-Key': pairingKey },
-        signal: AbortSignal.timeout(CONNECTION_TIMEOUT_MS),
-      });
-
-      if (!verification.ok) {
-        return this.#status({
-          checkedAt,
-          connection: 'attention',
-          apiReachable: true,
-          credentialPresent: true,
-          credentialAccepted: false,
-          message: 'A API está online, mas recusou a chave de pareamento.',
-        });
-      }
-    } catch {
-      return this.#status({
-        checkedAt,
-        connection: 'attention',
-        apiReachable: true,
-        credentialPresent: true,
-        credentialAccepted: false,
-        message: 'A API respondeu, mas não foi possível validar a chave de pareamento.',
-      });
-    }
-
     return this.#status({
       checkedAt,
-      connection: 'connected',
-      apiReachable: true,
+      connection: this.#cloudConnected ? 'connected' : 'attention',
+      apiReachable: this.#cloudConnected,
       credentialPresent: true,
-      credentialAccepted: true,
-      message: 'Nuvem conectada e chave de pareamento validada.',
+      credentialAccepted: this.#cloudConnected,
+      message: this.#cloudConnected
+        ? 'Nuvem conectada pelo canal em tempo real.'
+        : 'Aguardando a conexão segura com a nuvem.',
     });
   }
 
@@ -697,6 +649,56 @@ export class CloudSyncService {
         ? payload.error.message
         : 'A central não confirmou o comando global.';
     throw new Error(message);
+  }
+
+  #ensureControlStream(database: DatabaseContext, deviceId: string, pairingKey: string): void {
+    if (
+      this.#controlStream !== null &&
+      (this.#controlStream.readyState === WebSocket.OPEN ||
+        this.#controlStream.readyState === WebSocket.CONNECTING)
+    ) {
+      return;
+    }
+    const cursorRow = database.sqlite
+      .prepare("SELECT value FROM sync_state WHERE key = 'global.event-control.cursor'")
+      .get() as { readonly value: string } | undefined;
+    const cursor = Number.parseInt(cursorRow?.value ?? '0', 10) || 0;
+    const streamUrl = `${this.#endpoint.replace(/^https:/u, 'wss:').replace(/^http:/u, 'ws:')}/v1/monitor/stream?after=${String(cursor)}`;
+    const stream = new WebSocket(streamUrl, {
+      headers: {
+        'X-GTRZ-Key': pairingKey,
+        'X-GTRZ-Device-Id': deviceId,
+        'X-GTRZ-Device-Label': this.#getDeviceLabel(),
+      },
+      handshakeTimeout: CONNECTION_TIMEOUT_MS,
+    });
+    this.#controlStream = stream;
+    stream.on('open', () => {
+      this.#cloudConnected = true;
+      this.#controlReconnectDelayMs = 1_000;
+    });
+    stream.on('message', () => {
+      // The control frame is a push signal. The snapshot is requested only on
+      // connection/recovery or when the global control actually changes.
+      void this.#pullGlobalControl(database, pairingKey, deviceId).catch(() => undefined);
+    });
+    stream.on('error', () => undefined);
+    stream.on('close', () => {
+      if (this.#controlStream !== stream) return;
+      this.#controlStream = null;
+      this.#cloudConnected = false;
+      this.#scheduleControlReconnect(database, deviceId, pairingKey);
+    });
+  }
+
+  #scheduleControlReconnect(database: DatabaseContext, deviceId: string, pairingKey: string): void {
+    if (this.#controlReconnectTimer !== null) return;
+    const delay = this.#controlReconnectDelayMs;
+    this.#controlReconnectDelayMs = Math.min(delay * 2, STREAM_RECONNECT_MAX_MS);
+    this.#controlReconnectTimer = setTimeout(() => {
+      this.#controlReconnectTimer = null;
+      this.#ensureControlStream(database, deviceId, pairingKey);
+    }, delay);
   }
 
   async #pullGlobalControl(
@@ -1089,24 +1091,28 @@ export class CloudSyncService {
     activeEventId: string | null,
     deviceId: string,
     pairingKey: string,
+    registerPrinter: boolean,
   ): Promise<void> {
     if (activeEventId === null) return;
     const settings = getPrintingSettings(database);
     const printerName = settings.deviceName ?? '__windows_default__';
     const baseUrl = `${this.#endpoint}/v1/events/${encodeURIComponent(activeEventId)}/print`;
-    const register = await fetch(`${baseUrl}/printers`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-GTRZ-Key': pairingKey },
-      body: JSON.stringify({
-        deviceId,
-        deviceLabel: settings.machineName,
-        printerName,
-        paperWidthMm: settings.paperWidthMm,
-        enabled: settings.automaticPrinting,
-      }),
-      signal: AbortSignal.timeout(CONNECTION_TIMEOUT_MS),
-    });
-    if (!register.ok || !settings.automaticPrinting || this.#printAgent === null) return;
+    if (registerPrinter) {
+      const register = await fetch(`${baseUrl}/printers`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-GTRZ-Key': pairingKey },
+        body: JSON.stringify({
+          deviceId,
+          deviceLabel: settings.machineName,
+          printerName,
+          paperWidthMm: settings.paperWidthMm,
+          enabled: settings.automaticPrinting,
+        }),
+        signal: AbortSignal.timeout(CONNECTION_TIMEOUT_MS),
+      });
+      if (!register.ok) return;
+    }
+    if (!settings.automaticPrinting || this.#printAgent === null) return;
 
     const claim = await fetch(`${baseUrl}/claim`, {
       method: 'POST',
@@ -1236,66 +1242,135 @@ export class CloudSyncService {
     })();
   }
 
-  #ensureStream(
+  #ensureEventStreams(
     database: DatabaseContext,
     activeEventId: string | null,
     deviceId: string,
     pairingKey: string,
   ): void {
-    if (activeEventId === null) return;
+    const wanted = new Set([CATALOG_EVENT_ID]);
+    if (activeEventId !== null) wanted.add(activeEventId);
+    for (const eventId of wanted) {
+      this.#ensureEventStream(database, eventId, deviceId, pairingKey, activeEventId);
+    }
+    for (const [eventId, stream] of this.#eventStreams) {
+      if (!wanted.has(eventId)) {
+        stream.close();
+        this.#eventStreams.delete(eventId);
+      }
+    }
+  }
 
+  #ensureEventStream(
+    database: DatabaseContext,
+    eventId: string,
+    deviceId: string,
+    pairingKey: string,
+    activeEventId: string | null,
+  ): void {
+    const existing = this.#eventStreams.get(eventId);
     if (
-      this.#stream !== null &&
-      this.#streamEventId === activeEventId &&
-      (this.#stream.readyState === WebSocket.OPEN ||
-        this.#stream.readyState === WebSocket.CONNECTING)
+      existing !== undefined &&
+      (existing.readyState === WebSocket.OPEN || existing.readyState === WebSocket.CONNECTING)
     ) {
       return;
     }
 
-    if (this.#stream !== null) {
-      this.#stream.close();
-    }
-
-    const cursor = this.#getInboxCursor(database, activeEventId);
-    const streamUrl = `${this.#endpoint.replace(/^https:/u, 'wss:').replace(/^http:/u, 'ws:')}/v1/events/${encodeURIComponent(activeEventId)}/stream?after=${String(cursor)}`;
+    const cursor = this.#getInboxCursor(database, eventId);
+    const streamUrl = `${this.#endpoint.replace(/^https:/u, 'wss:').replace(/^http:/u, 'ws:')}/v1/events/${encodeURIComponent(eventId)}/stream?after=${String(cursor)}`;
     const stream = new WebSocket(streamUrl, {
-      headers: { 'X-GTRZ-Key': pairingKey, 'X-GTRZ-Device-Id': deviceId },
+      headers: {
+        'X-GTRZ-Key': pairingKey,
+        'X-GTRZ-Device-Id': deviceId,
+        'X-GTRZ-Device-Label': this.#getDeviceLabel(),
+      },
       handshakeTimeout: CONNECTION_TIMEOUT_MS,
     });
-    this.#stream = stream;
-    this.#streamEventId = activeEventId;
+    this.#eventStreams.set(eventId, stream);
 
     stream.on('open', () => {
-      stream.send(JSON.stringify({ type: 'sync', after: cursor }));
+      this.#eventReconnectDelays.set(eventId, 1_000);
+      if (eventId === activeEventId) {
+        void this.#processPrintQueue(database, eventId, deviceId, pairingKey, true).catch(
+          () => undefined,
+        );
+      }
     });
     stream.on('message', (message) => {
-      try {
-        const envelope: unknown = JSON.parse(websocketMessageText(message));
-        const event = isRecord(envelope) && envelope.type === 'event' ? envelope.event : null;
-        if (isRemoteJournalEvent(event)) {
-          const cursor = this.#getInboxCursor(database, activeEventId);
-          if (event.sequence <= cursor) return;
-          if (event.sequence === cursor + 1) {
-            this.#storeRemoteJournalEvents(database, activeEventId, [event]);
-            this.#applyInbox(database, deviceId);
-            return;
-          }
-        }
-      } catch {
-        // A reconnect snapshot remains the recovery path for malformed frames.
+      const applied = this.#applyStreamMessage(database, eventId, deviceId, message);
+      if (!applied) {
+        stream.close();
+        return;
       }
-      void this.#pullRemoteJournal(database, pairingKey, activeEventId, deviceId).catch(
-        () => undefined,
-      );
+      if (eventId === getSessionState(database).activeEvent?.id) {
+        void this.#processPrintQueue(database, eventId, deviceId, pairingKey, false).catch(
+          () => undefined,
+        );
+      }
     });
     stream.on('error', () => undefined);
     stream.on('close', () => {
-      if (this.#stream === stream) {
-        this.#stream = null;
-        this.#streamEventId = null;
+      if (this.#eventStreams.get(eventId) === stream) {
+        this.#eventStreams.delete(eventId);
+        this.#scheduleEventReconnect(database, eventId, deviceId, pairingKey);
       }
     });
+  }
+
+  #applyStreamMessage(
+    database: DatabaseContext,
+    eventId: string,
+    deviceId: string,
+    message: RawData,
+  ): boolean {
+    try {
+      const envelope: unknown = JSON.parse(websocketMessageText(message));
+      if (!isRecord(envelope)) return false;
+      const events =
+        envelope.type === 'event'
+          ? [envelope.event]
+          : envelope.type === 'sync' && Array.isArray(envelope.events)
+            ? envelope.events
+            : null;
+      if (events === null) return true;
+      const journalEvents = events.filter(isRemoteJournalEvent);
+      const cursor = this.#getInboxCursor(database, eventId);
+      const newEvents = journalEvents.filter((event) => event.sequence > cursor);
+      if (newEvents.length === 0) return true;
+      if (newEvents[0]?.sequence !== cursor + 1) return false;
+      for (let index = 1; index < newEvents.length; index += 1) {
+        const previous = newEvents[index - 1];
+        const current = newEvents[index];
+        if (previous === undefined || current?.sequence !== previous.sequence + 1) return false;
+      }
+      this.#storeRemoteJournalEvents(database, eventId, newEvents);
+      this.#applyInbox(database, deviceId);
+      const currentSequence = integerField(envelope, 'currentSequence');
+      const latest = newEvents.at(-1);
+      return (
+        latest !== undefined && (currentSequence === null || latest.sequence >= currentSequence)
+      );
+    } catch {
+      return false;
+    }
+  }
+
+  #scheduleEventReconnect(
+    database: DatabaseContext,
+    eventId: string,
+    deviceId: string,
+    pairingKey: string,
+  ): void {
+    if (this.#eventReconnectTimers.has(eventId)) return;
+    const delay = this.#eventReconnectDelays.get(eventId) ?? 1_000;
+    this.#eventReconnectDelays.set(eventId, Math.min(delay * 2, STREAM_RECONNECT_MAX_MS));
+    const timer = setTimeout(() => {
+      this.#eventReconnectTimers.delete(eventId);
+      const activeEventId = getSessionState(database).activeEvent?.id ?? null;
+      if (eventId !== CATALOG_EVENT_ID && eventId !== activeEventId) return;
+      this.#ensureEventStream(database, eventId, deviceId, pairingKey, activeEventId);
+    }, delay);
+    this.#eventReconnectTimers.set(eventId, timer);
   }
 
   #getInboxCursor(database: DatabaseContext, eventId: string): number {
@@ -1333,44 +1408,6 @@ export class CloudSyncService {
       const highestSequence = Math.max(...journalEvents.map((remote) => remote.sequence));
       updateCursor.run(`inbox.sequence:${eventId}`, String(highestSequence), Date.now());
     })();
-  }
-
-  async #pullRemoteJournal(
-    database: DatabaseContext,
-    pairingKey: string,
-    activeEventId: string | null,
-    deviceId: string,
-  ): Promise<void> {
-    const syncedEvents = database.sqlite
-      .prepare(
-        `SELECT DISTINCT event_id FROM sync_outbox
-         WHERE status = 'accepted' ORDER BY event_id ASC`,
-      )
-      .all() as { readonly event_id: string }[];
-    const eventIds = new Set(syncedEvents.map((event) => event.event_id));
-    eventIds.add(CATALOG_EVENT_ID);
-    if (activeEventId !== null) eventIds.add(activeEventId);
-
-    for (const eventId of eventIds) {
-      const after = this.#getInboxCursor(database, eventId);
-      const response = await fetch(
-        `${this.#endpoint}/v1/events/${encodeURIComponent(eventId)}/snapshot?after=${String(after)}`,
-        {
-          headers: { 'X-GTRZ-Key': pairingKey },
-          signal: AbortSignal.timeout(CONNECTION_TIMEOUT_MS),
-        },
-      );
-      if (!response.ok) continue;
-
-      const snapshot: unknown = await response.json();
-      if (!isRecord(snapshot) || !Array.isArray(snapshot.events)) continue;
-      const journalEvents = snapshot.events.filter(isRemoteJournalEvent);
-      if (journalEvents.length === 0) continue;
-
-      this.#storeRemoteJournalEvents(database, eventId, journalEvents);
-    }
-
-    this.#applyInbox(database, deviceId);
   }
 
   #applyInbox(database: DatabaseContext, deviceId: string): void {
