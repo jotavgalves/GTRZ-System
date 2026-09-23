@@ -2197,7 +2197,7 @@ export class EventRoom extends DurableObject<Env> {
       if (!Array.isArray(rawComponents) || rawComponents.length > 100) {
         throw new ApiError(400, 'INVALID_INPUT', 'Componentes do catálogo inválidos.');
       }
-      const componentIds = new Set<string>();
+      const componentOccurrences = new Set<string>();
       const choiceGroups = new Map<
         string,
         { readonly label: string; readonly quantity: number; count: number }
@@ -2214,10 +2214,6 @@ export class EventRoom extends DurableObject<Env> {
           component.productId,
           `components[${String(componentIndex)}].productId`,
         );
-        if (componentIds.has(componentProductId)) {
-          throw new ApiError(400, 'INVALID_INPUT', 'Um componente não pode repetir no combo.');
-        }
-        componentIds.add(componentProductId);
         const choiceGroup =
           component.choiceGroup === undefined
             ? null
@@ -2237,6 +2233,15 @@ export class EventRoom extends DurableObject<Env> {
         if ((choiceGroup === null) !== (choiceLabel === null)) {
           throw new ApiError(400, 'INVALID_INPUT', 'A escolha do componente está incompleta.');
         }
+        const occurrenceKey = `${choiceGroup ?? '__fixed__'}:${componentProductId}`;
+        if (componentOccurrences.has(occurrenceKey)) {
+          throw new ApiError(
+            400,
+            'INVALID_INPUT',
+            'Um componente não pode repetir dentro da mesma parte do combo.',
+          );
+        }
+        componentOccurrences.add(occurrenceKey);
         const quantity = positiveInteger(
           component.quantity,
           `components[${String(componentIndex)}].quantity`,

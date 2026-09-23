@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 import {
   addOrderItem,
+  bindOrderVoucher,
   cancelOrder,
   closeOrder,
   createCombo,
@@ -24,6 +25,7 @@ import {
   updateCombo,
   type DatabaseContext,
 } from './index';
+import { createManagedVoucher } from './voucher-management';
 
 let temporaryDirectory: string | null = null;
 
@@ -109,6 +111,49 @@ describe('combo database', () => {
     recordStockMovement(database, { productId: beerId, type: 'loss', quantity: 2 });
     expect(listCombos(database).find((item) => item.id === combo.id)?.availableUnits).toBe(1);
     database.close();
+  });
+
+  it('atualiza bancos existentes sem perder componentes de combos já cadastrados', async () => {
+    const database = await createTemporaryDatabase();
+    createEvent(database, { name: 'Evento de migração de combo', startsAt: Date.now() });
+    const { beerId } = createProducts(database);
+    const combo = createCombo(database, {
+      name: 'Combo existente',
+      salePriceCents: 1800,
+      components: [{ productId: beerId, quantity: 2 }],
+    });
+
+    database.sqlite.exec(`
+      CREATE TABLE combo_components_legacy (
+        combo_id TEXT NOT NULL,
+        product_id TEXT NOT NULL,
+        quantity INTEGER NOT NULL CHECK (quantity > 0),
+        choice_group TEXT,
+        choice_label TEXT,
+        PRIMARY KEY (combo_id, product_id)
+      );
+      INSERT INTO combo_components_legacy
+        (combo_id, product_id, quantity, choice_group, choice_label)
+      SELECT combo_id, product_id, quantity, choice_group, choice_label
+      FROM combo_components;
+      DROP TABLE combo_components;
+      ALTER TABLE combo_components_legacy RENAME TO combo_components;
+      DELETE FROM schema_migrations WHERE version = 27;
+    `);
+    database.close();
+
+    const upgraded = openDatabase(path.join(temporaryDirectory as string, 'combos.sqlite'));
+    expect(listCombos(upgraded).find((item) => item.id === combo.id)?.components).toEqual([
+      expect.objectContaining({ productId: beerId, quantity: 2, choiceGroup: null }),
+    ]);
+    expect(
+      (
+        upgraded.sqlite.pragma('table_info(combo_components)') as readonly {
+          readonly name: string;
+        }[]
+      ).map((column) => column.name),
+    ).toContain('id');
+    upgraded.close();
   });
 
   it('atualiza composição e preserva histórico de auditoria', async () => {
@@ -368,6 +413,238 @@ describe('combo database', () => {
         .prepare('SELECT quantity FROM event_stock WHERE event_id = ? AND product_id = ?')
         .get(event.id, carne.id),
     ).toEqual({ quantity: 10 });
+    database.close();
+  });
+
+  it('fecha uma venda mista com voucher, pagamentos e configurações distintas de combo sem misturar as escolhas', async () => {
+    const database = await createTemporaryDatabase();
+    const event = createEvent(database, {
+      name: 'Evento venda mista de combos',
+      startsAt: Date.now(),
+    });
+    const drinks = createProductCategory(database, 'Bebidas da venda mista', 'catalog');
+    const food = createProductCategory(database, 'Comida da venda mista', 'food');
+    const coca = createInventoryProduct(database, {
+      categoryId: drinks.id,
+      name: 'Coca-Cola',
+      kind: 'drink',
+      costCents: 300,
+      salePriceCents: 800,
+      lowStockThreshold: 0,
+    });
+    const queijo = createInventoryProduct(database, {
+      categoryId: food.id,
+      name: 'Tequeño de queijo',
+      kind: 'food',
+      costCents: 150,
+      salePriceCents: 0,
+      lowStockThreshold: 0,
+      comboOnly: true,
+    });
+    const romeu = createInventoryProduct(database, {
+      categoryId: food.id,
+      name: 'Tequeño Romeu e Julieta',
+      kind: 'food',
+      costCents: 180,
+      salePriceCents: 0,
+      lowStockThreshold: 0,
+      comboOnly: true,
+    });
+    const frango = createInventoryProduct(database, {
+      categoryId: food.id,
+      name: 'Arepa de frango',
+      kind: 'food',
+      costCents: 700,
+      salePriceCents: 0,
+      lowStockThreshold: 0,
+      comboOnly: true,
+    });
+    const carne = createInventoryProduct(database, {
+      categoryId: food.id,
+      name: 'Arepa de carne',
+      kind: 'food',
+      costCents: 800,
+      salePriceCents: 0,
+      lowStockThreshold: 0,
+      comboOnly: true,
+    });
+    const pastel = createInventoryProduct(database, {
+      categoryId: food.id,
+      name: 'Pastel colombiano',
+      kind: 'food',
+      costCents: 600,
+      salePriceCents: 0,
+      lowStockThreshold: 0,
+      comboOnly: true,
+    });
+    for (const product of [coca, queijo, romeu, frango, carne, pastel]) {
+      recordStockMovement(database, { productId: product.id, type: 'purchase', quantity: 20 });
+    }
+
+    const tequefest = createCombo(database, {
+      name: 'Tequefest',
+      salePriceCents: 2400,
+      components: [
+        { productId: queijo.id, quantity: 3 },
+        { productId: romeu.id, quantity: 2 },
+      ],
+    });
+    const pasaporte = createCombo(database, {
+      name: 'Pasaporte Latino',
+      salePriceCents: 3000,
+      components: [
+        { productId: queijo.id, quantity: 2 },
+        {
+          productId: frango.id,
+          quantity: 2,
+          choiceGroup: 'arepas-principais',
+          choiceLabel: 'Escolha as 2 arepas principais',
+        },
+        {
+          productId: carne.id,
+          quantity: 2,
+          choiceGroup: 'arepas-principais',
+          choiceLabel: 'Escolha as 2 arepas principais',
+        },
+        {
+          productId: frango.id,
+          quantity: 1,
+          choiceGroup: 'acompanhamento',
+          choiceLabel: 'Escolha o acompanhamento',
+        },
+        {
+          productId: pastel.id,
+          quantity: 1,
+          choiceGroup: 'acompanhamento',
+          choiceLabel: 'Escolha o acompanhamento',
+        },
+      ],
+    });
+    const table = createServicePoint(database, { label: 'Mesa voucher e combos', type: 'table' });
+    const voucher = createManagedVoucher(database, {
+      code: 'VCH-MISTO',
+      label: 'Crédito da mesa',
+      initialBalanceCents: 4000,
+      servicePointId: table.id,
+    });
+    const order = openOrder(database, table.id);
+
+    addOrderItem(database, {
+      orderId: order.id,
+      itemKind: 'product',
+      itemId: coca.id,
+      quantity: 2,
+    });
+    addOrderItem(database, {
+      orderId: order.id,
+      itemKind: 'combo',
+      itemId: tequefest.id,
+      quantity: 1,
+    });
+    const sameConfiguration = addOrderItem(database, {
+      orderId: order.id,
+      itemKind: 'combo',
+      itemId: tequefest.id,
+      quantity: 1,
+    });
+    expect(sameConfiguration.items.find((item) => item.itemId === tequefest.id)?.quantity).toBe(2);
+
+    addOrderItem(database, {
+      orderId: order.id,
+      itemKind: 'combo',
+      itemId: pasaporte.id,
+      quantity: 2,
+      componentSelections: [
+        { choiceGroup: 'arepas-principais', productId: frango.id, quantity: 2 },
+        { choiceGroup: 'arepas-principais', productId: carne.id, quantity: 2 },
+        { choiceGroup: 'acompanhamento', productId: pastel.id, quantity: 2 },
+      ],
+    });
+    const mixedConfigurations = addOrderItem(database, {
+      orderId: order.id,
+      itemKind: 'combo',
+      itemId: pasaporte.id,
+      quantity: 1,
+      componentSelections: [
+        { choiceGroup: 'arepas-principais', productId: frango.id, quantity: 2 },
+        { choiceGroup: 'acompanhamento', productId: frango.id, quantity: 1 },
+      ],
+    });
+    const pasaporteLines = mixedConfigurations.items.filter((item) => item.itemId === pasaporte.id);
+    expect(pasaporteLines).toHaveLength(2);
+    expect(pasaporteLines.map((item) => item.quantity)).toEqual([2, 1]);
+    expect(pasaporteLines.map((item) => item.componentAllocations)).toEqual(
+      expect.arrayContaining([
+        expect.arrayContaining([
+          expect.objectContaining({ productId: frango.id, quantity: 2 }),
+          expect.objectContaining({ productId: carne.id, quantity: 2 }),
+          expect.objectContaining({ productId: pastel.id, quantity: 2 }),
+        ]),
+        expect.arrayContaining([
+          expect.objectContaining({ productId: frango.id, quantity: 2 }),
+          expect.objectContaining({ productId: frango.id, quantity: 1 }),
+        ]),
+      ]),
+    );
+
+    bindOrderVoucher(database, { orderId: order.id, code: voucher.code });
+    const paid = closeOrder(database, {
+      orderId: order.id,
+      discountCents: 0,
+      voucherUses: [{ code: voucher.code, amountCents: 2000 }],
+      payments: [
+        { method: 'pix', amountCents: 5000 },
+        { method: 'cash', amountCents: 8400, receivedCents: 9000 },
+      ],
+    });
+    expect(paid).toMatchObject({
+      status: 'paid',
+      subtotalCents: 15_400,
+      totalCents: 15_400,
+      paidCents: 15_400,
+    });
+    expect(paid.items).toHaveLength(4);
+    expect(paid.payments).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ method: 'pix', amountCents: 5000, changeCents: 0 }),
+        expect.objectContaining({ method: 'cash', amountCents: 8400, changeCents: 600 }),
+      ]),
+    );
+    expect(
+      database.sqlite
+        .prepare('SELECT remaining_balance_cents FROM vouchers WHERE id = ?')
+        .get(voucher.id),
+    ).toEqual({ remaining_balance_cents: 2000 });
+
+    const stock = (productId: string): number =>
+      (
+        database.sqlite
+          .prepare('SELECT quantity FROM event_stock WHERE event_id = ? AND product_id = ?')
+          .get(event.id, productId) as { readonly quantity: number }
+      ).quantity;
+    expect(stock(coca.id)).toBe(18);
+    expect(stock(queijo.id)).toBe(8);
+    expect(stock(romeu.id)).toBe(16);
+    expect(stock(frango.id)).toBe(15);
+    expect(stock(carne.id)).toBe(18);
+    expect(stock(pastel.id)).toBe(18);
+
+    const cancelled = cancelOrder(database, {
+      orderId: order.id,
+      reason: 'Teste de estorno da venda mista',
+    });
+    expect(cancelled.status).toBe('cancelled');
+    expect(() =>
+      cancelOrder(database, { orderId: order.id, reason: 'Estorno duplicado não permitido' }),
+    ).toThrow('Esta comanda já foi cancelada.');
+    expect(
+      database.sqlite
+        .prepare('SELECT remaining_balance_cents FROM vouchers WHERE id = ?')
+        .get(voucher.id),
+    ).toEqual({ remaining_balance_cents: 4000 });
+    for (const product of [coca, queijo, romeu, frango, carne, pastel]) {
+      expect(stock(product.id)).toBe(20);
+    }
     database.close();
   });
 });

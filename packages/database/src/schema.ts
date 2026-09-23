@@ -135,19 +135,18 @@ export const combos = sqliteTable('combos', {
   updatedAt: integer('updated_at', { mode: 'timestamp_ms' }).notNull(),
 });
 
-export const comboComponents = sqliteTable(
-  'combo_components',
-  {
-    comboId: text('combo_id')
-      .notNull()
-      .references(() => combos.id, { onDelete: 'cascade', onUpdate: 'cascade' }),
-    productId: text('product_id')
-      .notNull()
-      .references(() => products.id, { onDelete: 'restrict', onUpdate: 'cascade' }),
-    quantity: integer('quantity').notNull(),
-  },
-  (table) => [primaryKey({ columns: [table.comboId, table.productId] })],
-);
+export const comboComponents = sqliteTable('combo_components', {
+  id: text('id').primaryKey(),
+  comboId: text('combo_id')
+    .notNull()
+    .references(() => combos.id, { onDelete: 'cascade', onUpdate: 'cascade' }),
+  productId: text('product_id')
+    .notNull()
+    .references(() => products.id, { onDelete: 'restrict', onUpdate: 'cascade' }),
+  quantity: integer('quantity').notNull(),
+  choiceGroup: text('choice_group'),
+  choiceLabel: text('choice_label'),
+});
 
 export const servicePoints = sqliteTable('service_points', {
   id: text('id').primaryKey(),

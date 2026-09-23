@@ -21,12 +21,15 @@ interface ComponentCollection {
 }
 
 function validateUniqueComponents(value: ComponentCollection, context: z.RefinementCtx): void {
-  const uniqueProductIds = new Set(value.components.map((component) => component.productId));
+  const occurrences = value.components.map(
+    (component) => `${component.choiceGroup ?? '__fixed__'}:${component.productId}`,
+  );
+  const uniqueOccurrences = new Set(occurrences);
 
-  if (uniqueProductIds.size !== value.components.length) {
+  if (uniqueOccurrences.size !== value.components.length) {
     context.addIssue({
       code: 'custom',
-      message: 'Um produto não pode aparecer duas vezes no mesmo combo.',
+      message: 'Um produto não pode repetir dentro da mesma parte do combo.',
       path: ['components'],
     });
   }

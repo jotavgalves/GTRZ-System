@@ -75,8 +75,14 @@ export function ComboForm(props: ComboFormProps): React.JSX.Element {
   const [active, setActive] = useState(props.combo?.active ?? true);
   const [error, setError] = useState<string | null>(null);
 
+  const selectedChoiceGroup = choiceEnabled ? choiceGroup.trim() || null : null;
   const availableProducts = activeProducts.filter(
-    (product) => !components.some((component) => component.productId === product.id),
+    (product) =>
+      !components.some(
+        (component) =>
+          component.productId === product.id &&
+          (component.choiceGroup ?? null) === selectedChoiceGroup,
+      ),
   );
 
   function addComponent(): void {
@@ -116,7 +122,11 @@ export function ComboForm(props: ComboFormProps): React.JSX.Element {
     setSelectedQuantity('1');
   }
 
-  function updateComponentQuantity(productId: string, quantityValue: string): void {
+  function updateComponentQuantity(
+    productId: string,
+    choiceGroup: string | undefined,
+    quantityValue: string,
+  ): void {
     const quantity = Number(quantityValue);
 
     if (!Number.isInteger(quantity) || quantity <= 0) {
@@ -125,10 +135,7 @@ export function ComboForm(props: ComboFormProps): React.JSX.Element {
 
     setComponents((current) =>
       current.map((component) =>
-        component.productId === productId ||
-        (component.choiceGroup !== undefined &&
-          component.choiceGroup ===
-            current.find((item) => item.productId === productId)?.choiceGroup)
+        component.productId === productId && component.choiceGroup === choiceGroup
           ? { ...component, quantity }
           : component,
       ),
@@ -290,7 +297,10 @@ export function ComboForm(props: ComboFormProps): React.JSX.Element {
             const product = props.products.find((item) => item.id === component.productId);
 
             return (
-              <div className="combo-component-row" key={component.productId}>
+              <div
+                className="combo-component-row"
+                key={`${component.choiceGroup ?? 'fixed'}-${component.productId}`}
+              >
                 <span>
                   {product?.name ?? 'Produto indisponível'}
                   {component.choiceLabel === undefined ? null : (
@@ -303,7 +313,11 @@ export function ComboForm(props: ComboFormProps): React.JSX.Element {
                     aria-label={`Quantidade de ${product?.name ?? 'produto'}`}
                     min="1"
                     onChange={(event) => {
-                      updateComponentQuantity(component.productId, event.target.value);
+                      updateComponentQuantity(
+                        component.productId,
+                        component.choiceGroup,
+                        event.target.value,
+                      );
                     }}
                     step="1"
                     type="number"
@@ -316,7 +330,11 @@ export function ComboForm(props: ComboFormProps): React.JSX.Element {
                   disabled={props.busy}
                   onClick={() => {
                     setComponents((current) =>
-                      current.filter((item) => item.productId !== component.productId),
+                      current.filter(
+                        (item) =>
+                          item.productId !== component.productId ||
+                          item.choiceGroup !== component.choiceGroup,
+                      ),
                     );
                   }}
                   type="button"

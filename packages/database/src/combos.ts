@@ -104,7 +104,7 @@ function validateComponents(
     throw new Error('O combo precisa de pelo menos um produto.');
   }
 
-  const uniqueIds = new Set<string>();
+  const uniqueOccurrences = new Set<string>();
   const choices = new Map<string, { quantity: number; label: string; optionCount: number }>();
 
   for (const component of components) {
@@ -112,16 +112,16 @@ function validateComponents(
       throw new Error('As quantidades dos componentes devem ser inteiras e positivas.');
     }
 
-    if (uniqueIds.has(component.productId)) {
-      throw new Error('Um produto não pode aparecer duas vezes no mesmo combo.');
-    }
-
-    uniqueIds.add(component.productId);
     const choiceGroup = component.choiceGroup?.trim();
     const choiceLabel = component.choiceLabel?.trim();
     if ((choiceGroup === undefined) !== (choiceLabel === undefined)) {
       throw new Error('Uma escolha de componente precisa informar o grupo e o rótulo.');
     }
+    const occurrenceKey = `${choiceGroup ?? '__fixed__'}:${component.productId}`;
+    if (uniqueOccurrences.has(occurrenceKey)) {
+      throw new Error('Um produto não pode repetir dentro da mesma parte do combo.');
+    }
+    uniqueOccurrences.add(occurrenceKey);
     if (choiceGroup !== undefined && choiceLabel !== undefined) {
       const current = choices.get(choiceGroup);
       if (current === undefined) {
@@ -320,12 +320,13 @@ function insertComponents(
   components: readonly DatabaseComboComponentInput[],
 ): void {
   const insert = database.sqlite.prepare(
-    `INSERT INTO combo_components (combo_id, product_id, quantity, choice_group, choice_label)
-     VALUES (?, ?, ?, ?, ?)`,
+    `INSERT INTO combo_components (id, combo_id, product_id, quantity, choice_group, choice_label)
+     VALUES (?, ?, ?, ?, ?, ?)`,
   );
 
   for (const component of components) {
     insert.run(
+      randomUUID(),
       comboId,
       component.productId,
       component.quantity,

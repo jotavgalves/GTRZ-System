@@ -48,7 +48,16 @@ export function addOrderItem(
   const selections = input.componentSelections ?? [];
   if (input.itemKind === 'combo') {
     const byGroup = new Map<string, DatabaseComboComponentSelectionInput[]>();
+    const selectedOccurrences = new Set<string>();
     for (const selection of selections) {
+      if (!Number.isInteger(selection.quantity) || selection.quantity <= 0) {
+        throw new Error('A quantidade escolhida para o componente deve ser inteira e positiva.');
+      }
+      const occurrenceKey = `${selection.choiceGroup}:${selection.productId}`;
+      if (selectedOccurrences.has(occurrenceKey)) {
+        throw new Error('O mesmo componente foi escolhido duas vezes na mesma opção.');
+      }
+      selectedOccurrences.add(occurrenceKey);
       const group = byGroup.get(selection.choiceGroup) ?? [];
       group.push(selection);
       byGroup.set(selection.choiceGroup, group);
