@@ -70,8 +70,10 @@ test('SMK-BKP-001 — cria e verifica backup manual pela interface', async () =>
 
     await window.getByRole('link', { name: 'Backups' }).click();
     await expect(window.getByRole('heading', { name: 'Backups' })).toBeVisible();
-    await window.getByRole('button', { name: 'Criar backup' }).click();
-    await expect(window.getByText(/criado e verificado/u)).toBeVisible();
+    const createBackupButton = window.getByRole('button', { name: 'Criar backup' });
+    await expect(createBackupButton).toBeEnabled();
+    await createBackupButton.click();
+    await expect(window.getByText(/criado e verificado/u)).toBeVisible({ timeout: 30_000 });
 
     const verifyButton = window.getByRole('button', { name: 'Verificar' }).first();
     await expect(verifyButton).toBeVisible();

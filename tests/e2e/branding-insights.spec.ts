@@ -14,8 +14,9 @@ test('SMK-BRD-001 — exibe marca oficial e insights operacionais', async () => 
     await window.waitForLoadState('domcontentloaded');
     await ensureProduction(window);
 
+    await expect(window.locator('.brand-lockup')).toHaveAttribute('aria-label', 'GTRZ System');
     await expect(window.getByRole('img', { name: 'GTRZ' })).toBeVisible();
-    await expect(window.getByText('System', { exact: true }).first()).toBeVisible();
+    await expect(window.locator('.brand-lockup')).toBeVisible();
 
     const suffix = String(Date.now());
     const eventName = `Evento insights ${suffix}`;

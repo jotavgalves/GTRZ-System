@@ -56,10 +56,10 @@ if (!hasSingleInstanceLock) {
   void app.whenReady().then(async () => {
     try {
       const userDataPath = app.getPath('userData');
-      const documentsFolder = path.join(
-        app.getPath('documents'),
-        runtimeEnvironment === 'test' ? 'GTRZ System - Teste' : 'GTRZ System',
-      );
+      const documentsFolder =
+        runtimeEnvironment === 'test'
+          ? path.join(userDataPath, 'test-files')
+          : path.join(app.getPath('documents'), 'GTRZ System');
       const databasePath = path.join(userDataPath, 'gtrz-system.sqlite');
       databaseRuntime = new DatabaseRuntime(databasePath);
       const backupService = new BackupService({
