@@ -27,7 +27,6 @@ describe('SMK-INF-001 — fundação modular', () => {
     const expectedFeatures = [
       'audit',
       'backups',
-      'capital',
       'cash',
       'cloud-monitor',
       'dashboard',
