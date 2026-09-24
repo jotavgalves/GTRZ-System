@@ -41,7 +41,7 @@ export function FoodPage(): React.JSX.Element {
     void reload();
   }, [reload]);
   useRealtimeReload(reload);
-  const run = async (action: () => Promise<unknown>) => {
+  const run = async (action: () => Promise<unknown>): Promise<void> => {
     setBusy(true);
     try {
       await action();
@@ -166,7 +166,9 @@ export function FoodPage(): React.JSX.Element {
                     <input
                       disabled={busy}
                       maxLength={100}
-                      onChange={(event) => setSupplier(event.target.value)}
+                      onChange={(event) => {
+                        setSupplier(event.target.value);
+                      }}
                       required
                       value={supplier}
                     />
@@ -198,7 +200,9 @@ export function FoodPage(): React.JSX.Element {
                       >
                         <input
                           autoFocus
-                          onChange={(event) => setSupplierDraft(event.target.value)}
+                          onChange={(event) => {
+                            setSupplierDraft(event.target.value);
+                          }}
                           value={supplierDraft}
                         />
                         <button
@@ -264,8 +268,11 @@ export function FoodPage(): React.JSX.Element {
                                     });
                                   } catch (deleteError) {
                                     const message =
-                                      deleteError instanceof Error ? deleteError.message : 'Não foi possível excluir.';
-                                    if (!message.includes('Confirme a exclusão das vendas')) throw deleteError;
+                                      deleteError instanceof Error
+                                        ? deleteError.message
+                                        : 'Não foi possível excluir.';
+                                    if (!message.includes('Confirme a exclusão das vendas'))
+                                      throw deleteError;
                                     if (
                                       !window.confirm(
                                         `${message}\n\nExcluir também essas vendas, com os respectivos estornos?`,

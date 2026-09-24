@@ -364,14 +364,14 @@ function ensureColumn(
   column: string,
   definition: string,
 ): void {
-  const columns = sqlite.pragma(`table_info(${table})`) as Array<{ readonly name: string }>;
+  const columns = sqlite.pragma(`table_info(${table})`) as { readonly name: string }[];
   if (!columns.some((entry) => entry.name === column)) {
     sqlite.exec(`ALTER TABLE ${table} ADD COLUMN ${definition}`);
   }
 }
 
 function tableColumns(sqlite: BetterSqlite3.Database, table: string): readonly string[] {
-  return (sqlite.pragma(`table_info(${table})`) as Array<{ readonly name: string }>).map(
+  return (sqlite.pragma(`table_info(${table})`) as { readonly name: string }[]).map(
     (entry) => entry.name,
   );
 }
@@ -434,6 +434,7 @@ export * from './event-close';
 export * from './event-deletion';
 export * from './expenses';
 export * from './food';
+export * from './food-settlements';
 export * from './capital';
 export * from './insights';
 export * from './inventory';

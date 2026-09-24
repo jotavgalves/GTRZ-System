@@ -18,7 +18,9 @@ export function CloudEventSelector(): React.JSX.Element {
     void window.gtrz.events
       .list()
       .then(setEvents)
-      .catch(() => setEvents([]));
+      .catch(() => {
+        setEvents([]);
+      });
   }, [state?.activeEvent?.id]);
 
   const changeEvent = async (eventId: string): Promise<void> => {
@@ -102,12 +104,19 @@ export function CloudEventSelector(): React.JSX.Element {
             <span>{`Digite ${state.activeEvent.name} para confirmar`}</span>
             <input
               value={confirmationName}
-              onChange={(event) => setConfirmationName(event.target.value)}
+              onChange={(event) => {
+                setConfirmationName(event.target.value);
+              }}
             />
           </label>
           <label>
             <span>Motivo da limpeza</span>
-            <input value={reason} onChange={(event) => setReason(event.target.value)} />
+            <input
+              value={reason}
+              onChange={(event) => {
+                setReason(event.target.value);
+              }}
+            />
           </label>
           <button
             className="button button--danger"

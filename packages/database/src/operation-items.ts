@@ -3,8 +3,11 @@ import { randomUUID } from 'node:crypto';
 import { appendAudit } from './audit';
 import { getOrder, openOrder, recomputeOpenOrder, requireOpenOrderRow } from './operation-core';
 import { requireAvailableCatalogItem } from './operation-stock';
-import type { DatabaseOrder, DatabaseOrderItemKind } from './operation-types';
-import type { DatabaseComboComponentSelectionInput } from './operation-types';
+import type {
+  DatabaseComboComponentSelectionInput,
+  DatabaseOrder,
+  DatabaseOrderItemKind,
+} from './operation-types';
 import type { DatabaseContext } from './types';
 
 export function addOrderItem(
@@ -32,7 +35,7 @@ export function addOrderItem(
           readonly choice_label: string | null;
         }[])
       : [];
-  const choiceDefinitions = new Map<string, Array<(typeof definitions)[number]>>();
+  const choiceDefinitions = new Map<string, (typeof definitions)[number][]>();
   for (const definition of definitions) {
     if (definition.choice_group === null) continue;
     const choices = choiceDefinitions.get(definition.choice_group) ?? [];

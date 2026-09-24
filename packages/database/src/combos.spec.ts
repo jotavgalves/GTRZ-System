@@ -142,7 +142,8 @@ describe('combo database', () => {
     `);
     database.close();
 
-    const upgraded = openDatabase(path.join(temporaryDirectory as string, 'combos.sqlite'));
+    if (temporaryDirectory === null) throw new Error('Diretório temporário não foi criado.');
+    const upgraded = openDatabase(path.join(temporaryDirectory, 'combos.sqlite'));
     expect(listCombos(upgraded).find((item) => item.id === combo.id)?.components).toEqual([
       expect.objectContaining({ productId: beerId, quantity: 2, choiceGroup: null }),
     ]);

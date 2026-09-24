@@ -29,7 +29,7 @@ interface ComponentAllocationRow {
   readonly quantity: number;
 }
 
-export interface StockRequirement {
+interface StockRequirement {
   readonly productId: string;
   readonly productName: string;
   quantity: number;
@@ -93,12 +93,19 @@ export function listOperationCatalog(
             choiceGroups: [
               ...new Map(
                 combo.components
-                  .filter((component) => component.choiceGroup !== null)
+                  .filter(
+                    (
+                      component,
+                    ): component is typeof component & {
+                      readonly choiceGroup: string;
+                      readonly choiceLabel: string;
+                    } => component.choiceGroup !== null && component.choiceLabel !== null,
+                  )
                   .map((component) => [
-                    component.choiceGroup as string,
+                    component.choiceGroup,
                     {
-                      id: component.choiceGroup as string,
-                      label: component.choiceLabel as string,
+                      id: component.choiceGroup,
+                      label: component.choiceLabel,
                       quantity: component.quantity,
                       options: combo.components
                         .filter((option) => option.choiceGroup === component.choiceGroup)

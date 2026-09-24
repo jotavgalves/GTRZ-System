@@ -68,7 +68,11 @@ describe('administration renames', () => {
       salePriceCents: 1500,
       components: [{ productId: product.id, quantity: 1 }],
     });
-    const lot = createTicketLot(database, { name: 'Lote original', priceCents: 2000, capacity: 10 });
+    const lot = createTicketLot(database, {
+      name: 'Lote original',
+      priceCents: 2000,
+      capacity: 10,
+    });
     configureFood(database, { supplierMode: 'external' });
     const supplier = createFoodSupplier(database, { name: 'Fornecedor original' });
 
@@ -76,7 +80,9 @@ describe('administration renames', () => {
       id: event.id,
       name: 'Evento renomeado',
     });
-    expect(updateProductCategory(database, { categoryId: category.id, name: 'Bebidas premium' })).toMatchObject({
+    expect(
+      updateProductCategory(database, { categoryId: category.id, name: 'Bebidas premium' }),
+    ).toMatchObject({
       id: category.id,
       name: 'Bebidas premium',
     });
@@ -93,7 +99,9 @@ describe('administration renames', () => {
         active: true,
       }),
     ).toMatchObject({ id: product.id, name: 'Produto renomeado', categoryName: 'Bebidas premium' });
-    expect(renameServicePoint(database, { servicePointId: table.id, label: 'Mesa VIP' })).toMatchObject({
+    expect(
+      renameServicePoint(database, { servicePointId: table.id, label: 'Mesa VIP' }),
+    ).toMatchObject({
       id: table.id,
       label: 'Mesa VIP',
     });
@@ -104,7 +112,12 @@ describe('administration renames', () => {
         label: 'Voucher VIP',
         servicePointId: table.id,
       }),
-    ).toMatchObject({ id: voucher.id, code: 'VIP-001', label: 'Voucher VIP', servicePointId: table.id });
+    ).toMatchObject({
+      id: voucher.id,
+      code: 'VIP-001',
+      label: 'Voucher VIP',
+      servicePointId: table.id,
+    });
     expect(
       updateCombo(database, {
         comboId: combo.id,
@@ -123,7 +136,9 @@ describe('administration renames', () => {
         active: true,
       }),
     ).toMatchObject({ id: lot.id, name: 'Lote VIP', priceCents: 2500 });
-    expect(updateFoodSupplier(database, { supplierId: supplier.id, name: 'Fornecedor VIP' })).toMatchObject({
+    expect(
+      updateFoodSupplier(database, { supplierId: supplier.id, name: 'Fornecedor VIP' }),
+    ).toMatchObject({
       id: supplier.id,
       name: 'Fornecedor VIP',
     });

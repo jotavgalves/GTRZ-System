@@ -78,9 +78,15 @@ export function useExpenses(): ExpenseViewState {
     [run],
   );
 
-  const recordPayment = useCallback(async (input: RecordExpensePaymentInput): Promise<void> => {
-    await run(() => window.gtrz.expenses.recordPayment(input), 'Pagamento registrado no livro financeiro.');
-  }, [run]);
+  const recordPayment = useCallback(
+    async (input: RecordExpensePaymentInput): Promise<void> => {
+      await run(
+        () => window.gtrz.expenses.recordPayment(input),
+        'Pagamento registrado no livro financeiro.',
+      );
+    },
+    [run],
+  );
 
   const updateExpense = useCallback(
     async (input: UpdateExpenseInput): Promise<void> => {

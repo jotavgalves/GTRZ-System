@@ -148,11 +148,13 @@ export function ProductForm(props: ProductFormProps): React.JSX.Element {
       .getState()
       .then((next) => {
         setFoodState(next);
-        setSupplierId(
-          (current) => current || next.suppliers.find((supplier) => supplier.active)?.id || '',
+        setSupplierId((current) =>
+          current !== '' ? current : (next.suppliers.find((supplier) => supplier.active)?.id ?? ''),
         );
       })
-      .catch(() => setFoodState(null));
+      .catch(() => {
+        setFoodState(null);
+      });
   }, [props.product, usesFoodEngine]);
 
   async function handleSubmit(event: SyntheticEvent<HTMLFormElement>): Promise<void> {
@@ -239,7 +241,9 @@ export function ProductForm(props: ProductFormProps): React.JSX.Element {
           <span className="switch-field">
             <input
               checked={comboOnly}
-              onChange={(event) => setComboOnly(event.target.checked)}
+              onChange={(event) => {
+                setComboOnly(event.target.checked);
+              }}
               type="checkbox"
             />
             <span aria-hidden="true" className="switch-field__track" />
@@ -270,12 +274,14 @@ export function ProductForm(props: ProductFormProps): React.JSX.Element {
           <label className="form-field">
             <span>Fornecedor</span>
             <select
-              onChange={(event) => setSupplierId(event.target.value)}
+              onChange={(event) => {
+                setSupplierId(event.target.value);
+              }}
               required
               value={supplierId}
             >
               <option value="">Selecione</option>
-              {foodState?.suppliers
+              {foodState.suppliers
                 .filter((supplier) => supplier.active)
                 .map((supplier) => (
                   <option key={supplier.id} value={supplier.id}>
@@ -307,7 +313,9 @@ export function ProductForm(props: ProductFormProps): React.JSX.Element {
             <span>Quantidade recebida</span>
             <input
               min="1"
-              onChange={(event) => setInitialQuantity(event.target.value)}
+              onChange={(event) => {
+                setInitialQuantity(event.target.value);
+              }}
               required
               step="1"
               type="number"
@@ -337,7 +345,9 @@ export function ProductForm(props: ProductFormProps): React.JSX.Element {
             <input
               inputMode="decimal"
               min="0"
-              onChange={(event) => setSupplierUnit(event.target.value)}
+              onChange={(event) => {
+                setSupplierUnit(event.target.value);
+              }}
               placeholder="0,00"
               required
               step="0.01"
@@ -368,7 +378,9 @@ export function ProductForm(props: ProductFormProps): React.JSX.Element {
             <input
               inputMode="decimal"
               min="0"
-              onChange={(event) => setCommissionUnit(event.target.value)}
+              onChange={(event) => {
+                setCommissionUnit(event.target.value);
+              }}
               placeholder="0,00"
               required
               step="0.01"

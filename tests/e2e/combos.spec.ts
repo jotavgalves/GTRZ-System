@@ -1,6 +1,11 @@
 import { expect, test } from '@playwright/test';
 
-import { activateEvent, closeElectronApplication, createInventoryCategory, launchElectronApplication } from './electron-app';
+import {
+  activateEvent,
+  closeElectronApplication,
+  createInventoryCategory,
+  launchElectronApplication,
+} from './electron-app';
 
 test('SMK-CMB-001 — calcula combo pelo estoque dos componentes e protege custos no Caixa', async () => {
   const electronApplication = await launchElectronApplication();

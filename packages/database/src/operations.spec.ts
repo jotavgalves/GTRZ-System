@@ -348,16 +348,22 @@ describe('event operations database', () => {
     const mesaA = createServicePoint(database, { label: 'Mesa A', type: 'table' });
     const mesaB = createServicePoint(database, { label: 'Mesa B', type: 'table' });
 
-    expect(renameServicePoint(database, { servicePointId: mesaB.id, label: 'Mesa VIP' })).toMatchObject({
+    expect(
+      renameServicePoint(database, { servicePointId: mesaB.id, label: 'Mesa VIP' }),
+    ).toMatchObject({
       id: mesaB.id,
       label: 'Mesa VIP',
     });
-    expect(setServicePointPinned(database, { servicePointId: mesaB.id, pinned: true })).toMatchObject({
+    expect(
+      setServicePointPinned(database, { servicePointId: mesaB.id, pinned: true }),
+    ).toMatchObject({
       id: mesaB.id,
       pinned: true,
     });
 
-    const tables = getOperationState(database).servicePoints.filter((point) => point.type === 'table');
+    const tables = getOperationState(database).servicePoints.filter(
+      (point) => point.type === 'table',
+    );
     expect(tables.map((point) => point.id)).toEqual([mesaB.id, mesaA.id]);
     database.close();
   });

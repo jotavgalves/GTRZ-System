@@ -285,7 +285,6 @@ export function VoucherCard({
               </button>
             </div>
           </div>
-
         </div>
       ) : null}
 

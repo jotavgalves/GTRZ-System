@@ -3,9 +3,7 @@ import { appendAudit } from './audit';
 import { getSessionState } from './control';
 import { createInventoryProduct, recordStockMovement } from './inventory';
 import { cancelOrder } from './operation-cancellation';
-import { buildStockRequirements } from './operation-stock';
 import { deleteInventoryProduct } from './product-administration';
-import type { DatabaseOrderItem } from './operation-types';
 import type { DatabaseContext } from './types';
 
 export type DatabaseFoodSupplierMode = 'gtrz' | 'external';
@@ -55,14 +53,14 @@ function listSuppliers(
       .prepare(
         'SELECT id,event_id,name,active,created_at,updated_at FROM food_suppliers WHERE event_id=? ORDER BY active DESC,name COLLATE NOCASE',
       )
-      .all(eventId) as Array<{
+      .all(eventId) as {
       id: string;
       event_id: string;
       name: string;
       active: number;
       created_at: number;
       updated_at: number;
-    }>
+    }[]
   ).map((row) => ({
     id: row.id,
     eventId: row.event_id,
@@ -85,7 +83,7 @@ export function getFoodState(database: DatabaseContext): DatabaseFoodState {
     .prepare(
       `SELECT p.id product_id,p.name,fs.name supplier_name,COALESCE(SUM(s.quantity),0) sold_quantity,COALESCE(SUM(s.received_cents),0) received_cents,COALESCE(SUM(s.supplier_cents),0) supplier_cents,COALESCE(SUM(s.commission_cents),0) commission_cents FROM products p INNER JOIN food_product_terms t ON t.product_id=p.id AND t.event_id=? INNER JOIN food_suppliers fs ON fs.id=t.supplier_id LEFT JOIN food_sale_settlements s ON s.product_id=p.id AND s.event_id=? GROUP BY p.id,p.name,fs.name ORDER BY p.name COLLATE NOCASE`,
     )
-    .all(eventId, eventId) as Array<{
+    .all(eventId, eventId) as {
     product_id: string;
     name: string;
     supplier_name: string | null;
@@ -93,7 +91,7 @@ export function getFoodState(database: DatabaseContext): DatabaseFoodState {
     received_cents: number;
     supplier_cents: number;
     commission_cents: number;
-  }>;
+  }[];
   const items = rows.map((row) => ({
     productId: row.product_id,
     name: row.name,
@@ -177,7 +175,9 @@ export function createFoodSupplier(
       details: { name },
     });
   })();
-  return listSuppliers(database, eventId).find((supplier) => supplier.id === id)!;
+  const supplier = listSuppliers(database, eventId).find((item) => item.id === id);
+  if (supplier === undefined) throw new Error('O fornecedor criado não pôde ser localizado.');
+  return supplier;
 }
 
 export function updateFoodSupplier(
@@ -202,7 +202,9 @@ export function updateFoodSupplier(
     eventId,
     details: { name },
   });
-  return listSuppliers(database, eventId).find((item) => item.id === input.supplierId)!;
+  const supplier = listSuppliers(database, eventId).find((item) => item.id === input.supplierId);
+  if (supplier === undefined) throw new Error('O fornecedor atualizado não pôde ser localizado.');
+  return supplier;
 }
 
 export function archiveFoodSupplier(database: DatabaseContext, supplierId: string): void {
@@ -375,43 +377,4 @@ export function createExternalFoodItem(
     });
   })();
   return getFoodState(database);
-}
-
-export function recordExternalFoodSettlements(
-  database: DatabaseContext,
-  eventId: string,
-  orderId: string,
-  items: readonly DatabaseOrderItem[],
-  now: number,
-): void {
-  const requirements = buildStockRequirements(database, items);
-  const termForProduct = database.sqlite.prepare(
-    `SELECT supplier_unit_cents, commission_unit_cents FROM food_product_terms WHERE event_id=? AND product_id=?`,
-  );
-  const insert = database.sqlite.prepare(
-    `INSERT OR IGNORE INTO food_sale_settlements (id,event_id,order_id,product_id,quantity,received_cents,supplier_cents,commission_cents,created_at) VALUES (?,?,?,?,?,?,?,?,?)`,
-  );
-  for (const requirement of requirements) {
-    const term = termForProduct.get(eventId, requirement.productId) as
-      | { supplier_unit_cents: number; commission_unit_cents: number }
-      | undefined;
-    if (term === undefined) continue;
-    const supplierCents = term.supplier_unit_cents * requirement.quantity;
-    const commissionCents = term.commission_unit_cents * requirement.quantity;
-    insert.run(
-      randomUUID(),
-      eventId,
-      orderId,
-      requirement.productId,
-      requirement.quantity,
-      supplierCents + commissionCents,
-      supplierCents,
-      commissionCents,
-      now,
-    );
-  }
-}
-
-export function clearExternalFoodSettlements(database: DatabaseContext, orderId: string): void {
-  database.sqlite.prepare('DELETE FROM food_sale_settlements WHERE order_id=?').run(orderId);
 }

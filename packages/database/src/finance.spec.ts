@@ -113,7 +113,9 @@ describe('cash and expenses database', () => {
       amountCents: 300,
       paymentMethod: 'cash',
     });
-    const cashExpense = getExpenseState(database).expenses.find((expense) => expense.description === 'Gelo emergencial');
+    const cashExpense = getExpenseState(database).expenses.find(
+      (expense) => expense.description === 'Gelo emergencial',
+    );
     if (cashExpense === undefined) throw new Error('Despesa não criada.');
     recordExpensePayment(database, { expenseId: cashExpense.id, method: 'cash', amountCents: 300 });
     createExpense(database, {
@@ -156,11 +158,19 @@ describe('cash and expenses database', () => {
     expect(expense.paymentStatus).toBe('open');
     expect(getCashState(database).projectedResultCents).toBe(-1200);
 
-    const partial = recordExpensePayment(database, { expenseId: expense.id, method: 'pix', amountCents: 400 });
+    const partial = recordExpensePayment(database, {
+      expenseId: expense.id,
+      method: 'pix',
+      amountCents: 400,
+    });
     expect(partial.paymentStatus).toBe('partial');
     expect(getCashState(database).projectedResultCents).toBe(-1200);
 
-    const paid = recordExpensePayment(database, { expenseId: expense.id, method: 'pix', amountCents: 800 });
+    const paid = recordExpensePayment(database, {
+      expenseId: expense.id,
+      method: 'pix',
+      amountCents: 800,
+    });
     expect(paid.paymentStatus).toBe('paid');
     expect(getCashState(database).projectedResultCents).toBe(-1200);
     database.close();
@@ -257,12 +267,12 @@ describe('cash and expenses database', () => {
         paymentStatus: 'paid',
       }),
     ).toThrow('não pode ser menor que os pagamentos reais');
-    expect(() => cancelExpense(database, { expenseId: paid.id, reason: 'Erro de lançamento' })).toThrow(
-      'Registre o estorno financeiro antes',
-    );
-    expect(() => deleteExpense(database, { expenseId: paid.id, reason: 'Erro de lançamento' })).toThrow(
-      'Registre o estorno financeiro antes',
-    );
+    expect(() =>
+      cancelExpense(database, { expenseId: paid.id, reason: 'Erro de lançamento' }),
+    ).toThrow('Registre o estorno financeiro antes');
+    expect(() =>
+      deleteExpense(database, { expenseId: paid.id, reason: 'Erro de lançamento' }),
+    ).toThrow('Registre o estorno financeiro antes');
     expect(getCashState(database)).toMatchObject({
       activeExpensesCents: 300,
       paidExpensesCents: 300,

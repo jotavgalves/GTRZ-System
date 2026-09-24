@@ -9,8 +9,8 @@ import type {
   UpdatePrintingSettingsInput,
 } from '@gtrz/contracts';
 import type { DatabaseContext } from '@gtrz/database';
-import type { DatabaseOrderReceipt } from '@gtrz/database/printing';
 import {
+  type DatabaseOrderReceipt,
   getOrderReceipt,
   getPrintingSettings,
   updatePrintingSettings,

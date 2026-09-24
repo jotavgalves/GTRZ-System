@@ -44,14 +44,13 @@ export function CatalogPanel({ items, busy, onAdd }: CatalogPanelProps): React.J
     setChoiceQuantities((current) => ({ ...current, [key]: Math.max(0, next) }));
   };
   const validChoices =
-    pendingChoiceItem !== null &&
-    pendingChoiceItem.choiceGroups.every((group) => {
+    pendingChoiceItem?.choiceGroups.every((group) => {
       const chosen = group.options.reduce(
         (total, option) => total + (choiceQuantities[`${group.id}:${option.productId}`] ?? 0),
         0,
       );
       return chosen === group.quantity;
-    });
+    }) === true;
 
   return (
     <article className="panel operation-catalog">
@@ -94,7 +93,9 @@ export function CatalogPanel({ items, busy, onAdd }: CatalogPanelProps): React.J
               className="catalog-item"
               disabled={busy || !available}
               key={`${item.kind}-${item.id}`}
-              onClick={() => beginAdd(item)}
+              onClick={() => {
+                beginAdd(item);
+              }}
               type="button"
             >
               <ProductVisual
@@ -134,7 +135,9 @@ export function CatalogPanel({ items, busy, onAdd }: CatalogPanelProps): React.J
               aria-label="Fechar escolhas do combo"
               className="icon-button"
               disabled={busy}
-              onClick={() => setPendingChoiceItem(null)}
+              onClick={() => {
+                setPendingChoiceItem(null);
+              }}
               type="button"
             >
               <X size={18} aria-hidden="true" />
@@ -167,7 +170,9 @@ export function CatalogPanel({ items, busy, onAdd }: CatalogPanelProps): React.J
                           aria-label={`Remover ${option.productName}`}
                           className="icon-button"
                           disabled={busy || quantity === 0}
-                          onClick={() => updateChoice(key, quantity - 1)}
+                          onClick={() => {
+                            updateChoice(key, quantity - 1);
+                          }}
                           type="button"
                         >
                           <Minus size={15} aria-hidden="true" />
@@ -177,7 +182,9 @@ export function CatalogPanel({ items, busy, onAdd }: CatalogPanelProps): React.J
                           aria-label={`Adicionar ${option.productName}`}
                           className="icon-button"
                           disabled={busy || !canIncrease}
-                          onClick={() => updateChoice(key, quantity + 1)}
+                          onClick={() => {
+                            updateChoice(key, quantity + 1);
+                          }}
                           type="button"
                         >
                           <Plus size={15} aria-hidden="true" />
@@ -193,7 +200,9 @@ export function CatalogPanel({ items, busy, onAdd }: CatalogPanelProps): React.J
             <button
               className="button button--ghost"
               disabled={busy}
-              onClick={() => setPendingChoiceItem(null)}
+              onClick={() => {
+                setPendingChoiceItem(null);
+              }}
               type="button"
             >
               Cancelar
@@ -210,9 +219,9 @@ export function CatalogPanel({ items, busy, onAdd }: CatalogPanelProps): React.J
                       : [{ choiceGroup: group.id, productId: option.productId, quantity }];
                   }),
                 );
-                void onAdd(pendingChoiceItem, componentSelections).then(() =>
-                  setPendingChoiceItem(null),
-                );
+                void onAdd(pendingChoiceItem, componentSelections).then(() => {
+                  setPendingChoiceItem(null);
+                });
               }}
               type="button"
             >

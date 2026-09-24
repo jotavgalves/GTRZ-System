@@ -67,7 +67,9 @@ function count(database: DatabaseContext, table: string, eventId: string): numbe
         ? 'order_id IN (SELECT id FROM orders WHERE event_id = ?)'
         : 'event_id = ?';
   return (
-    database.sqlite.prepare(`SELECT COUNT(*) AS amount FROM ${table} WHERE ${eventPredicate}`).get(eventId) as {
+    database.sqlite
+      .prepare(`SELECT COUNT(*) AS amount FROM ${table} WHERE ${eventPredicate}`)
+      .get(eventId) as {
       readonly amount: number;
     }
   ).amount;
@@ -120,9 +122,9 @@ describe('deletion integrity', () => {
       itemId: productId,
       quantity: 1,
     });
-    expect(() => bindOrderVoucher(database, { orderId: wrongOrder.id, code: voucher.code })).toThrow(
-      'só pode ser utilizado em Mesa Voucher A',
-    );
+    expect(() =>
+      bindOrderVoucher(database, { orderId: wrongOrder.id, code: voucher.code }),
+    ).toThrow('só pode ser utilizado em Mesa Voucher A');
 
     const paidOrder = openOrder(database, tableA.id);
     addOrderItem(database, {
@@ -210,7 +212,10 @@ describe('deletion integrity', () => {
       }),
     ).toMatchObject({ servicePointId: replacement.id, servicePointActive: true });
 
-    const tableToReverse = createServicePoint(database, { label: 'Mesa com estorno', type: 'table' });
+    const tableToReverse = createServicePoint(database, {
+      label: 'Mesa com estorno',
+      type: 'table',
+    });
     const reversalVoucher = createManagedVoucher(database, {
       code: 'MESA-ESTORNO',
       label: 'Voucher a estornar',
@@ -263,7 +268,9 @@ describe('deletion integrity', () => {
       deleteExpense(database, { expenseId: expense.id, reason: 'Lançamento duplicado' }),
     ).toThrow('Registre o estorno financeiro antes');
     expect(
-      database.sqlite.prepare('SELECT id FROM expense_payments WHERE expense_id = ?').all(expense.id),
+      database.sqlite
+        .prepare('SELECT id FROM expense_payments WHERE expense_id = ?')
+        .all(expense.id),
     ).toHaveLength(1);
     expect(verifyDatabaseIntegrity(database)).toBe(true);
   });
@@ -287,7 +294,12 @@ describe('deletion integrity', () => {
     if (productId === undefined) throw new Error('Produto externo não foi criado.');
     const table = createServicePoint(database, { label: 'Mesa fornecedor', type: 'table' });
     const order = openOrder(database, table.id);
-    addOrderItem(database, { orderId: order.id, itemKind: 'product', itemId: productId, quantity: 1 });
+    addOrderItem(database, {
+      orderId: order.id,
+      itemKind: 'product',
+      itemId: productId,
+      quantity: 1,
+    });
     closeOrder(database, {
       orderId: order.id,
       discountCents: 0,
@@ -309,9 +321,17 @@ describe('deletion integrity', () => {
     });
     expect(getOrder(database, order.id).status).toBe('cancelled');
     expect(getStock(database, event.id, productId)).toBe(0);
-    expect(database.sqlite.prepare('SELECT id FROM products WHERE id = ?').get(productId)).toBeUndefined();
-    expect(database.sqlite.prepare('SELECT id FROM food_suppliers WHERE id = ?').get(supplier.id)).toBeUndefined();
-    expect(database.sqlite.prepare('SELECT id FROM food_sale_settlements WHERE order_id = ?').all(order.id)).toHaveLength(0);
+    expect(
+      database.sqlite.prepare('SELECT id FROM products WHERE id = ?').get(productId),
+    ).toBeUndefined();
+    expect(
+      database.sqlite.prepare('SELECT id FROM food_suppliers WHERE id = ?').get(supplier.id),
+    ).toBeUndefined();
+    expect(
+      database.sqlite
+        .prepare('SELECT id FROM food_sale_settlements WHERE order_id = ?')
+        .all(order.id),
+    ).toHaveLength(0);
     expect(verifyDatabaseIntegrity(database)).toBe(true);
   });
 
@@ -339,14 +359,21 @@ describe('deletion integrity', () => {
       reason: 'Produto de teste removido',
     });
     deleteProductCategory(database, category.id);
-    expect(database.sqlite.prepare('SELECT id FROM products WHERE id = ?').get(product.id)).toBeUndefined();
-    expect(database.sqlite.prepare('SELECT id FROM product_categories WHERE id = ?').get(category.id)).toBeUndefined();
+    expect(
+      database.sqlite.prepare('SELECT id FROM products WHERE id = ?').get(product.id),
+    ).toBeUndefined();
+    expect(
+      database.sqlite.prepare('SELECT id FROM product_categories WHERE id = ?').get(category.id),
+    ).toBeUndefined();
     expect(verifyDatabaseIntegrity(database)).toBe(true);
   });
 
   it('fully resets and permanently deletes an event containing vouchers, food, tickets and financial ledger data', async () => {
     const database = await createTemporaryDatabase();
-    const event = createEvent(database, { name: 'Evento completo removível', startsAt: Date.now() });
+    const event = createEvent(database, {
+      name: 'Evento completo removível',
+      startsAt: Date.now(),
+    });
     const foodCategory = createProductCategory(database, 'Categoria comida removível', 'food');
     configureFood(database, { supplierMode: 'external' });
     const supplier = createFoodSupplier(database, { name: 'Fornecedor removível' });
@@ -369,7 +396,12 @@ describe('deletion integrity', () => {
       servicePointId: table.id,
     });
     const order = openOrder(database, table.id);
-    addOrderItem(database, { orderId: order.id, itemKind: 'product', itemId: foodProductId, quantity: 1 });
+    addOrderItem(database, {
+      orderId: order.id,
+      itemKind: 'product',
+      itemId: foodProductId,
+      quantity: 1,
+    });
     bindOrderVoucher(database, { orderId: order.id, code: voucher.code });
     closeOrder(database, {
       orderId: order.id,
@@ -394,7 +426,11 @@ describe('deletion integrity', () => {
       method: 'pix',
       amountCents: 200,
     });
-    const lot = createTicketLot(database, { name: 'Lote removível', priceCents: 1500, capacity: 4 });
+    const lot = createTicketLot(database, {
+      name: 'Lote removível',
+      priceCents: 1500,
+      capacity: 4,
+    });
     createTicketSale(database, {
       lotId: lot.id,
       attendeeName: 'Cliente de teste',
@@ -437,14 +473,21 @@ describe('deletion integrity', () => {
     ).toHaveLength(0);
     expect(verifyDatabaseIntegrity(database)).toBe(true);
 
-    const secondEvent = createEvent(database, { name: 'Evento exclusão completa', startsAt: Date.now() + 1 });
+    const secondEvent = createEvent(database, {
+      name: 'Evento exclusão completa',
+      startsAt: Date.now() + 1,
+    });
     const secondExpense = createExpense(database, {
       category: 'Operação',
       description: 'Despesa com vínculo financeiro',
       amountCents: 500,
       paymentMethod: 'pix',
     });
-    recordExpensePayment(database, { expenseId: secondExpense.id, method: 'pix', amountCents: 500 });
+    recordExpensePayment(database, {
+      expenseId: secondExpense.id,
+      method: 'pix',
+      amountCents: 500,
+    });
     const secondContribution = createCapitalContribution(database, {
       contributorName: 'Aporte para exclusão',
       kind: 'cash',
@@ -461,7 +504,9 @@ describe('deletion integrity', () => {
       confirmationName: secondEvent.name,
       reason: 'Teste de exclusão completa com dependências',
     });
-    expect(database.sqlite.prepare('SELECT id FROM events WHERE id = ?').get(secondEvent.id)).toBeUndefined();
+    expect(
+      database.sqlite.prepare('SELECT id FROM events WHERE id = ?').get(secondEvent.id),
+    ).toBeUndefined();
     for (const tableName of [
       'expenses',
       'expense_payments',

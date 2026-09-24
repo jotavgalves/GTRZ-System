@@ -11,7 +11,7 @@ const EMPTY_PERMISSIONS: MobilePermissions = {
   vouchers: false,
 };
 
-const PERMISSION_LABELS: ReadonlyArray<readonly [keyof MobilePermissions, string]> = [
+const PERMISSION_LABELS: readonly (readonly [keyof MobilePermissions, string])[] = [
   ['sales', 'Vendas'],
   ['inventory', 'Estoque'],
   ['tickets', 'Ingressos'],
@@ -21,7 +21,9 @@ const PERMISSION_LABELS: ReadonlyArray<readonly [keyof MobilePermissions, string
 
 function formatLastSeen(timestamp: number | null): string {
   if (timestamp === null) return 'Nunca acessou';
-  return new Intl.DateTimeFormat('pt-BR', { dateStyle: 'short', timeStyle: 'short' }).format(timestamp);
+  return new Intl.DateTimeFormat('pt-BR', { dateStyle: 'short', timeStyle: 'short' }).format(
+    timestamp,
+  );
 }
 
 function enabledPermissions(permissions: MobilePermissions): string {
@@ -36,7 +38,12 @@ interface PermissionSwitchesProps {
   readonly permissions: MobilePermissions;
 }
 
-function PermissionSwitches({ disabled = false, idPrefix, onChange, permissions }: PermissionSwitchesProps): React.JSX.Element {
+function PermissionSwitches({
+  disabled = false,
+  idPrefix,
+  onChange,
+  permissions,
+}: PermissionSwitchesProps): React.JSX.Element {
   return (
     <div className="mobile-permission-switches" aria-label="Permissões mobile">
       {PERMISSION_LABELS.map(([key, label]) => {
@@ -48,7 +55,9 @@ function PermissionSwitches({ disabled = false, idPrefix, onChange, permissions 
               checked={permissions[key]}
               disabled={disabled}
               id={inputId}
-              onChange={(event) => onChange({ ...permissions, [key]: event.target.checked })}
+              onChange={(event) => {
+                onChange({ ...permissions, [key]: event.target.checked });
+              }}
               type="checkbox"
             />
             <i aria-hidden="true" />
@@ -65,7 +74,10 @@ export function MobileOperatorsPanel(): React.JSX.Element {
   const [submitting, setSubmitting] = useState(false);
   const [name, setName] = useState('');
   const [password, setPassword] = useState('');
-  const [permissions, setPermissions] = useState<MobilePermissions>({ ...EMPTY_PERMISSIONS, sales: true });
+  const [permissions, setPermissions] = useState<MobilePermissions>({
+    ...EMPTY_PERMISSIONS,
+    sales: true,
+  });
   const [editing, setEditing] = useState<MobileOperator | null>(null);
   const [editName, setEditName] = useState('');
   const [editPassword, setEditPassword] = useState('');
@@ -79,13 +91,19 @@ export function MobileOperatorsPanel(): React.JSX.Element {
       setOperators(await window.gtrz.settings.listMobileOperators());
       setError(null);
     } catch (loadError: unknown) {
-      setError(loadError instanceof Error ? loadError.message : 'Não foi possível carregar os perfis móveis.');
+      setError(
+        loadError instanceof Error
+          ? loadError.message
+          : 'Não foi possível carregar os perfis móveis.',
+      );
     } finally {
       setLoading(false);
     }
   }, []);
 
-  useEffect(() => { void load(); }, [load]);
+  useEffect(() => {
+    void load();
+  }, [load]);
 
   async function createOperator(event: SyntheticEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
@@ -100,22 +118,37 @@ export function MobileOperatorsPanel(): React.JSX.Element {
       setMessage('Perfil criado. As permissões já estão disponíveis no celular.');
       await load();
     } catch (createError: unknown) {
-      setError(createError instanceof Error ? createError.message : 'Não foi possível criar o perfil.');
+      setError(
+        createError instanceof Error ? createError.message : 'Não foi possível criar o perfil.',
+      );
     } finally {
       setSubmitting(false);
     }
   }
 
-  async function updateOperator(operator: MobileOperator, changes: { readonly name?: string; readonly password?: string; readonly permissions?: MobilePermissions; readonly active?: boolean }): Promise<boolean> {
+  async function updateOperator(
+    operator: MobileOperator,
+    changes: {
+      readonly name?: string;
+      readonly password?: string;
+      readonly permissions?: MobilePermissions;
+      readonly active?: boolean;
+    },
+  ): Promise<boolean> {
     setError(null);
     setUpdatingOperatorId(operator.id);
     try {
-      const updated = await window.gtrz.settings.updateMobileOperator({ operatorId: operator.id, ...changes });
-      setOperators((current) => current.map((item) => item.id === updated.id ? updated : item));
-      setEditing((current) => current?.id === updated.id ? updated : current);
+      const updated = await window.gtrz.settings.updateMobileOperator({
+        operatorId: operator.id,
+        ...changes,
+      });
+      setOperators((current) => current.map((item) => (item.id === updated.id ? updated : item)));
+      setEditing((current) => (current?.id === updated.id ? updated : current));
       return true;
     } catch (updateError: unknown) {
-      setError(updateError instanceof Error ? updateError.message : 'Não foi possível atualizar o perfil.');
+      setError(
+        updateError instanceof Error ? updateError.message : 'Não foi possível atualizar o perfil.',
+      );
       return false;
     } finally {
       setUpdatingOperatorId(null);
@@ -143,16 +176,28 @@ export function MobileOperatorsPanel(): React.JSX.Element {
   async function requirePassword(operator: MobileOperator): Promise<void> {
     setError(null);
     try {
-      await window.gtrz.settings.endMobileOperatorSessions({ operatorId: operator.id, reason: 'password-required' });
+      await window.gtrz.settings.endMobileOperatorSessions({
+        operatorId: operator.id,
+        reason: 'password-required',
+      });
       setMessage(`Nova senha exigida para ${operator.name}.`);
       await load();
     } catch (sessionError: unknown) {
-      setError(sessionError instanceof Error ? sessionError.message : 'Não foi possível encerrar a sessão.');
+      setError(
+        sessionError instanceof Error
+          ? sessionError.message
+          : 'Não foi possível encerrar a sessão.',
+      );
     }
   }
 
   async function deleteOperator(operator: MobileOperator): Promise<void> {
-    if (!window.confirm(`Excluir o perfil mobile de ${operator.name}? As sessões dele serão encerradas.`)) return;
+    if (
+      !window.confirm(
+        `Excluir o perfil mobile de ${operator.name}? As sessões dele serão encerradas.`,
+      )
+    )
+      return;
     setError(null);
     try {
       await window.gtrz.settings.deleteMobileOperator({ operatorId: operator.id });
@@ -160,7 +205,9 @@ export function MobileOperatorsPanel(): React.JSX.Element {
       setMessage(`Perfil de ${operator.name} excluído.`);
       await load();
     } catch (deleteError: unknown) {
-      setError(deleteError instanceof Error ? deleteError.message : 'Não foi possível excluir o perfil.');
+      setError(
+        deleteError instanceof Error ? deleteError.message : 'Não foi possível excluir o perfil.',
+      );
     }
   }
 
@@ -174,31 +221,174 @@ export function MobileOperatorsPanel(): React.JSX.Element {
 
   return (
     <section className="panel cloud-mobile-operators">
-      <div className="panel__heading"><UserRoundCheck size={20} aria-hidden="true" /><div><h2>Perfis mobile</h2><p>Permissões e sessões chegam aos celulares conectados em tempo real.</p></div></div>
-      <form className="cloud-mobile-operators__create" onSubmit={(event) => void createOperator(event)}>
-        <label className="form-field"><span>Nome</span><input value={name} onChange={(event) => setName(event.target.value)} minLength={2} maxLength={60} required /></label>
-        <label className="form-field"><span>Senha</span><input value={password} onChange={(event) => setPassword(event.target.value)} minLength={6} maxLength={128} type="password" required /></label>
-        <PermissionSwitches idPrefix="create-mobile-permission" permissions={permissions} onChange={setPermissions} />
-        <button className="button button--primary" disabled={submitting || password.length < 6} type="submit"><ShieldCheck size={17} aria-hidden="true" />Criar perfil</button>
+      <div className="panel__heading">
+        <UserRoundCheck size={20} aria-hidden="true" />
+        <div>
+          <h2>Perfis mobile</h2>
+          <p>Permissões e sessões chegam aos celulares conectados em tempo real.</p>
+        </div>
+      </div>
+      <form
+        className="cloud-mobile-operators__create"
+        onSubmit={(event) => void createOperator(event)}
+      >
+        <label className="form-field">
+          <span>Nome</span>
+          <input
+            value={name}
+            onChange={(event) => {
+              setName(event.target.value);
+            }}
+            minLength={2}
+            maxLength={60}
+            required
+          />
+        </label>
+        <label className="form-field">
+          <span>Senha</span>
+          <input
+            value={password}
+            onChange={(event) => {
+              setPassword(event.target.value);
+            }}
+            minLength={6}
+            maxLength={128}
+            type="password"
+            required
+          />
+        </label>
+        <PermissionSwitches
+          idPrefix="create-mobile-permission"
+          permissions={permissions}
+          onChange={setPermissions}
+        />
+        <button
+          className="button button--primary"
+          disabled={submitting || password.length < 6}
+          type="submit"
+        >
+          <ShieldCheck size={17} aria-hidden="true" />
+          Criar perfil
+        </button>
       </form>
       {error === null ? null : <p className="form-error">{error}</p>}
       {message === null ? null : <p className="form-success">{message}</p>}
       {editing === null ? null : (
         <form className="cloud-mobile-operators__edit" onSubmit={(event) => void saveEdit(event)}>
-          <div><strong>Editar {editing.name}</strong><span>Deixe a senha em branco para mantê-la.</span></div>
-          <label className="form-field"><span>Nome</span><input value={editName} onChange={(event) => setEditName(event.target.value)} minLength={2} maxLength={60} required /></label>
-          <label className="form-field"><span>Nova senha</span><input value={editPassword} onChange={(event) => setEditPassword(event.target.value)} maxLength={128} type="password" /></label>
-          <div className="cloud-mobile-operators__edit-actions"><button className="button button--primary" disabled={submitting || (editPassword.length > 0 && editPassword.length < 6)} type="submit"><Pencil size={16} aria-hidden="true" />Salvar</button><button className="button button--ghost" onClick={() => setEditing(null)} type="button"><X size={16} aria-hidden="true" />Cancelar</button></div>
+          <div>
+            <strong>Editar {editing.name}</strong>
+            <span>Deixe a senha em branco para mantê-la.</span>
+          </div>
+          <label className="form-field">
+            <span>Nome</span>
+            <input
+              value={editName}
+              onChange={(event) => {
+                setEditName(event.target.value);
+              }}
+              minLength={2}
+              maxLength={60}
+              required
+            />
+          </label>
+          <label className="form-field">
+            <span>Nova senha</span>
+            <input
+              value={editPassword}
+              onChange={(event) => {
+                setEditPassword(event.target.value);
+              }}
+              maxLength={128}
+              type="password"
+            />
+          </label>
+          <div className="cloud-mobile-operators__edit-actions">
+            <button
+              className="button button--primary"
+              disabled={submitting || (editPassword.length > 0 && editPassword.length < 6)}
+              type="submit"
+            >
+              <Pencil size={16} aria-hidden="true" />
+              Salvar
+            </button>
+            <button
+              className="button button--ghost"
+              onClick={() => {
+                setEditing(null);
+              }}
+              type="button"
+            >
+              <X size={16} aria-hidden="true" />
+              Cancelar
+            </button>
+          </div>
         </form>
       )}
       <div className="cloud-mobile-operators__list">
         {loading ? <p className="cloud-empty">Carregando perfis da nuvem...</p> : null}
-        {!loading && operators.length === 0 ? <p className="cloud-empty">Nenhum perfil mobile criado.</p> : null}
+        {!loading && operators.length === 0 ? (
+          <p className="cloud-empty">Nenhum perfil mobile criado.</p>
+        ) : null}
         {operators.map((operator) => (
           <article className="cloud-mobile-operator" key={operator.id}>
-            <div className="cloud-mobile-operator__identity"><span className={operator.active ? 'cloud-mobile-operator__status' : 'cloud-mobile-operator__status cloud-mobile-operator__status--inactive'} aria-label={operator.active ? 'Ativo' : 'Desativado'} /><div><strong>{operator.name}</strong><small>{`${enabledPermissions(operator.permissions)} · ${operator.active ? `${String(operator.sessionCount)} sessão(ões)` : 'Desativado'} · ${formatLastSeen(operator.lastSeenAt)}`}</small></div></div>
-            <PermissionSwitches disabled={!operator.active || updatingOperatorId === operator.id} idPrefix={`operator-${operator.id}`} permissions={operator.permissions} onChange={(nextPermissions) => void updateOperator(operator, { permissions: nextPermissions })} />
-            <div className="cloud-mobile-operator__actions"><button className="button button--ghost" onClick={() => openEdit(operator)} type="button" title="Editar perfil"><Pencil size={16} aria-hidden="true" />Editar</button><button className="button button--ghost" onClick={() => void requirePassword(operator)} type="button" title="Exigir senha novamente"><KeyRound size={16} aria-hidden="true" />Senha</button><button className="button button--ghost" onClick={() => void updateOperator(operator, { active: !operator.active })} type="button">{operator.active ? 'Desativar' : 'Ativar'}</button><button className="button button--danger" onClick={() => void deleteOperator(operator)} type="button">Excluir</button></div>
+            <div className="cloud-mobile-operator__identity">
+              <span
+                className={
+                  operator.active
+                    ? 'cloud-mobile-operator__status'
+                    : 'cloud-mobile-operator__status cloud-mobile-operator__status--inactive'
+                }
+                aria-label={operator.active ? 'Ativo' : 'Desativado'}
+              />
+              <div>
+                <strong>{operator.name}</strong>
+                <small>{`${enabledPermissions(operator.permissions)} · ${operator.active ? `${String(operator.sessionCount)} sessão(ões)` : 'Desativado'} · ${formatLastSeen(operator.lastSeenAt)}`}</small>
+              </div>
+            </div>
+            <PermissionSwitches
+              disabled={!operator.active || updatingOperatorId === operator.id}
+              idPrefix={`operator-${operator.id}`}
+              permissions={operator.permissions}
+              onChange={(nextPermissions) =>
+                void updateOperator(operator, { permissions: nextPermissions })
+              }
+            />
+            <div className="cloud-mobile-operator__actions">
+              <button
+                className="button button--ghost"
+                onClick={() => {
+                  openEdit(operator);
+                }}
+                type="button"
+                title="Editar perfil"
+              >
+                <Pencil size={16} aria-hidden="true" />
+                Editar
+              </button>
+              <button
+                className="button button--ghost"
+                onClick={() => void requirePassword(operator)}
+                type="button"
+                title="Exigir senha novamente"
+              >
+                <KeyRound size={16} aria-hidden="true" />
+                Senha
+              </button>
+              <button
+                className="button button--ghost"
+                onClick={() => void updateOperator(operator, { active: !operator.active })}
+                type="button"
+              >
+                {operator.active ? 'Desativar' : 'Ativar'}
+              </button>
+              <button
+                className="button button--danger"
+                onClick={() => void deleteOperator(operator)}
+                type="button"
+              >
+                Excluir
+              </button>
+            </div>
           </article>
         ))}
       </div>

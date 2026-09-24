@@ -31,6 +31,7 @@ import { getPrintingSettings } from '@gtrz/database/printing';
 const CONNECTION_TIMEOUT_MS = 5_000;
 const OUTBOX_INTERVAL_MS = 3_000;
 const STREAM_RECONNECT_MAX_MS = 60_000;
+const CONTROL_HEARTBEAT_INTERVAL_MS = 15_000;
 
 interface AuditRow {
   readonly id: number;
@@ -108,6 +109,7 @@ interface GlobalEventCommand {
   readonly eventId: string;
   readonly eventName: string;
   readonly reason: string | null;
+  readonly createdAt: number;
 }
 
 interface PendingGlobalReset {
@@ -118,7 +120,7 @@ interface PendingGlobalReset {
   readonly targetDeviceIds: readonly string[];
 }
 
-export interface CloudPrintReceipt {
+interface CloudPrintReceipt {
   readonly orderId: string;
   readonly eventName: string;
   readonly servicePointLabel: string;
@@ -169,12 +171,19 @@ interface PrintAgentResult {
 const CATALOG_EVENT_ID = '_catalog';
 const SYNCHRONIZED_ACTIONS = new Set([
   'event.created',
+  'event.renamed',
+  'event.open',
+  'event.closed',
+  'event.archived',
+  'event.deleted-permanently',
   'inventory.category-created',
   'inventory.category-updated',
   'inventory.category-deleted',
   'inventory.product-created',
   'inventory.product-updated',
   'inventory.product-deleted',
+  'combo.created',
+  'combo.updated',
   'inventory.stock-moved',
   'inventory.purchase-lot-corrected',
   'inventory.purchase-lot-voided',
@@ -218,6 +227,23 @@ const SYNCHRONIZED_ACTIONS = new Set([
   'ticket.sale-cancelled',
   'ticket.lot-deleted',
   'ticket.sale-deleted',
+]);
+
+const CATALOG_ACTIONS = new Set([
+  'event.created',
+  'event.renamed',
+  'event.open',
+  'event.closed',
+  'event.archived',
+  'event.deleted-permanently',
+  'inventory.category-created',
+  'inventory.category-updated',
+  'inventory.category-deleted',
+  'inventory.product-created',
+  'inventory.product-updated',
+  'inventory.product-deleted',
+  'combo.created',
+  'combo.updated',
 ]);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -276,7 +302,10 @@ export class CloudSyncService {
   readonly #eventReconnectDelays = new Map<string, number>();
   #controlStream: WebSocket | null = null;
   #controlReconnectTimer: NodeJS.Timeout | null = null;
+  #controlHeartbeatTimer: NodeJS.Timeout | null = null;
   #controlReconnectDelayMs = 1_000;
+  #printQueueInFlight: Promise<void> | null = null;
+  #replicationRunning = true;
   #flushInFlight = false;
   #cloudConnected = false;
   #lastLatencyMs = 0;
@@ -301,12 +330,15 @@ export class CloudSyncService {
   }
 
   stop(): void {
+    this.#replicationRunning = false;
     if (this.#outboxTimer !== null) {
       clearInterval(this.#outboxTimer);
       this.#outboxTimer = null;
     }
     if (this.#controlReconnectTimer !== null) clearTimeout(this.#controlReconnectTimer);
     this.#controlReconnectTimer = null;
+    if (this.#controlHeartbeatTimer !== null) clearInterval(this.#controlHeartbeatTimer);
+    this.#controlHeartbeatTimer = null;
     this.#controlStream?.close();
     this.#controlStream = null;
     for (const timer of this.#eventReconnectTimers.values()) clearTimeout(timer);
@@ -320,6 +352,7 @@ export class CloudSyncService {
     getDatabase: () => DatabaseContext,
     getActiveEventId: () => string | null,
   ): void {
+    this.#replicationRunning = true;
     const flush = (): void => {
       void this.flushOutbox(getDatabase(), getActiveEventId()).catch(() => undefined);
     };
@@ -657,6 +690,7 @@ export class CloudSyncService {
   }
 
   #ensureControlStream(database: DatabaseContext, deviceId: string, pairingKey: string): void {
+    if (this.#controlReconnectTimer !== null) return;
     if (
       this.#controlStream !== null &&
       (this.#controlStream.readyState === WebSocket.OPEN ||
@@ -681,6 +715,7 @@ export class CloudSyncService {
     stream.on('open', () => {
       this.#cloudConnected = true;
       this.#controlReconnectDelayMs = 1_000;
+      this.#startControlHeartbeat(stream, database);
     });
     stream.on('message', () => {
       // The control frame is a push signal. The snapshot is requested only on
@@ -692,11 +727,14 @@ export class CloudSyncService {
       if (this.#controlStream !== stream) return;
       this.#controlStream = null;
       this.#cloudConnected = false;
+      this.#stopControlHeartbeat();
+      if (!this.#replicationRunning) return;
       this.#scheduleControlReconnect(database, deviceId, pairingKey);
     });
   }
 
   #scheduleControlReconnect(database: DatabaseContext, deviceId: string, pairingKey: string): void {
+    if (!this.#replicationRunning) return;
     if (this.#controlReconnectTimer !== null) return;
     const delay = this.#controlReconnectDelayMs;
     this.#controlReconnectDelayMs = Math.min(delay * 2, STREAM_RECONNECT_MAX_MS);
@@ -704,6 +742,31 @@ export class CloudSyncService {
       this.#controlReconnectTimer = null;
       this.#ensureControlStream(database, deviceId, pairingKey);
     }, delay);
+  }
+
+  #startControlHeartbeat(stream: WebSocket, database: DatabaseContext): void {
+    this.#stopControlHeartbeat();
+    const sendHeartbeat = (): void => {
+      if (this.#controlStream !== stream || stream.readyState !== WebSocket.OPEN) return;
+      try {
+        stream.send(
+          JSON.stringify({
+            type: 'global.heartbeat',
+            activeEventId: getSessionState(database).activeEvent?.id ?? null,
+            latencyMs: this.#lastLatencyMs,
+          }),
+        );
+      } catch {
+        // The close handler owns reconnecting a broken control stream.
+      }
+    };
+    sendHeartbeat();
+    this.#controlHeartbeatTimer = setInterval(sendHeartbeat, CONTROL_HEARTBEAT_INTERVAL_MS);
+  }
+
+  #stopControlHeartbeat(): void {
+    if (this.#controlHeartbeatTimer !== null) clearInterval(this.#controlHeartbeatTimer);
+    this.#controlHeartbeatTimer = null;
   }
 
   async #pullGlobalControl(
@@ -734,7 +797,8 @@ export class CloudSyncService {
         typeof candidate.commandId !== 'string' ||
         (candidate.type !== 'event.activated' && candidate.type !== 'event.reset') ||
         typeof candidate.eventId !== 'string' ||
-        typeof candidate.eventName !== 'string'
+        typeof candidate.eventName !== 'string' ||
+        typeof candidate.createdAt !== 'number'
       )
         continue;
       const command: GlobalEventCommand = {
@@ -744,6 +808,7 @@ export class CloudSyncService {
         eventId: candidate.eventId,
         eventName: candidate.eventName,
         reason: typeof candidate.reason === 'string' ? candidate.reason : null,
+        createdAt: candidate.createdAt,
       };
       const appliedKey = `global.event-command:${command.commandId}`;
       const alreadyApplied = database.sqlite
@@ -753,22 +818,29 @@ export class CloudSyncService {
         cursor = Math.max(cursor, command.sequence);
         continue;
       }
-      const event = database.sqlite
+      let event = database.sqlite
         .prepare('SELECT id, name FROM events WHERE id = ?')
         .get(command.eventId) as { readonly id: string; readonly name: string } | undefined;
-      if (event === undefined) {
-        this.#reportConflict({
-          commandId: command.commandId,
-          eventId: command.eventId,
-          deviceId,
-          action: command.type,
-          entityId: command.eventId,
-          reason: 'O evento global ainda não existe nesta cópia local.',
-        });
-      } else if (command.type === 'event.activated') {
+      if (event === undefined && command.type === 'event.activated') {
+        database.sqlite
+          .prepare(
+            `INSERT INTO events (id, name, status, starts_at, ends_at, created_at, updated_at)
+             VALUES (?, ?, 'open', ?, NULL, ?, ?)`,
+          )
+          .run(
+            command.eventId,
+            command.eventName,
+            command.createdAt,
+            command.createdAt,
+            command.createdAt,
+          );
+        event = { id: command.eventId, name: command.eventName };
+      }
+      if (event !== undefined && command.type === 'event.activated') {
         setActiveEvent(database, event.id);
+        this.#ensureEventStreams(database, event.id, deviceId, pairingKey);
         this.#onDataChanged();
-      } else {
+      } else if (event !== undefined) {
         resetEventData(database, {
           eventId: event.id,
           confirmationName: event.name,
@@ -794,7 +866,7 @@ export class CloudSyncService {
         .run(cursorKey, String(cursor), Date.now());
     }
     const pending = this.#pendingReset(payload.pendingReset);
-    if (pending !== null && pending.targetDeviceIds.includes(deviceId)) {
+    if (pending?.targetDeviceIds.includes(deviceId) === true) {
       await this.#prepareResetBackup(database, pairingKey, deviceId, pending);
     }
   }
@@ -854,6 +926,7 @@ export class CloudSyncService {
           'X-GTRZ-Device-Id': deviceId,
           'X-GTRZ-Backup-Sha256': createHash('sha256').update(contents).digest('hex'),
           'X-GTRZ-Backup-Size': String(contents.byteLength),
+          'Content-Length': String(contents.byteLength),
         },
         body: new Uint8Array(contents),
         signal: AbortSignal.timeout(30_000),
@@ -1096,77 +1169,93 @@ export class CloudSyncService {
     activeEventId: string | null,
     deviceId: string,
     pairingKey: string,
-    registerPrinter: boolean,
+  ): Promise<void> {
+    if (this.#printQueueInFlight !== null) return this.#printQueueInFlight;
+    const processing = this.#drainPrintQueue(database, activeEventId, deviceId, pairingKey);
+    this.#printQueueInFlight = processing;
+    try {
+      await processing;
+    } finally {
+      if (this.#printQueueInFlight === processing) this.#printQueueInFlight = null;
+    }
+  }
+
+  async #drainPrintQueue(
+    database: DatabaseContext,
+    activeEventId: string | null,
+    deviceId: string,
+    pairingKey: string,
   ): Promise<void> {
     if (activeEventId === null) return;
     const settings = getPrintingSettings(database);
     const printerName = settings.deviceName ?? '__windows_default__';
     const baseUrl = `${this.#endpoint}/v1/events/${encodeURIComponent(activeEventId)}/print`;
-    if (registerPrinter) {
-      const register = await fetch(`${baseUrl}/printers`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-GTRZ-Key': pairingKey },
-        body: JSON.stringify({
-          deviceId,
-          deviceLabel: settings.machineName,
-          printerName,
-          paperWidthMm: settings.paperWidthMm,
-          enabled: settings.automaticPrinting,
-        }),
-        signal: AbortSignal.timeout(CONNECTION_TIMEOUT_MS),
-      });
-      if (!register.ok) return;
-    }
-    if (!settings.automaticPrinting || this.#printAgent === null) return;
-
-    const claim = await fetch(`${baseUrl}/claim`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-GTRZ-Key': pairingKey },
-      body: JSON.stringify({ deviceId }),
-      signal: AbortSignal.timeout(CONNECTION_TIMEOUT_MS),
-    });
-    if (!claim.ok) return;
-    const payload: unknown = await claim.json();
-    if (!isRecord(payload) || !isRecord(payload.job)) return;
-    const rawJob = payload.job;
-    if (
-      typeof rawJob.jobId !== 'string' ||
-      typeof rawJob.claimToken !== 'string' ||
-      typeof rawJob.printerLabel !== 'string' ||
-      !isRecord(rawJob.document)
-    ) {
-      return;
-    }
-    let result: PrintAgentResult;
-    let completion: 'printed' | 'failed' | 'uncertain' = 'printed';
-    try {
-      result = await this.#printAgent({
-        jobId: rawJob.jobId,
-        claimToken: rawJob.claimToken,
-        printerLabel: rawJob.printerLabel,
-        document: rawJob.document as unknown as CloudPrintReceipt,
-      });
-      if (!result.success) completion = 'failed';
-    } catch (error: unknown) {
-      completion = 'uncertain';
-      result = {
-        success: false,
-        message:
-          error instanceof Error ? error.message : 'O agente de impressão parou sem confirmação.',
-      };
-    }
-    await fetch(`${baseUrl}/complete`, {
+    const register = await fetch(`${baseUrl}/printers`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-GTRZ-Key': pairingKey },
       body: JSON.stringify({
-        jobId: rawJob.jobId,
-        claimToken: rawJob.claimToken,
         deviceId,
-        result: completion,
-        error: result.success ? undefined : result.message,
+        deviceLabel: settings.machineName,
+        printerName,
+        paperWidthMm: settings.paperWidthMm,
+        enabled: settings.automaticPrinting,
       }),
       signal: AbortSignal.timeout(CONNECTION_TIMEOUT_MS),
     });
+    if (!register.ok) return;
+    if (!settings.automaticPrinting || this.#printAgent === null) return;
+
+    for (;;) {
+      const claim = await fetch(`${baseUrl}/claim`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-GTRZ-Key': pairingKey },
+        body: JSON.stringify({ deviceId }),
+        signal: AbortSignal.timeout(CONNECTION_TIMEOUT_MS),
+      });
+      if (!claim.ok) return;
+      const payload: unknown = await claim.json();
+      if (!isRecord(payload) || !isRecord(payload.job)) return;
+      const rawJob = payload.job;
+      if (
+        typeof rawJob.jobId !== 'string' ||
+        typeof rawJob.claimToken !== 'string' ||
+        typeof rawJob.printerLabel !== 'string' ||
+        !isRecord(rawJob.document)
+      ) {
+        return;
+      }
+      let result: PrintAgentResult;
+      let completion: 'printed' | 'failed' | 'uncertain' = 'printed';
+      try {
+        result = await this.#printAgent({
+          jobId: rawJob.jobId,
+          claimToken: rawJob.claimToken,
+          printerLabel: rawJob.printerLabel,
+          document: rawJob.document as unknown as CloudPrintReceipt,
+        });
+        if (!result.success) completion = 'failed';
+      } catch (error: unknown) {
+        completion = 'uncertain';
+        result = {
+          success: false,
+          message:
+            error instanceof Error ? error.message : 'O agente de impressão parou sem confirmação.',
+        };
+      }
+      const complete = await fetch(`${baseUrl}/complete`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-GTRZ-Key': pairingKey },
+        body: JSON.stringify({
+          jobId: rawJob.jobId,
+          claimToken: rawJob.claimToken,
+          deviceId,
+          result: completion,
+          error: result.success ? undefined : result.message,
+        }),
+        signal: AbortSignal.timeout(CONNECTION_TIMEOUT_MS),
+      });
+      if (!complete.ok) return;
+    }
   }
 
   #enqueueNewAudits(database: DatabaseContext, deviceId: string): void {
@@ -1237,7 +1326,9 @@ export class CloudSyncService {
         enqueue.run(
           audit.id,
           payload.commandId,
-          audit.event_id ?? CATALOG_EVENT_ID,
+          CATALOG_ACTIONS.has(audit.action)
+            ? CATALOG_EVENT_ID
+            : (audit.event_id ?? CATALOG_EVENT_ID),
           JSON.stringify(payload),
           Date.now(),
           Date.now(),
@@ -1273,6 +1364,7 @@ export class CloudSyncService {
     pairingKey: string,
     activeEventId: string | null,
   ): void {
+    if (this.#eventReconnectTimers.has(eventId)) return;
     const existing = this.#eventStreams.get(eventId);
     if (
       existing !== undefined &&
@@ -1296,7 +1388,7 @@ export class CloudSyncService {
     stream.on('open', () => {
       this.#eventReconnectDelays.set(eventId, 1_000);
       if (eventId === activeEventId) {
-        void this.#processPrintQueue(database, eventId, deviceId, pairingKey, true).catch(
+        void this.#processPrintQueue(database, eventId, deviceId, pairingKey).catch(
           () => undefined,
         );
       }
@@ -1308,7 +1400,7 @@ export class CloudSyncService {
         return;
       }
       if (result.printQueued && eventId === getSessionState(database).activeEvent?.id) {
-        void this.#processPrintQueue(database, eventId, deviceId, pairingKey, false).catch(
+        void this.#processPrintQueue(database, eventId, deviceId, pairingKey).catch(
           () => undefined,
         );
       }
@@ -1317,6 +1409,7 @@ export class CloudSyncService {
     stream.on('close', () => {
       if (this.#eventStreams.get(eventId) === stream) {
         this.#eventStreams.delete(eventId);
+        if (!this.#replicationRunning) return;
         this.#scheduleEventReconnect(database, eventId, deviceId, pairingKey);
       }
     });
@@ -1371,6 +1464,7 @@ export class CloudSyncService {
     deviceId: string,
     pairingKey: string,
   ): void {
+    if (!this.#replicationRunning) return;
     if (this.#eventReconnectTimers.has(eventId)) return;
     const delay = this.#eventReconnectDelays.get(eventId) ?? 1_000;
     this.#eventReconnectDelays.set(eventId, Math.min(delay * 2, STREAM_RECONNECT_MAX_MS));
@@ -1435,6 +1529,9 @@ export class CloudSyncService {
        (command_id, event_id, sequence, action, entity_id, reason, payload_json, created_at, resolved_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
     );
+    const resolveConflict = database.sqlite.prepare(
+      'UPDATE sync_conflicts SET resolved_at = ? WHERE command_id = ? AND resolved_at IS NULL',
+    );
 
     for (const row of pending) {
       const payload = journalPayload(JSON.parse(row.payload_json) as unknown);
@@ -1470,11 +1567,12 @@ export class CloudSyncService {
         database.sqlite.transaction(() => {
           this.#applyRemoteAction(database, row.event_id, payload);
           markProcessed.run(Date.now(), row.event_id, row.sequence);
+          resolveConflict.run(Date.now(), row.command_id);
         })();
         this.#onDataChanged();
       } catch (error: unknown) {
         const reason = error instanceof Error ? error.message.slice(0, 240) : 'Falha desconhecida.';
-        recordConflict.run(
+        const conflict = recordConflict.run(
           row.command_id,
           row.event_id,
           row.sequence,
@@ -1484,15 +1582,16 @@ export class CloudSyncService {
           row.payload_json,
           Date.now(),
         );
-        this.#reportConflict({
-          commandId: row.command_id,
-          eventId: row.event_id,
-          deviceId,
-          action: payload.action,
-          entityId: payload.entityId,
-          reason,
-        });
-        markProcessed.run(Date.now(), row.event_id, row.sequence);
+        if (conflict.changes > 0) {
+          this.#reportConflict({
+            commandId: row.command_id,
+            eventId: row.event_id,
+            deviceId,
+            action: payload.action,
+            entityId: payload.entityId,
+            reason,
+          });
+        }
       }
     }
 
@@ -1549,6 +1648,52 @@ export class CloudSyncService {
            VALUES (?, ?, 'open', ?, NULL, ?, ?)`,
         )
         .run(payload.entityId, name, startsAt, payload.createdAt, payload.createdAt);
+      return;
+    }
+
+    if (payload.action === 'event.renamed') {
+      const name = stringField(payload.details, 'after');
+      if (payload.entityId === null || name === null)
+        throw new Error('Renomeação remota de evento incompleta.');
+      database.sqlite
+        .prepare('UPDATE events SET name = ?, updated_at = ? WHERE id = ?')
+        .run(name, payload.createdAt, payload.entityId);
+      return;
+    }
+
+    if (
+      payload.action === 'event.open' ||
+      payload.action === 'event.closed' ||
+      payload.action === 'event.archived'
+    ) {
+      if (payload.entityId === null)
+        throw new Error('Alteração remota de evento sem identificador.');
+      const status = payload.action.slice('event.'.length);
+      database.sqlite
+        .prepare('UPDATE events SET status = ?, ends_at = ?, updated_at = ? WHERE id = ?')
+        .run(
+          status,
+          status === 'closed' ? payload.createdAt : null,
+          payload.createdAt,
+          payload.entityId,
+        );
+      return;
+    }
+
+    if (payload.action === 'event.deleted-permanently') {
+      if (payload.entityId === null)
+        throw new Error('Exclusão remota de evento sem identificador.');
+      const event = database.sqlite
+        .prepare('SELECT id, name FROM events WHERE id = ?')
+        .get(payload.entityId) as { readonly id: string; readonly name: string } | undefined;
+      if (event === undefined) return;
+      resetEventData(database, {
+        eventId: event.id,
+        confirmationName: event.name,
+        reason: stringField(payload.details, 'reason') ?? 'Exclusão remota do evento.',
+        system: true,
+      });
+      database.sqlite.prepare('DELETE FROM events WHERE id = ?').run(event.id);
       return;
     }
 
@@ -1625,6 +1770,26 @@ export class CloudSyncService {
           payload.createdAt,
           payload.createdAt,
         );
+      if (typeof payload.details.fallbackIcon === 'string') {
+        database.sqlite
+          .prepare(
+            `INSERT INTO app_meta (key, value, updated_at) VALUES (?, ?, ?)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+          )
+          .run(`product.icon:${payload.entityId}`, payload.details.fallbackIcon, payload.createdAt);
+      }
+      if (typeof payload.details.imageDataUrl === 'string') {
+        database.sqlite
+          .prepare(
+            `INSERT INTO app_meta (key, value, updated_at) VALUES (?, ?, ?)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+          )
+          .run(
+            `product.image:${payload.entityId}`,
+            payload.details.imageDataUrl,
+            payload.createdAt,
+          );
+      }
       return;
     }
 
@@ -1675,6 +1840,99 @@ export class CloudSyncService {
              ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
           )
           .run(`product.icon:${payload.entityId}`, after.fallbackIcon, payload.createdAt);
+      }
+      if (after.imageDataUrl === null) {
+        database.sqlite
+          .prepare('DELETE FROM app_meta WHERE key = ?')
+          .run(`product.image:${payload.entityId}`);
+      } else if (typeof after.imageDataUrl === 'string') {
+        database.sqlite
+          .prepare(
+            `INSERT INTO app_meta (key, value, updated_at) VALUES (?, ?, ?)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+          )
+          .run(`product.image:${payload.entityId}`, after.imageDataUrl, payload.createdAt);
+      }
+      return;
+    }
+
+    if (payload.action === 'combo.created' || payload.action === 'combo.updated') {
+      const details =
+        payload.action === 'combo.created'
+          ? payload.details
+          : isRecord(payload.details.after)
+            ? payload.details.after
+            : null;
+      if (payload.entityId === null || details === null)
+        throw new Error('Dados remotos do combo estão incompletos.');
+      const name = stringField(details, 'name');
+      const salePriceCents = integerField(details, 'salePriceCents');
+      const active = payload.action === 'combo.created' ? true : details.active;
+      const components = details.components;
+      if (
+        name === null ||
+        salePriceCents === null ||
+        salePriceCents < 0 ||
+        typeof active !== 'boolean' ||
+        !Array.isArray(components) ||
+        components.length === 0
+      ) {
+        throw new Error('Dados remotos do combo são inválidos.');
+      }
+      const normalized = components.map((component) => {
+        if (!isRecord(component)) throw new Error('Componente remoto de combo inválido.');
+        const productId = stringField(component, 'productId');
+        const quantity = integerField(component, 'quantity');
+        const choiceGroup = component.choiceGroup === undefined ? null : component.choiceGroup;
+        const choiceLabel = component.choiceLabel === undefined ? null : component.choiceLabel;
+        if (
+          productId === null ||
+          quantity === null ||
+          quantity <= 0 ||
+          (choiceGroup !== null && typeof choiceGroup !== 'string') ||
+          (choiceLabel !== null && typeof choiceLabel !== 'string') ||
+          (choiceGroup === null) !== (choiceLabel === null)
+        ) {
+          throw new Error('Componente remoto de combo inválido.');
+        }
+        const product = database.sqlite
+          .prepare('SELECT id FROM products WHERE id = ?')
+          .get(productId);
+        if (product === undefined)
+          throw new Error('Componente do combo ainda não existe neste computador.');
+        return { productId, quantity, choiceGroup, choiceLabel };
+      });
+      database.sqlite
+        .prepare(
+          `INSERT INTO combos (id, name, sale_price_cents, active, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?)
+           ON CONFLICT(id) DO UPDATE SET name = excluded.name, sale_price_cents = excluded.sale_price_cents,
+             active = excluded.active, updated_at = excluded.updated_at`,
+        )
+        .run(
+          payload.entityId,
+          name,
+          salePriceCents,
+          active ? 1 : 0,
+          payload.createdAt,
+          payload.createdAt,
+        );
+      database.sqlite
+        .prepare('DELETE FROM combo_components WHERE combo_id = ?')
+        .run(payload.entityId);
+      const insert = database.sqlite.prepare(
+        `INSERT INTO combo_components (id, combo_id, product_id, quantity, choice_group, choice_label)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      );
+      for (const component of normalized) {
+        insert.run(
+          randomUUID(),
+          payload.entityId,
+          component.productId,
+          component.quantity,
+          component.choiceGroup,
+          component.choiceLabel,
+        );
       }
       return;
     }
@@ -2144,12 +2402,18 @@ export class CloudSyncService {
 
   #applyRemotePaidOrder(database: DatabaseContext, eventId: string, payload: JournalPayload): void {
     const order = isRecord(payload.details.order) ? payload.details.order : null;
-    const items = Array.isArray(payload.details.items) ? payload.details.items : null;
-    const payments = Array.isArray(payload.details.payments) ? payload.details.payments : null;
-    const movements = Array.isArray(payload.details.stockMovements)
+    const items: readonly unknown[] | null = Array.isArray(payload.details.items)
+      ? payload.details.items
+      : null;
+    const payments: readonly unknown[] | null = Array.isArray(payload.details.payments)
+      ? payload.details.payments
+      : null;
+    const movements: readonly unknown[] | null = Array.isArray(payload.details.stockMovements)
       ? payload.details.stockMovements
       : null;
-    const vouchers = Array.isArray(payload.details.vouchers) ? payload.details.vouchers : null;
+    const vouchers: readonly unknown[] | null = Array.isArray(payload.details.vouchers)
+      ? payload.details.vouchers
+      : null;
     const subtotalCents = integerField(payload.details, 'subtotalCents');
     const discountCents = integerField(payload.details, 'discountCents');
     const totalCents = integerField(payload.details, 'totalCents');
@@ -2187,11 +2451,14 @@ export class CloudSyncService {
         throw new Error('Uso remoto de voucher incompleto.');
       return { code, amountCents };
     });
-    const paymentCents = payments.reduce(
+    const paymentCents = payments.reduce<number>(
       (total, raw) => total + (isRecord(raw) ? (integerField(raw, 'amountCents') ?? 0) : 0),
       0,
     );
-    const voucherCents = voucherUses.reduce((total, voucher) => total + voucher.amountCents, 0);
+    const voucherCents = voucherUses.reduce<number>(
+      (total, voucher) => total + voucher.amountCents,
+      0,
+    );
     if (paymentCents + voucherCents !== totalCents) {
       throw new Error('Os pagamentos e vouchers remotos não somam o total da venda.');
     }
@@ -2851,10 +3118,10 @@ export class CloudSyncService {
       .prepare(
         "SELECT product_id, SUM(quantity) AS quantity FROM stock_movements WHERE event_id = ? AND type = 'sale' AND note = ? GROUP BY product_id",
       )
-      .all(eventId, `Venda da comanda ${payload.entityId}`) as Array<{
+      .all(eventId, `Venda da comanda ${payload.entityId}`) as {
       product_id: string;
       quantity: number;
-    }>;
+    }[];
     for (const row of rows) {
       database.sqlite
         .prepare(

@@ -41,7 +41,8 @@ export function ExpensesPage(): React.JSX.Element {
           <span className="eyebrow">Compromissos financeiros do evento</span>
           <h1>Despesas</h1>
           <p>
-            Compromissos reduzem o resultado; somente pagamentos reais entram na conciliação física do caixa.
+            Compromissos reduzem o resultado; somente pagamentos reais entram na conciliação física
+            do caixa.
           </p>
         </div>
         <button

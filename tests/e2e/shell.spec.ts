@@ -1,6 +1,11 @@
 import { expect, test } from '@playwright/test';
 
-import { activateEvent, closeElectronApplication, createInventoryCategory, launchElectronApplication } from './electron-app';
+import {
+  activateEvent,
+  closeElectronApplication,
+  createInventoryCategory,
+  launchElectronApplication,
+} from './electron-app';
 
 test('SMK-INF-002 — abre o GTRZ System com navegação modular', async () => {
   const electronApplication = await launchElectronApplication();

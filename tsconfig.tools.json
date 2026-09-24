@@ -14,7 +14,8 @@
     "playwright.config.ts",
     "tests/**/*.ts",
     "packages/**/*.spec.ts",
-    "apps/desktop/src/main/database-runtime.ts"
+    "apps/desktop/src/main/database-runtime.ts",
+    "apps/desktop/src/main/cloud-sync-service.ts"
   ],
   "references": [
     { "path": "./packages/contracts/tsconfig.json" },

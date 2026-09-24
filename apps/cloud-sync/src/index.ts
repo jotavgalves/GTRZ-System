@@ -121,7 +121,7 @@ function mobilePermissions(value: unknown): MobilePermissions {
       throw new ApiError(400, 'INVALID_INPUT', 'Permissões móveis inválidas.');
     permissions[key] = value[key];
   }
-  return permissions as MobilePermissions;
+  return permissions;
 }
 
 function storedMobilePermissions(value: unknown, role: unknown): MobilePermissions {
@@ -265,6 +265,14 @@ function parseStoredJson(value: string): JsonRecord {
     throw new Error('Registro persistido em formato inválido.');
   }
 
+  return parsed;
+}
+
+function parseStoredStringArray(value: string): readonly string[] {
+  const parsed: unknown = JSON.parse(value);
+  if (!Array.isArray(parsed) || !parsed.every((item) => typeof item === 'string')) {
+    throw new Error('Lista persistida em formato inválido.');
+  }
   return parsed;
 }
 
@@ -602,11 +610,26 @@ export class MonitorRoom extends DurableObject<Env> {
   }
 
   override webSocketMessage(socket: WebSocket, message: string | ArrayBuffer): void {
-    const attachment = socket.deserializeAttachment() as { readonly kind?: unknown } | null;
+    const attachment = socket.deserializeAttachment() as {
+      readonly kind?: unknown;
+      readonly deviceId?: unknown;
+      readonly label?: unknown;
+    } | null;
     if (attachment?.kind !== 'desktop' || typeof message !== 'string') return;
     try {
       const input: unknown = JSON.parse(message);
-      if (!isRecord(input) || input.type !== 'global.sync') return;
+      if (!isRecord(input)) return;
+      if (input.type === 'global.heartbeat') {
+        if (typeof attachment.deviceId !== 'string' || typeof attachment.label !== 'string') return;
+        this.#heartbeat({
+          deviceId: attachment.deviceId,
+          label: attachment.label,
+          activeEventId: input.activeEventId,
+          latencyMs: input.latencyMs,
+        });
+        return;
+      }
+      if (input.type !== 'global.sync') return;
       const after =
         typeof input.after === 'number' || typeof input.after === 'string'
           ? parseAfter(String(input.after))
@@ -618,12 +641,6 @@ export class MonitorRoom extends DurableObject<Env> {
   }
 
   override webSocketClose(socket: WebSocket): void {
-    const attachment = socket.deserializeAttachment() as { readonly deviceId?: unknown } | null;
-    if (typeof attachment?.deviceId === 'string') {
-      this.ctx.storage.sql
-        .exec('UPDATE devices SET last_seen_at = 0 WHERE device_id = ?', attachment.deviceId)
-        .toArray();
-    }
     socket.close(1000, 'Sessão encerrada.');
   }
 
@@ -646,7 +663,7 @@ export class MonitorRoom extends DurableObject<Env> {
     if (client === undefined || server === undefined) {
       throw new Error('Não foi possível iniciar o canal de controle.');
     }
-    server.serializeAttachment({ kind: 'desktop', deviceId });
+    server.serializeAttachment({ kind: 'desktop', deviceId, label });
     this.ctx.acceptWebSocket(server, ['desktop']);
     this.#heartbeat({ deviceId, label, activeEventId: null, latencyMs: 0 });
     sendSocket(server, { type: 'global.sync', ...this.#globalControl(after) });
@@ -1134,7 +1151,7 @@ export class MonitorRoom extends DurableObject<Env> {
         `SELECT operator_id, name, password_salt, password_hash, role, permissions_json, active, created_at, updated_at, last_seen_at
          FROM mobile_operators WHERE active = 1`,
       )
-      .toArray() as Array<Record<string, unknown>>;
+      .toArray() as Record<string, unknown>[];
     let operator: Record<string, unknown> | null = null;
     for (const row of rows) {
       const candidate = await passwordHash(
@@ -1343,7 +1360,7 @@ export class MonitorRoom extends DurableObject<Env> {
               eventId: storedString(pendingReset.event_id, 'event_id'),
               eventName: storedString(pendingReset.event_name, 'event_name'),
               reason: storedString(pendingReset.reason, 'reason'),
-              targetDeviceIds: parseStoredJson(
+              targetDeviceIds: parseStoredStringArray(
                 storedString(pendingReset.target_device_ids_json, 'target_device_ids_json'),
               ),
               createdAt: Number(pendingReset.created_at),
@@ -1477,13 +1494,13 @@ export class MonitorRoom extends DurableObject<Env> {
         requestId,
       )
       .toArray()[0] as Record<string, unknown> | undefined;
-    if (reset === undefined || reset.status !== 'pending') {
+    if (reset?.status !== 'pending') {
       throw new ApiError(409, 'RESET_NOT_PENDING', 'Esta limpeza não está aguardando backups.');
     }
-    const targets = parseStoredJson(
+    const targets = parseStoredStringArray(
       storedString(reset.target_device_ids_json, 'target_device_ids_json'),
     );
-    if (!Array.isArray(targets) || !targets.includes(deviceId)) {
+    if (!targets.includes(deviceId)) {
       throw new ApiError(
         403,
         'DEVICE_NOT_REQUIRED',
@@ -1522,11 +1539,10 @@ export class MonitorRoom extends DurableObject<Env> {
         requestId,
       )
       .toArray()[0] as Record<string, unknown> | undefined;
-    if (reset === undefined || reset.status !== 'pending') return;
-    const targets = parseStoredJson(
+    if (reset?.status !== 'pending') return;
+    const targets = parseStoredStringArray(
       storedString(reset.target_device_ids_json, 'target_device_ids_json'),
     );
-    if (!Array.isArray(targets) || !targets.every((id) => typeof id === 'string')) return;
     const count = this.ctx.storage.sql
       .exec('SELECT COUNT(*) AS amount FROM global_reset_backups WHERE request_id = ?', requestId)
       .one() as { readonly amount: number };
@@ -1977,7 +1993,7 @@ export class EventRoom extends DurableObject<Env> {
         DELETE FROM mobile_context;
         DELETE FROM print_attempts;
         DELETE FROM print_jobs;
-        UPDATE print_printers SET busy_job_id = NULL, updated_at = ${now};
+        UPDATE print_printers SET busy_job_id = NULL, updated_at = ${String(now)};
         DELETE FROM print_counter;
       `);
     });
@@ -2064,7 +2080,9 @@ export class EventRoom extends DurableObject<Env> {
       throw new ApiError(400, 'INVALID_INPUT', 'Método de pagamento inválido.');
 
     const context = this.#mobileContextPayload();
-    const ticketLots = Array.isArray(context.ticketLots) ? context.ticketLots : [];
+    const ticketLots: readonly unknown[] = Array.isArray(context.ticketLots)
+      ? context.ticketLots
+      : [];
     const lot = ticketLots.find((item) => isRecord(item) && item.id === lotId);
     if (!isRecord(lot) || lot.active !== true || typeof lot.availableQuantity !== 'number')
       throw new ApiError(
@@ -2072,7 +2090,10 @@ export class EventRoom extends DurableObject<Env> {
         'TICKET_LOT_UNAVAILABLE',
         'Este lote não está disponível no celular.',
       );
-    const availableQuantity = lot.availableQuantity;
+    const availableQuantity = nonNegativeInteger(
+      lot.availableQuantity,
+      'ticketLot.availableQuantity',
+    );
     if (!Number.isSafeInteger(availableQuantity) || availableQuantity < quantity)
       throw new ApiError(
         409,
@@ -2279,7 +2300,7 @@ export class EventRoom extends DurableObject<Env> {
           `components[${String(componentIndex)}].productId`,
         );
         const choiceGroup =
-          component.choiceGroup === undefined
+          component.choiceGroup === undefined || component.choiceGroup === null
             ? null
             : requiredString(
                 component.choiceGroup,
@@ -2287,7 +2308,7 @@ export class EventRoom extends DurableObject<Env> {
                 60,
               );
         const choiceLabel =
-          component.choiceLabel === undefined
+          component.choiceLabel === undefined || component.choiceLabel === null
             ? null
             : requiredString(
                 component.choiceLabel,
@@ -2684,7 +2705,9 @@ export class EventRoom extends DurableObject<Env> {
       }
       this.#recalculateCashierCombos(now);
       const context = this.#mobileContextPayload();
-      const servicePoints = Array.isArray(context.servicePoints) ? context.servicePoints : [];
+      const servicePoints: readonly unknown[] = Array.isArray(context.servicePoints)
+        ? context.servicePoints
+        : [];
       const selectedServicePoint = servicePoints.find(
         (point) => isRecord(point) && point.id === requestedServicePointId && point.active === true,
       );
@@ -3177,7 +3200,7 @@ export class EventRoom extends DurableObject<Env> {
             readonly itemKind: string;
           }
         | undefined;
-      if (product === undefined || product.active !== 1 || product.itemKind !== 'product') {
+      if (product?.active !== 1 || product.itemKind !== 'product') {
         return 'Um item da operação não existe mais no estoque central.';
       }
       if (product.quantity + delta < 0) {
@@ -3579,7 +3602,7 @@ export class EventRoom extends DurableObject<Env> {
           }
           return [
             {
-              method: method as CloudReceiptDocument['payments'][number]['method'],
+              method: method,
               amountCents,
               receivedCents: typeof entry.receivedCents === 'number' ? entry.receivedCents : null,
               changeCents: typeof entry.changeCents === 'number' ? entry.changeCents : 0,

@@ -40,7 +40,9 @@ test('SMK-FIN-001 — concilia despesa, suprimento e diferença de caixa', async
     await expect(window.getByText('Despesa registrada.')).toBeVisible();
     await expect(window.getByText('R$ 20,00', { exact: true }).first()).toBeVisible();
 
-    const expenseCard = window.locator('article.expense-card').filter({ hasText: 'Compra de gelo' });
+    const expenseCard = window
+      .locator('article.expense-card')
+      .filter({ hasText: 'Compra de gelo' });
     await expenseCard.getByRole('button', { name: 'Gerenciar', exact: true }).click();
     await expenseCard.getByLabel('Pagamento real').fill('20.00');
     await expenseCard.getByLabel('Por').selectOption('cash');

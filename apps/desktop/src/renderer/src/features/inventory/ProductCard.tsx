@@ -68,9 +68,14 @@ function PurchaseLotsPanel({
   const [reason, setReason] = useState('');
   const [error, setError] = useState<string | null>(null);
   useEffect(() => {
-    void window.gtrz.inventory.listPurchaseLots(product.id).then(setLots).catch((loadError: unknown) => {
-      setError(loadError instanceof Error ? loadError.message : 'Não foi possível carregar os lotes.');
-    });
+    void window.gtrz.inventory
+      .listPurchaseLots(product.id)
+      .then(setLots)
+      .catch((loadError: unknown) => {
+        setError(
+          loadError instanceof Error ? loadError.message : 'Não foi possível carregar os lotes.',
+        );
+      });
   }, [product.id]);
   async function correctLot(): Promise<void> {
     if (editing === null) return;
@@ -87,49 +92,197 @@ function PurchaseLotsPanel({
       setAmount('');
       setReason('');
     } catch (submitError: unknown) {
-      setError(submitError instanceof Error ? submitError.message : 'Não foi possível corrigir o lote.');
+      setError(
+        submitError instanceof Error ? submitError.message : 'Não foi possível corrigir o lote.',
+      );
     }
   }
   async function voidLot(): Promise<void> {
     if (voiding === null) return;
     try {
-      await window.gtrz.inventory.voidPurchaseLot({ movementId: voiding.movementId, reason: reason.trim() });
+      await window.gtrz.inventory.voidPurchaseLot({
+        movementId: voiding.movementId,
+        reason: reason.trim(),
+      });
       setLots(await window.gtrz.inventory.listPurchaseLots(product.id));
       await onChanged();
       setVoiding(null);
       setReason('');
     } catch (submitError: unknown) {
-      setError(submitError instanceof Error ? submitError.message : 'Não foi possível desfazer a entrada.');
+      setError(
+        submitError instanceof Error ? submitError.message : 'Não foi possível desfazer a entrada.',
+      );
     }
   }
   return (
     <article className="inventory-card inventory-card--expanded">
       <div className="movement-form__heading">
-        <div><span>Lotes de compra</span><strong>{product.name}</strong></div>
-        <button className="button button--ghost button--compact" onClick={onCancel} type="button"><X size={15} aria-hidden="true" />Fechar</button>
+        <div>
+          <span>Lotes de compra</span>
+          <strong>{product.name}</strong>
+        </div>
+        <button className="button button--ghost button--compact" onClick={onCancel} type="button">
+          <X size={15} aria-hidden="true" />
+          Fechar
+        </button>
       </div>
-      <p className="form-hint">Cada linha é uma compra. Corrigir o valor preserva o lançamento original no diário.</p>
+      <p className="form-hint">
+        Cada linha é uma compra. Corrigir o valor preserva o lançamento original no diário.
+      </p>
       {error === null ? null : <p className="form-error">{error}</p>}
-      {lots.length === 0 ? <p className="inventory-helper">Ainda não há compras com valor registrado neste evento.</p> : null}
+      {lots.length === 0 ? (
+        <p className="inventory-helper">Ainda não há compras com valor registrado neste evento.</p>
+      ) : null}
       <div className="expense-list">
         {lots.map((lot) => (
           <article className="expense-card expense-card--compact" key={lot.movementId}>
-            <header className="expense-card__header"><span><strong>{lot.quantity} un. por {formatMoney(lot.unitCostCents)}</strong><small>{formatDate(lot.createdAt)}</small></span><strong>{formatMoney(lot.totalCostCents)}</strong></header>
-            {lot.voided ? <p className="form-hint">Entrada desfeita.</p> : <div className="product-form__actions"><button className="button button--secondary button--compact" disabled={busy} onClick={() => { setEditing(lot); setAmount((lot.totalCostCents / 100).toFixed(2).replace('.', ',')); setReason(''); setError(null); }} type="button">Corrigir valor</button><button className="button button--ghost button--compact" disabled={busy || !lot.canUndo} onClick={() => { setVoiding(lot); setReason(''); setError(null); }} title={lot.canUndo ? 'Desfaz esta entrada e registra a compensação.' : 'Há baixas posteriores; não é seguro desfazer esta entrada.'} type="button">Desfazer entrada</button></div>}
+            <header className="expense-card__header">
+              <span>
+                <strong>
+                  {lot.quantity} un. por {formatMoney(lot.unitCostCents)}
+                </strong>
+                <small>{formatDate(lot.createdAt)}</small>
+              </span>
+              <strong>{formatMoney(lot.totalCostCents)}</strong>
+            </header>
+            {lot.voided ? (
+              <p className="form-hint">Entrada desfeita.</p>
+            ) : (
+              <div className="product-form__actions">
+                <button
+                  className="button button--secondary button--compact"
+                  disabled={busy}
+                  onClick={() => {
+                    setEditing(lot);
+                    setAmount((lot.totalCostCents / 100).toFixed(2).replace('.', ','));
+                    setReason('');
+                    setError(null);
+                  }}
+                  type="button"
+                >
+                  Corrigir valor
+                </button>
+                <button
+                  className="button button--ghost button--compact"
+                  disabled={busy || !lot.canUndo}
+                  onClick={() => {
+                    setVoiding(lot);
+                    setReason('');
+                    setError(null);
+                  }}
+                  title={
+                    lot.canUndo
+                      ? 'Desfaz esta entrada e registra a compensação.'
+                      : 'Há baixas posteriores; não é seguro desfazer esta entrada.'
+                  }
+                  type="button"
+                >
+                  Desfazer entrada
+                </button>
+              </div>
+            )}
           </article>
         ))}
       </div>
-      {editing === null ? null : <form className="movement-form" onSubmit={(event) => { event.preventDefault(); void correctLot(); }}>
-        <strong>Corrigir compra de {editing.quantity} un.</strong>
-        <div className="movement-form__grid"><label className="form-field"><span>Valor total correto</span><input autoFocus inputMode="decimal" onChange={(event) => setAmount(event.target.value)} required value={amount} /></label><label className="form-field"><span>Motivo</span><input maxLength={240} onChange={(event) => setReason(event.target.value)} required value={reason} /></label></div>
-        <div className="product-form__actions"><button className="button button--ghost" onClick={() => setEditing(null)} type="button">Cancelar</button><button className="button button--primary" disabled={busy || parseMoney(amount) <= 0 || reason.trim().length < 3} type="submit">Salvar correção</button></div>
-      </form>}
-      {voiding === null ? null : <form className="movement-form" onSubmit={(event) => { event.preventDefault(); void voidLot(); }}>
-        <strong>Desfazer entrada de {voiding.quantity} un.</strong>
-        <p className="form-hint">A quantidade será baixada e a compra deixará de contar no custo do evento. O lançamento original será preservado no diário.</p>
-        <label className="form-field"><span>Motivo</span><input autoFocus maxLength={240} onChange={(event) => setReason(event.target.value)} required value={reason} /></label>
-        <div className="product-form__actions"><button className="button button--ghost" onClick={() => setVoiding(null)} type="button">Cancelar</button><button className="button button--danger" disabled={busy || reason.trim().length < 3} type="submit">Desfazer entrada</button></div>
-      </form>}
+      {editing === null ? null : (
+        <form
+          className="movement-form"
+          onSubmit={(event) => {
+            event.preventDefault();
+            void correctLot();
+          }}
+        >
+          <strong>Corrigir compra de {editing.quantity} un.</strong>
+          <div className="movement-form__grid">
+            <label className="form-field">
+              <span>Valor total correto</span>
+              <input
+                autoFocus
+                inputMode="decimal"
+                onChange={(event) => {
+                  setAmount(event.target.value);
+                }}
+                required
+                value={amount}
+              />
+            </label>
+            <label className="form-field">
+              <span>Motivo</span>
+              <input
+                maxLength={240}
+                onChange={(event) => {
+                  setReason(event.target.value);
+                }}
+                required
+                value={reason}
+              />
+            </label>
+          </div>
+          <div className="product-form__actions">
+            <button
+              className="button button--ghost"
+              onClick={() => {
+                setEditing(null);
+              }}
+              type="button"
+            >
+              Cancelar
+            </button>
+            <button
+              className="button button--primary"
+              disabled={busy || parseMoney(amount) <= 0 || reason.trim().length < 3}
+              type="submit"
+            >
+              Salvar correção
+            </button>
+          </div>
+        </form>
+      )}
+      {voiding === null ? null : (
+        <form
+          className="movement-form"
+          onSubmit={(event) => {
+            event.preventDefault();
+            void voidLot();
+          }}
+        >
+          <strong>Desfazer entrada de {voiding.quantity} un.</strong>
+          <p className="form-hint">
+            A quantidade será baixada e a compra deixará de contar no custo do evento. O lançamento
+            original será preservado no diário.
+          </p>
+          <label className="form-field">
+            <span>Motivo</span>
+            <input
+              autoFocus
+              maxLength={240}
+              onChange={(event) => {
+                setReason(event.target.value);
+              }}
+              required
+              value={reason}
+            />
+          </label>
+          <div className="product-form__actions">
+            <button
+              className="button button--ghost"
+              onClick={() => {
+                setVoiding(null);
+              }}
+              type="button"
+            >
+              Cancelar
+            </button>
+            <button
+              className="button button--danger"
+              disabled={busy || reason.trim().length < 3}
+              type="submit"
+            >
+              Desfazer entrada
+            </button>
+          </div>
+        </form>
+      )}
     </article>
   );
 }
@@ -146,7 +299,9 @@ export function ProductCard({
   onDelete,
   onChanged,
 }: ProductCardProps): React.JSX.Element {
-  const [mode, setMode] = useState<'view' | 'edit' | 'entry' | 'decrease' | 'lots' | 'delete'>('view');
+  const [mode, setMode] = useState<'view' | 'edit' | 'entry' | 'decrease' | 'lots' | 'delete'>(
+    'view',
+  );
   const [impact, setImpact] = useState<ProductDeletionImpact | null>(null);
   const [deleteReason, setDeleteReason] = useState('');
   const [deleteError, setDeleteError] = useState<string | null>(null);
@@ -185,7 +340,16 @@ export function ProductCard({
     );
   }
   if (mode === 'lots') {
-    return <PurchaseLotsPanel busy={busy} onCancel={() => setMode('view')} onChanged={onChanged} product={product} />;
+    return (
+      <PurchaseLotsPanel
+        busy={busy}
+        onCancel={() => {
+          setMode('view');
+        }}
+        onChanged={onChanged}
+        product={product}
+      />
+    );
   }
   if (mode === 'delete') {
     return (
@@ -380,8 +544,16 @@ export function ProductCard({
               <Pencil size={15} aria-hidden="true" />
               Editar
             </button>
-            <button className="button button--ghost button--compact" disabled={busy || !hasActiveEvent} onClick={() => setMode('lots')} type="button">
-              <ClipboardList size={15} aria-hidden="true" />Lotes
+            <button
+              className="button button--ghost button--compact"
+              disabled={busy || !hasActiveEvent}
+              onClick={() => {
+                setMode('lots');
+              }}
+              type="button"
+            >
+              <ClipboardList size={15} aria-hidden="true" />
+              Lotes
             </button>
             <button
               className="button button--secondary button--compact"

@@ -101,7 +101,10 @@ export function OrderPanel({
                         Escolhas:{' '}
                         {item.componentAllocations
                           .filter((allocation) => allocation.choiceGroup !== null)
-                          .map((allocation) => `${allocation.quantity}× ${allocation.productName}`)
+                          .map(
+                            (allocation) =>
+                              `${String(allocation.quantity)}× ${allocation.productName}`,
+                          )
                           .join(' · ')}
                       </small>
                     )}
