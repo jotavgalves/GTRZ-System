@@ -1,5 +1,5 @@
 import { Cloud, Database, Shield, WifiOff } from 'lucide-react';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState, type CSSProperties } from 'react';
 import { NavLink, Outlet } from 'react-router';
 
 import type { CloudSyncStatus, SystemInfo } from '@gtrz/contracts';
@@ -77,6 +77,7 @@ export function AppShell(): React.JSX.Element {
     () => navigationModules.filter((module) => module.profiles.includes(activeProfile)),
     [activeProfile],
   );
+  const navigationStyle = { '--sidebar-item-count': visibleModules.length } as CSSProperties;
 
   return (
     <div className="app-shell">
@@ -98,7 +99,7 @@ export function AppShell(): React.JSX.Element {
           </small>
         </div>
 
-        <nav className="sidebar-nav" aria-label="Módulos do sistema">
+        <nav className="sidebar-nav" aria-label="Módulos do sistema" style={navigationStyle}>
           {visibleModules.map((module) => {
             const Icon = module.icon;
             return (
