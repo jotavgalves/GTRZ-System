@@ -81,11 +81,11 @@ export function getFoodState(database: DatabaseContext): DatabaseFoodState {
     .get(eventId) as { supplier_mode: DatabaseFoodSupplierMode } | undefined;
   const rows = database.sqlite
     .prepare(
-      `SELECT p.id product_id,p.name,fs.name supplier_name,COALESCE(SUM(s.quantity),0) sold_quantity,COALESCE(SUM(s.received_cents),0) received_cents,COALESCE(SUM(s.supplier_cents),0) supplier_cents,COALESCE(SUM(s.commission_cents),0) commission_cents FROM products p INNER JOIN food_product_terms t ON t.product_id=p.id AND t.event_id=? INNER JOIN food_suppliers fs ON fs.id=t.supplier_id LEFT JOIN food_sale_settlements s ON s.product_id=p.id AND s.event_id=? GROUP BY p.id,p.name,fs.name ORDER BY p.name COLLATE NOCASE`,
+      `SELECT p.id AS product_id,p.name AS product_name,fs.name AS supplier_name,COALESCE(SUM(s.quantity),0) AS sold_quantity,COALESCE(SUM(s.received_cents),0) AS received_cents,COALESCE(SUM(s.supplier_cents),0) AS supplier_cents,COALESCE(SUM(s.commission_cents),0) AS commission_cents FROM products p INNER JOIN food_product_terms t ON t.product_id=p.id AND t.event_id=? INNER JOIN food_suppliers fs ON fs.id=t.supplier_id LEFT JOIN food_sale_settlements s ON s.product_id=p.id AND s.event_id=? GROUP BY p.id,p.name,fs.name UNION ALL SELECT c.id AS product_id,c.name AS product_name,fs.name AS supplier_name,COALESCE(SUM(s.quantity),0) AS sold_quantity,COALESCE(SUM(s.received_cents),0) AS received_cents,COALESCE(SUM(s.supplier_cents),0) AS supplier_cents,COALESCE(SUM(s.commission_cents),0) AS commission_cents FROM combos c INNER JOIN food_combo_terms t ON t.combo_id=c.id AND t.event_id=? INNER JOIN food_suppliers fs ON fs.id=t.supplier_id LEFT JOIN food_combo_sale_settlements s ON s.combo_id=c.id AND s.event_id=? GROUP BY c.id,c.name,fs.name ORDER BY product_name COLLATE NOCASE`,
     )
-    .all(eventId, eventId) as {
+    .all(eventId, eventId, eventId, eventId) as {
     product_id: string;
-    name: string;
+    product_name: string;
     supplier_name: string | null;
     sold_quantity: number;
     received_cents: number;
@@ -94,7 +94,7 @@ export function getFoodState(database: DatabaseContext): DatabaseFoodState {
   }[];
   const items = rows.map((row) => ({
     productId: row.product_id,
-    name: row.name,
+    name: row.product_name,
     supplierName: row.supplier_name,
     soldQuantity: row.sold_quantity,
     receivedCents: row.received_cents,
@@ -129,8 +129,13 @@ export function configureFood(
     .get(eventId) as { supplier_mode: DatabaseFoodSupplierMode } | undefined;
   const hasExternalItems =
     database.sqlite
-      .prepare('SELECT 1 FROM food_product_terms WHERE event_id=? LIMIT 1')
-      .get(eventId) !== undefined;
+      .prepare(
+        `SELECT 1 FROM (
+           SELECT 1 FROM food_product_terms WHERE event_id=?
+           UNION ALL SELECT 1 FROM food_combo_terms WHERE event_id=?
+         ) LIMIT 1`,
+      )
+      .get(eventId, eventId) !== undefined;
   if (current !== undefined && current.supplier_mode !== input.supplierMode && hasExternalItems)
     throw new Error(
       'Não é possível trocar o fornecedor da comida após cadastrar itens externos. Abra outro evento para usar o outro modelo.',
@@ -242,14 +247,35 @@ export function deleteFoodSupplier(
     .prepare('SELECT id, name FROM food_suppliers WHERE id = ? AND event_id = ?')
     .get(input.supplierId, eventId) as { readonly id: string; readonly name: string } | undefined;
   if (supplier === undefined) throw new Error('Fornecedor não encontrado neste evento.');
+  const now = Date.now();
 
   const productRows = database.sqlite
     .prepare('SELECT product_id FROM food_product_terms WHERE event_id = ? AND supplier_id = ?')
     .all(eventId, supplier.id) as { readonly product_id: string }[];
   const productIds = productRows.map((row) => row.product_id);
-  const placeholders = productIds.map(() => '?').join(', ');
+  const comboRows = database.sqlite
+    .prepare('SELECT combo_id FROM food_combo_terms WHERE event_id = ? AND supplier_id = ?')
+    .all(eventId, supplier.id) as { readonly combo_id: string }[];
+  const comboIds = comboRows.map((row) => row.combo_id);
+  const productPlaceholders = productIds.map(() => '?').join(', ');
+  const comboPlaceholders = comboIds.map(() => '?').join(', ');
+  const orderConditions: string[] = [];
+  const orderParameters: string[] = [eventId];
+  if (productIds.length > 0) {
+    orderConditions.push(
+      `(oi.item_kind = 'product' AND oi.item_id IN (${productPlaceholders}))
+       OR (oi.item_kind = 'combo' AND oi.item_id IN (
+         SELECT combo_id FROM combo_components WHERE product_id IN (${productPlaceholders})
+       ))`,
+    );
+    orderParameters.push(...productIds, ...productIds);
+  }
+  if (comboIds.length > 0) {
+    orderConditions.push(`oi.item_kind = 'combo' AND oi.item_id IN (${comboPlaceholders})`);
+    orderParameters.push(...comboIds);
+  }
   const affectedOrders =
-    productIds.length === 0
+    orderConditions.length === 0
       ? []
       : (database.sqlite
           .prepare(
@@ -257,14 +283,9 @@ export function deleteFoodSupplier(
              FROM orders o
              INNER JOIN order_items oi ON oi.order_id = o.id
              WHERE o.event_id = ? AND o.status IN ('open', 'paid')
-               AND (
-                 (oi.item_kind = 'product' AND oi.item_id IN (${placeholders}))
-                 OR (oi.item_kind = 'combo' AND oi.item_id IN (
-                   SELECT combo_id FROM combo_components WHERE product_id IN (${placeholders})
-                 ))
-               )`,
+               AND (${orderConditions.map((condition) => `(${condition})`).join(' OR ')})`,
           )
-          .all(eventId, ...productIds, ...productIds) as { readonly id: string }[]);
+          .all(...orderParameters) as { readonly id: string }[]);
   if (affectedOrders.length > 0 && !input.deleteLinkedSales) {
     throw new Error(
       `O fornecedor possui ${String(affectedOrders.length)} venda(s) ou comanda(s) vinculada(s). Confirme a exclusão das vendas para continuar.`,
@@ -285,6 +306,14 @@ export function deleteFoodSupplier(
         reason: `Exclusão do fornecedor ${supplier.name}: ${reason}`,
       });
     }
+    if (comboIds.length > 0) {
+      database.sqlite
+        .prepare(`UPDATE combos SET active = 0, updated_at = ? WHERE id IN (${comboPlaceholders})`)
+        .run(now, ...comboIds);
+    }
+    database.sqlite
+      .prepare('DELETE FROM food_combo_terms WHERE event_id = ? AND supplier_id = ?')
+      .run(eventId, supplier.id);
     database.sqlite
       .prepare('DELETE FROM food_suppliers WHERE id = ? AND event_id = ?')
       .run(supplier.id, eventId);
@@ -295,6 +324,7 @@ export function deleteFoodSupplier(
       eventId,
       details: {
         cancelledOrdersCount: affectedOrders.length,
+        deactivatedCombosCount: comboIds.length,
         deletedProductsCount: productIds.length,
         name: supplier.name,
         reason,
@@ -307,10 +337,10 @@ export function createExternalFoodItem(
   database: DatabaseContext,
   input: {
     readonly categoryId: string;
-    readonly supplierId: string;
+    readonly supplierId?: string | undefined;
     readonly name: string;
-    readonly supplierUnitCents: number;
-    readonly commissionUnitCents: number;
+    readonly supplierUnitCents?: number | undefined;
+    readonly commissionUnitCents?: number | undefined;
     readonly initialQuantity: number;
     readonly comboOnly: boolean;
   },
@@ -320,14 +350,19 @@ export function createExternalFoodItem(
   const setting = getFoodState(database);
   if (setting.supplierMode !== 'external')
     throw new Error('Configure Comida para fornecedor externo antes de cadastrar este item.');
-  const supplier = database.sqlite
-    .prepare('SELECT id FROM food_suppliers WHERE id=? AND event_id=? AND active=1')
-    .get(input.supplierId, eventId);
+  const directSale = !input.comboOnly;
+  const supplier = directSale
+    ? database.sqlite
+        .prepare('SELECT id FROM food_suppliers WHERE id=? AND event_id=? AND active=1')
+        .get(input.supplierId, eventId)
+    : true;
   if (supplier === undefined) throw new Error('Selecione um fornecedor ativo deste evento.');
-  const total = input.supplierUnitCents + input.commissionUnitCents;
+  const supplierUnitCents = input.supplierUnitCents ?? 0;
+  const commissionUnitCents = input.commissionUnitCents ?? 0;
+  const total = supplierUnitCents + commissionUnitCents;
   if (
     !Number.isInteger(total) ||
-    total <= 0 ||
+    (directSale && total <= 0) ||
     !Number.isInteger(input.initialQuantity) ||
     input.initialQuantity <= 0
   )
@@ -337,25 +372,27 @@ export function createExternalFoodItem(
     name: input.name,
     kind: 'food',
     costCents: 0,
-    salePriceCents: total,
+    salePriceCents: directSale ? total : 0,
     lowStockThreshold: 0,
     comboOnly: input.comboOnly,
   });
   const now = Date.now();
   database.sqlite.transaction(() => {
-    database.sqlite
-      .prepare(
-        'INSERT INTO food_product_terms (product_id,event_id,supplier_id,supplier_unit_cents,commission_unit_cents,created_at,updated_at) VALUES (?,?,?,?,?,?,?)',
-      )
-      .run(
-        product.id,
-        eventId,
-        input.supplierId,
-        input.supplierUnitCents,
-        input.commissionUnitCents,
-        now,
-        now,
-      );
+    if (directSale) {
+      database.sqlite
+        .prepare(
+          'INSERT INTO food_product_terms (product_id,event_id,supplier_id,supplier_unit_cents,commission_unit_cents,created_at,updated_at) VALUES (?,?,?,?,?,?,?)',
+        )
+        .run(
+          product.id,
+          eventId,
+          input.supplierId,
+          supplierUnitCents,
+          commissionUnitCents,
+          now,
+          now,
+        );
+    }
     recordStockMovement(database, {
       productId: product.id,
       type: 'correction-positive',
@@ -368,9 +405,9 @@ export function createExternalFoodItem(
       entityId: product.id,
       eventId,
       details: {
-        supplierId: input.supplierId,
-        supplierUnitCents: input.supplierUnitCents,
-        commissionUnitCents: input.commissionUnitCents,
+        supplierId: input.supplierId ?? null,
+        supplierUnitCents,
+        commissionUnitCents,
         initialQuantity: input.initialQuantity,
         comboOnly: input.comboOnly,
       },

@@ -14,6 +14,7 @@ import { categoryEngineMigration } from './category-engine-migration';
 import { comboChoicesMigration } from './combo-choices-migration';
 import { comboChoiceLabelMigration } from './combo-choice-label-migration';
 import { comboComponentOccurrencesMigration } from './combo-component-occurrences-migration';
+import { comboOrderAndFoodTermsMigration } from './combo-order-and-food-terms-migration';
 import { syncMigration } from './sync-migration';
 import { syncInboxMigration } from './sync-inbox-migration';
 import { syncConflictMigration } from './sync-conflict-migration';
@@ -325,6 +326,7 @@ const migrations: readonly Migration[] = [
   comboChoicesMigration,
   comboChoiceLabelMigration,
   comboComponentOccurrencesMigration,
+  comboOrderAndFoodTermsMigration,
 ];
 
 function ensureMigrationTable(sqlite: BetterSqlite3.Database): void {
@@ -393,6 +395,8 @@ function repairFinanceLedgerColumns(sqlite: BetterSqlite3.Database): void {
     `);
   }
   ensureColumn(sqlite, 'products', 'combo_only', 'combo_only INTEGER NOT NULL DEFAULT 0');
+  ensureColumn(sqlite, 'combos', 'kind', "kind TEXT NOT NULL DEFAULT 'drink'");
+  ensureColumn(sqlite, 'combo_components', 'sort_order', 'sort_order INTEGER NOT NULL DEFAULT 0');
 }
 
 export function openDatabase(filePath: string): DatabaseContext {

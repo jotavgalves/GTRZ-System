@@ -110,6 +110,7 @@ export function resetEventData(
     database.sqlite.prepare('DELETE FROM ticket_sales WHERE event_id = ?').run(event.id);
     database.sqlite.prepare('DELETE FROM ticket_lots WHERE event_id = ?').run(event.id);
     database.sqlite.prepare('DELETE FROM food_sale_settlements WHERE event_id = ?').run(event.id);
+    database.sqlite.prepare('DELETE FROM food_combo_sale_settlements WHERE event_id = ?').run(event.id);
     database.sqlite
       .prepare(
         `DELETE FROM app_meta
@@ -139,6 +140,7 @@ export function resetEventData(
     database.sqlite.prepare('DELETE FROM capital_reimbursements WHERE event_id = ?').run(event.id);
     database.sqlite.prepare('DELETE FROM capital_contributions WHERE event_id = ?').run(event.id);
     database.sqlite.prepare('DELETE FROM food_product_terms WHERE event_id = ?').run(event.id);
+    database.sqlite.prepare('DELETE FROM food_combo_terms WHERE event_id = ?').run(event.id);
     database.sqlite.prepare('DELETE FROM food_suppliers WHERE event_id = ?').run(event.id);
     database.sqlite.prepare('DELETE FROM food_event_settings WHERE event_id = ?').run(event.id);
     database.sqlite.prepare('DELETE FROM cash_movements WHERE event_id = ?').run(event.id);
@@ -242,6 +244,7 @@ export function deleteEventPermanently(
     database.sqlite.prepare('DELETE FROM ticket_lots WHERE event_id = ?').run(event.id);
 
     database.sqlite.prepare('DELETE FROM food_sale_settlements WHERE event_id = ?').run(event.id);
+    database.sqlite.prepare('DELETE FROM food_combo_sale_settlements WHERE event_id = ?').run(event.id);
     database.sqlite
       .prepare(
         `DELETE FROM app_meta
@@ -276,6 +279,7 @@ export function deleteEventPermanently(
     database.sqlite.prepare('DELETE FROM capital_reimbursements WHERE event_id = ?').run(event.id);
     database.sqlite.prepare('DELETE FROM capital_contributions WHERE event_id = ?').run(event.id);
     database.sqlite.prepare('DELETE FROM food_product_terms WHERE event_id = ?').run(event.id);
+    database.sqlite.prepare('DELETE FROM food_combo_terms WHERE event_id = ?').run(event.id);
     database.sqlite.prepare('DELETE FROM food_suppliers WHERE event_id = ?').run(event.id);
     database.sqlite.prepare('DELETE FROM food_event_settings WHERE event_id = ?').run(event.id);
 

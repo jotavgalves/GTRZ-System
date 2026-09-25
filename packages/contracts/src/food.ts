@@ -45,14 +45,27 @@ export const deleteFoodSupplierInputSchema = z.object({
 export const createExternalFoodItemInputSchema = z
   .object({
     categoryId: z.uuid(),
-    supplierId: z.uuid(),
+    supplierId: z.uuid().optional(),
     name: z.string().trim().min(2).max(100),
-    supplierUnitCents: z.number().int().nonnegative(),
-    commissionUnitCents: z.number().int().nonnegative(),
+    supplierUnitCents: z.number().int().nonnegative().optional(),
+    commissionUnitCents: z.number().int().nonnegative().optional(),
     initialQuantity: z.number().int().positive(),
     comboOnly: z.boolean().default(false),
   })
   .superRefine((input, context) => {
+    if (input.comboOnly) return;
+    if (
+      input.supplierId === undefined ||
+      input.supplierUnitCents === undefined ||
+      input.commissionUnitCents === undefined
+    ) {
+      context.addIssue({
+        code: 'custom',
+        message: 'Informe fornecedor, valor e comissão para uma comida vendida diretamente.',
+        path: ['supplierId'],
+      });
+      return;
+    }
     if (input.supplierUnitCents + input.commissionUnitCents <= 0)
       context.addIssue({
         code: 'custom',

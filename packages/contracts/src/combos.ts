@@ -1,16 +1,39 @@
 import { z } from 'zod';
 
+export const comboKindSchema = z
+  .enum(['food', 'drink', 'combo'])
+  .transform((value): 'food' | 'drink' => (value === 'combo' ? 'drink' : value));
+
 export const comboComponentInputSchema = z.object({
   productId: z.uuid(),
   quantity: z.number().int().positive().max(10_000),
   choiceGroup: z.string().trim().min(1).max(60).optional(),
   choiceLabel: z.string().trim().min(1).max(80).optional(),
+  sortOrder: z.number().int().nonnegative().max(10_000).optional(),
 });
+
+export const externalFoodComboTermsInputSchema = z
+  .object({
+    supplierId: z.uuid(),
+    supplierUnitCents: z.number().int().nonnegative(),
+    commissionUnitCents: z.number().int().nonnegative(),
+  })
+  .superRefine((value, context) => {
+    if (value.supplierUnitCents + value.commissionUnitCents <= 0) {
+      context.addIssue({
+        code: 'custom',
+        message: 'Informe o valor do fornecedor ou a comissão da GTRZ.',
+        path: ['supplierUnitCents'],
+      });
+    }
+  });
 
 const comboWriteFields = {
   name: z.string().trim().min(2).max(100),
+  kind: comboKindSchema.optional(),
   salePriceCents: z.number().int().nonnegative(),
   components: z.array(comboComponentInputSchema).min(1).max(50),
+  externalFoodTerms: externalFoodComboTermsInputSchema.optional(),
 } as const;
 
 interface ComponentCollection {
@@ -69,6 +92,11 @@ export const comboComponentSchema = z.object({
     .nullable()
     .optional()
     .transform((value) => value ?? null),
+  sortOrder: z.number().int().nonnegative().optional(),
+});
+
+export const externalFoodComboTermsSchema = externalFoodComboTermsInputSchema.extend({
+  supplierName: z.string().min(1),
 });
 
 export const comboFinancialsSchema = z.object({
@@ -80,12 +108,14 @@ export const comboFinancialsSchema = z.object({
 export const comboSchema = z.object({
   id: z.uuid(),
   name: z.string().trim().min(2).max(100),
+  kind: comboKindSchema.default('drink'),
   salePriceCents: z.number().int().nonnegative(),
   individualSaleTotalCents: z.number().int().nonnegative(),
   savingsCents: z.number().int(),
   availableUnits: z.number().int().nonnegative(),
   active: z.boolean(),
   components: z.array(comboComponentSchema).min(1),
+  externalFoodTerms: externalFoodComboTermsSchema.nullish().transform((value) => value ?? null),
   financials: comboFinancialsSchema.nullable(),
   createdAt: z.number().int().nonnegative(),
   updatedAt: z.number().int().nonnegative(),
@@ -94,6 +124,9 @@ export const comboSchema = z.object({
 export const comboListSchema = z.array(comboSchema);
 
 export type ComboComponentInput = z.infer<typeof comboComponentInputSchema>;
+export type ComboKind = z.infer<typeof comboKindSchema>;
+export type ExternalFoodComboTermsInput = z.infer<typeof externalFoodComboTermsInputSchema>;
+export type ExternalFoodComboTerms = z.infer<typeof externalFoodComboTermsSchema>;
 export type CreateComboInput = z.infer<typeof createComboInputSchema>;
 export type UpdateComboInput = z.infer<typeof updateComboInputSchema>;
 export type ComboComponent = z.infer<typeof comboComponentSchema>;

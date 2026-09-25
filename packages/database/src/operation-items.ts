@@ -10,6 +10,26 @@ import type {
 } from './operation-types';
 import type { DatabaseContext } from './types';
 
+function configurationKey(
+  itemKind: DatabaseOrderItemKind,
+  selections: readonly DatabaseComboComponentSelectionInput[],
+): string {
+  if (itemKind !== 'combo' || selections.length === 0) return '';
+  return JSON.stringify(
+    [...selections]
+      .map((selection) => ({
+        choiceGroup: selection.choiceGroup,
+        productId: selection.productId,
+        quantity: selection.quantity,
+      }))
+      .sort((left, right) =>
+        `${left.choiceGroup}:${left.productId}`.localeCompare(
+          `${right.choiceGroup}:${right.productId}`,
+        ),
+      ),
+  );
+}
+
 export function addOrderItem(
   database: DatabaseContext,
   input: {
@@ -26,7 +46,7 @@ export function addOrderItem(
       ? (database.sqlite
           .prepare(
             `SELECT product_id, quantity, choice_group, choice_label
-             FROM combo_components WHERE combo_id = ? ORDER BY product_id`,
+             FROM combo_components WHERE combo_id = ? ORDER BY sort_order, id`,
           )
           .all(input.itemId) as readonly {
           readonly product_id: string;
@@ -115,13 +135,17 @@ export function addOrderItem(
   const existing = database.sqlite
     .prepare(
       `SELECT id, quantity FROM order_items
-       WHERE order_id = ? AND item_kind = ? AND item_id = ?`,
+       WHERE order_id = ? AND item_kind = ? AND item_id = ? AND configuration_key = ?`,
     )
-    .get(input.orderId, input.itemKind, input.itemId) as
+    .get(
+      input.orderId,
+      input.itemKind,
+      input.itemId,
+      configurationKey(input.itemKind, selections),
+    ) as
     | { readonly id: string; readonly quantity: number }
     | undefined;
-  const canMerge = input.itemKind !== 'combo' || choiceDefinitions.size === 0;
-  const nextQuantity = (canMerge ? (existing?.quantity ?? 0) : 0) + input.quantity;
+  const nextQuantity = (existing?.quantity ?? 0) + input.quantity;
   const item = requireAvailableCatalogItem(
     database,
     order.event_id,
@@ -132,14 +156,14 @@ export function addOrderItem(
   const now = Date.now();
 
   database.sqlite.transaction(() => {
-    if (existing === undefined || !canMerge) {
+    if (existing === undefined) {
       const orderItemId = randomUUID();
       database.sqlite
         .prepare(
           `INSERT INTO order_items
-           (id, order_id, item_kind, item_id, item_name, quantity,
+           (id, order_id, item_kind, item_id, item_name, configuration_key, quantity,
             unit_price_cents, total_cents, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           orderItemId,
@@ -147,6 +171,7 @@ export function addOrderItem(
           input.itemKind,
           input.itemId,
           item.name,
+          configurationKey(input.itemKind, selections),
           input.quantity,
           item.salePriceCents,
           item.salePriceCents * input.quantity,
@@ -207,6 +232,17 @@ export function addOrderItem(
             null,
             null,
             definition.quantity * input.quantity,
+            now,
+          );
+        }
+        for (const selection of selections) {
+          insertAllocation.run(
+            randomUUID(),
+            existing.id,
+            selection.productId,
+            selection.choiceGroup,
+            choiceLabels.get(selection.choiceGroup) ?? selection.choiceGroup,
+            selection.quantity,
             now,
           );
         }

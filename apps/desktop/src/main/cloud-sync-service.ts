@@ -1037,10 +1037,10 @@ export class CloudSyncService {
         .map((combo) => ({
           productId: combo.id,
           label: combo.name,
-          kind: 'combo',
+          kind: combo.kind,
           itemKind: 'combo',
           visible: true,
-          categoryLabel: 'Combos',
+          categoryLabel: combo.kind === 'food' ? 'Comidas' : 'Combos',
           imageDataUrl: null,
           fallbackIcon: 'package',
           components: combo.components.map((component) => ({
@@ -1048,6 +1048,7 @@ export class CloudSyncService {
             quantity: component.quantity,
             choiceGroup: component.choiceGroup,
             choiceLabel: component.choiceLabel,
+            sortOrder: component.sortOrder,
           })),
           unitPriceCents: combo.salePriceCents,
           quantity: combo.availableUnits,
@@ -1890,11 +1891,13 @@ export class CloudSyncService {
       if (payload.entityId === null || details === null)
         throw new Error('Dados remotos do combo estão incompletos.');
       const name = stringField(details, 'name');
+      const kind = stringField(details, 'kind') ?? 'drink';
       const salePriceCents = integerField(details, 'salePriceCents');
       const active = payload.action === 'combo.created' ? true : details.active;
       const components = details.components;
       if (
         name === null ||
+        (kind !== 'food' && kind !== 'drink') ||
         salePriceCents === null ||
         salePriceCents < 0 ||
         typeof active !== 'boolean' ||
@@ -1903,12 +1906,13 @@ export class CloudSyncService {
       ) {
         throw new Error('Dados remotos do combo são inválidos.');
       }
-      const normalized = components.map((component) => {
+      const normalized = components.map((component, index) => {
         if (!isRecord(component)) throw new Error('Componente remoto de combo inválido.');
         const productId = stringField(component, 'productId');
         const quantity = integerField(component, 'quantity');
         const choiceGroup = component.choiceGroup === undefined ? null : component.choiceGroup;
         const choiceLabel = component.choiceLabel === undefined ? null : component.choiceLabel;
+        const sortOrder = component.sortOrder === undefined ? index : integerField(component, 'sortOrder');
         if (
           productId === null ||
           quantity === null ||
@@ -1916,6 +1920,7 @@ export class CloudSyncService {
           (choiceGroup !== null && typeof choiceGroup !== 'string') ||
           (choiceLabel !== null && typeof choiceLabel !== 'string') ||
           (choiceGroup === null) !== (choiceLabel === null)
+          || sortOrder === null || sortOrder < 0
         ) {
           throw new Error('Componente remoto de combo inválido.');
         }
@@ -1924,18 +1929,30 @@ export class CloudSyncService {
           .get(productId);
         if (product === undefined)
           throw new Error('Componente do combo ainda não existe neste computador.');
-        return { productId, quantity, choiceGroup, choiceLabel };
+        return { productId, quantity, choiceGroup, choiceLabel, sortOrder };
       });
+      const externalFoodTerms = details.externalFoodTerms;
+      if (
+        externalFoodTerms !== undefined &&
+        (!isRecord(externalFoodTerms) ||
+          kind !== 'food' ||
+          stringField(externalFoodTerms, 'supplierId') === null ||
+          integerField(externalFoodTerms, 'supplierUnitCents') === null ||
+          integerField(externalFoodTerms, 'commissionUnitCents') === null)
+      ) {
+        throw new Error('Condições remotas do combo de comida são inválidas.');
+      }
       database.sqlite
         .prepare(
-          `INSERT INTO combos (id, name, sale_price_cents, active, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?)
-           ON CONFLICT(id) DO UPDATE SET name = excluded.name, sale_price_cents = excluded.sale_price_cents,
+          `INSERT INTO combos (id, name, kind, sale_price_cents, active, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(id) DO UPDATE SET name = excluded.name, kind = excluded.kind, sale_price_cents = excluded.sale_price_cents,
              active = excluded.active, updated_at = excluded.updated_at`,
         )
         .run(
           payload.entityId,
           name,
+          kind,
           salePriceCents,
           active ? 1 : 0,
           payload.createdAt,
@@ -1945,8 +1962,9 @@ export class CloudSyncService {
         .prepare('DELETE FROM combo_components WHERE combo_id = ?')
         .run(payload.entityId);
       const insert = database.sqlite.prepare(
-        `INSERT INTO combo_components (id, combo_id, product_id, quantity, choice_group, choice_label)
-         VALUES (?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO combo_components
+         (id, combo_id, product_id, quantity, choice_group, choice_label, sort_order)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
       );
       for (const component of normalized) {
         insert.run(
@@ -1956,7 +1974,29 @@ export class CloudSyncService {
           component.quantity,
           component.choiceGroup,
           component.choiceLabel,
+          component.sortOrder,
         );
+      }
+      database.sqlite.prepare('DELETE FROM food_combo_terms WHERE combo_id = ?').run(payload.entityId);
+      if (isRecord(externalFoodTerms)) {
+        const supplierId = stringField(externalFoodTerms, 'supplierId');
+        const supplierUnitCents = integerField(externalFoodTerms, 'supplierUnitCents');
+        const commissionUnitCents = integerField(externalFoodTerms, 'commissionUnitCents');
+        database.sqlite
+          .prepare(
+            `INSERT INTO food_combo_terms
+             (combo_id, event_id, supplier_id, supplier_unit_cents, commission_unit_cents, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          )
+          .run(
+            payload.entityId,
+            eventId,
+            supplierId,
+            supplierUnitCents,
+            commissionUnitCents,
+            payload.createdAt,
+            payload.createdAt,
+          );
       }
       return;
     }
@@ -2087,14 +2127,13 @@ export class CloudSyncService {
       const supplierId = stringField(payload.details, 'supplierId');
       const supplierUnitCents = integerField(payload.details, 'supplierUnitCents');
       const commissionUnitCents = integerField(payload.details, 'commissionUnitCents');
-      if (
-        payload.entityId === null ||
-        supplierId === null ||
-        supplierUnitCents === null ||
-        commissionUnitCents === null
-      ) {
+      const comboOnly = payload.details.comboOnly === true;
+      if (payload.entityId === null) {
         throw new Error('Item externo de comida remoto inválido.');
       }
+      if (comboOnly) return;
+      if (supplierId === null || supplierUnitCents === null || commissionUnitCents === null)
+        throw new Error('Item externo de comida remoto inválido.');
       database.sqlite
         .prepare(
           `INSERT OR IGNORE INTO food_product_terms
@@ -2570,14 +2609,15 @@ export class CloudSyncService {
     redeemVouchers(database, eventId, orderId, voucherUses, payload.createdAt);
     const insertItem = database.sqlite.prepare(
       `INSERT INTO order_items
-       (id, order_id, item_kind, item_id, item_name, quantity, unit_price_cents, total_cents, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       (id, order_id, item_kind, item_id, item_name, configuration_key, quantity, unit_price_cents, total_cents, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
     const insertComponentAllocation = database.sqlite.prepare(
       `INSERT INTO order_item_component_allocations
        (id, order_item_id, product_id, choice_group, choice_label, quantity, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?)`,
     );
+    const remoteComboItems: { readonly comboId: string; readonly quantity: number }[] = [];
     for (const raw of items) {
       if (!isRecord(raw)) throw new Error('Item de venda remoto inválido.');
       const id = stringField(raw, 'id');
@@ -2597,17 +2637,36 @@ export class CloudSyncService {
         (itemKind !== 'product' && itemKind !== 'combo')
       )
         throw new Error('Item de venda remoto incompleto.');
+      const configurationKey =
+        itemKind === 'combo' && Array.isArray(raw.componentAllocations)
+          ? JSON.stringify(
+              raw.componentAllocations
+                .filter(isRecord)
+                .map((allocation) => ({
+                  choiceGroup: allocation.choiceGroup,
+                  productId: allocation.productId,
+                  quantity: allocation.quantity,
+                }))
+                .sort((left, right) =>
+                  `${String(left.choiceGroup)}:${String(left.productId)}`.localeCompare(
+                    `${String(right.choiceGroup)}:${String(right.productId)}`,
+                  ),
+                ),
+            )
+          : '';
       insertItem.run(
         id,
         orderId,
         itemKind,
         itemId,
         itemName,
+        configurationKey,
         quantity,
         unitPriceCents,
         itemTotal,
         payload.createdAt,
       );
+      if (itemKind === 'combo') remoteComboItems.push({ comboId: itemId, quantity });
       if (Array.isArray(raw.componentAllocations)) {
         for (const rawAllocation of raw.componentAllocations) {
           if (!isRecord(rawAllocation)) throw new Error('Componente remoto inválido.');
@@ -2740,6 +2799,34 @@ export class CloudSyncService {
         orderId,
         movement.productId,
         movement.quantity,
+        supplierCents + commissionCents,
+        supplierCents,
+        commissionCents,
+        payload.createdAt,
+      );
+    }
+    const comboTerm = database.sqlite.prepare(
+      `SELECT supplier_unit_cents, commission_unit_cents
+       FROM food_combo_terms WHERE event_id = ? AND combo_id = ?`,
+    );
+    const insertComboSettlement = database.sqlite.prepare(
+      `INSERT OR IGNORE INTO food_combo_sale_settlements
+       (id, event_id, order_id, combo_id, quantity, received_cents, supplier_cents, commission_cents, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    );
+    for (const item of remoteComboItems) {
+      const term = comboTerm.get(eventId, item.comboId) as
+        | { readonly supplier_unit_cents: number; readonly commission_unit_cents: number }
+        | undefined;
+      if (term === undefined) continue;
+      const supplierCents = term.supplier_unit_cents * item.quantity;
+      const commissionCents = term.commission_unit_cents * item.quantity;
+      insertComboSettlement.run(
+        randomUUID(),
+        eventId,
+        orderId,
+        item.comboId,
+        item.quantity,
         supplierCents + commissionCents,
         supplierCents,
         commissionCents,

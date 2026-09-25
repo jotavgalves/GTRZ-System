@@ -1,11 +1,13 @@
-import { PackagePlus, Plus, Save, Trash2, X } from 'lucide-react';
-import { useMemo, useState, type SyntheticEvent } from 'react';
+import { ChevronDown, ChevronUp, PackagePlus, Plus, Save, Trash2, X } from 'lucide-react';
+import { useEffect, useMemo, useState, type SyntheticEvent } from 'react';
 
 import type {
   ComboComponentInput,
+  ComboKind,
   CreateComboInput,
   InventoryCombo,
   InventoryProduct,
+  FoodState,
   UpdateComboInput,
 } from '@gtrz/contracts';
 
@@ -63,6 +65,7 @@ export function ComboForm(props: ComboFormProps): React.JSX.Element {
     [props.products],
   );
   const [name, setName] = useState(props.combo?.name ?? '');
+  const [kind, setKind] = useState<ComboKind>(props.combo?.kind ?? 'drink');
   const [salePrice, setSalePrice] = useState(centsToInput(props.combo?.salePriceCents));
   const [components, setComponents] = useState<ComboComponentInput[]>(
     initialComponents(props.combo),
@@ -73,7 +76,33 @@ export function ComboForm(props: ComboFormProps): React.JSX.Element {
   const [choiceGroup, setChoiceGroup] = useState('');
   const [choiceLabel, setChoiceLabel] = useState('');
   const [active, setActive] = useState(props.combo?.active ?? true);
+  const [foodState, setFoodState] = useState<FoodState | null>(null);
+  const [supplierId, setSupplierId] = useState(props.combo?.externalFoodTerms?.supplierId ?? '');
+  const [supplierUnit, setSupplierUnit] = useState(
+    centsToInput(props.combo?.externalFoodTerms?.supplierUnitCents),
+  );
+  const [commissionUnit, setCommissionUnit] = useState(
+    centsToInput(props.combo?.externalFoodTerms?.commissionUnitCents),
+  );
   const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (kind !== 'food') return;
+    void window.gtrz.food
+      .getState()
+      .then((next) => {
+        setFoodState(next);
+        setSupplierId((current) =>
+          current !== '' ? current : (next.suppliers.find((supplier) => supplier.active)?.id ?? ''),
+        );
+      })
+      .catch(() => setFoodState(null));
+  }, [kind]);
+
+  const externalFood = kind === 'food' && foodState?.supplierMode === 'external';
+  const externalFoodSalePriceCents = externalFood
+    ? inputToCents(supplierUnit) + inputToCents(commissionUnit)
+    : null;
 
   const selectedChoiceGroup = choiceEnabled ? choiceGroup.trim() || null : null;
   const availableProducts = activeProducts.filter(
@@ -142,6 +171,30 @@ export function ComboForm(props: ComboFormProps): React.JSX.Element {
     );
   }
 
+  function moveComponent(index: number, direction: -1 | 1): void {
+    setComponents((current) => {
+      const groups: ComboComponentInput[][] = [];
+      for (const component of current) {
+        if (component.choiceGroup === undefined) {
+          groups.push([component]);
+          continue;
+        }
+        const existing = groups.find(
+          (group) => group[0]?.choiceGroup === component.choiceGroup,
+        );
+        if (existing === undefined) groups.push([component]);
+        else existing.push(component);
+      }
+      const target = current[index];
+      if (target === undefined) return current;
+      const groupIndex = groups.findIndex((group) => group.includes(target));
+      const nextIndex = groupIndex + direction;
+      if (groupIndex < 0 || nextIndex < 0 || nextIndex >= groups.length) return current;
+      [groups[groupIndex], groups[nextIndex]] = [groups[nextIndex]!, groups[groupIndex]!];
+      return groups.flat();
+    });
+  }
+
   async function handleSubmit(event: SyntheticEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
     setError(null);
@@ -151,10 +204,24 @@ export function ComboForm(props: ComboFormProps): React.JSX.Element {
         throw new Error('Adicione pelo menos um produto ao combo.');
       }
 
+      const orderedComponents = components.map((component, index) => ({
+        ...component,
+        sortOrder: index,
+      }));
       const baseInput: CreateComboInput = {
         name,
-        salePriceCents: inputToCents(salePrice),
-        components,
+        kind,
+        salePriceCents: externalFood ? externalFoodSalePriceCents ?? 0 : inputToCents(salePrice),
+        components: orderedComponents,
+        ...(externalFood
+          ? {
+              externalFoodTerms: {
+                supplierId,
+                supplierUnitCents: inputToCents(supplierUnit),
+                commissionUnitCents: inputToCents(commissionUnit),
+              },
+            }
+          : {}),
       };
 
       if (props.combo === undefined) {
@@ -162,6 +229,8 @@ export function ComboForm(props: ComboFormProps): React.JSX.Element {
         setName('');
         setSalePrice('');
         setComponents([]);
+        setSupplierUnit('');
+        setCommissionUnit('');
       } else {
         await props.onSubmit({
           ...baseInput,
@@ -196,6 +265,7 @@ export function ComboForm(props: ComboFormProps): React.JSX.Element {
           <input
             inputMode="decimal"
             min="0"
+            disabled={externalFood}
             onChange={(event) => {
               setSalePrice(event.target.value);
             }}
@@ -203,10 +273,48 @@ export function ComboForm(props: ComboFormProps): React.JSX.Element {
             required
             step="0.01"
             type="number"
-            value={salePrice}
+            value={externalFood ? centsToInput(externalFoodSalePriceCents ?? 0) : salePrice}
           />
         </label>
+        <label className="form-field">
+          <span>Tipo do combo</span>
+          <select
+            onChange={(event) => {
+              setKind(event.target.value as ComboKind);
+            }}
+            value={kind}
+          >
+            <option value="drink">Bebida</option>
+            <option value="food">Comida</option>
+          </select>
+        </label>
       </div>
+
+      {externalFood ? (
+        <div className="combo-form__main-fields">
+          <label className="form-field">
+            <span>Fornecedor</span>
+            <select onChange={(event) => setSupplierId(event.target.value)} required value={supplierId}>
+              <option value="">Selecione</option>
+              {foodState?.suppliers
+                .filter((supplier) => supplier.active)
+                .map((supplier) => (
+                  <option key={supplier.id} value={supplier.id}>
+                    {supplier.name}
+                  </option>
+                ))}
+            </select>
+          </label>
+          <label className="form-field">
+            <span>Valor do fornecedor por combo</span>
+            <input inputMode="decimal" min="0" onChange={(event) => setSupplierUnit(event.target.value)} required step="0.01" type="number" value={supplierUnit} />
+          </label>
+          <label className="form-field">
+            <span>Comissão GTRZ por combo</span>
+            <input inputMode="decimal" min="0" onChange={(event) => setCommissionUnit(event.target.value)} required step="0.01" type="number" value={commissionUnit} />
+          </label>
+        </div>
+      ) : null}
 
       <div className="combo-component-picker">
         <label className="form-field">
@@ -293,7 +401,7 @@ export function ComboForm(props: ComboFormProps): React.JSX.Element {
         {components.length === 0 ? (
           <p className="inventory-helper">Nenhum componente adicionado.</p>
         ) : (
-          components.map((component) => {
+          components.map((component, index) => {
             const product = props.products.find((item) => item.id === component.productId);
 
             return (
@@ -324,6 +432,24 @@ export function ComboForm(props: ComboFormProps): React.JSX.Element {
                     value={component.quantity}
                   />
                 </label>
+                <button
+                  aria-label={`Mover ${product?.name ?? 'produto'} para cima`}
+                  className="icon-button"
+                  disabled={props.busy || index === 0}
+                  onClick={() => moveComponent(index, -1)}
+                  type="button"
+                >
+                  <ChevronUp size={15} aria-hidden="true" />
+                </button>
+                <button
+                  aria-label={`Mover ${product?.name ?? 'produto'} para baixo`}
+                  className="icon-button"
+                  disabled={props.busy || index === components.length - 1}
+                  onClick={() => moveComponent(index, 1)}
+                  type="button"
+                >
+                  <ChevronDown size={15} aria-hidden="true" />
+                </button>
                 <button
                   aria-label={`Remover ${product?.name ?? 'produto'}`}
                   className="icon-button"
@@ -376,7 +502,12 @@ export function ComboForm(props: ComboFormProps): React.JSX.Element {
         )}
         <button
           className="button button--primary"
-          disabled={props.busy || name.trim().length < 2 || components.length === 0}
+          disabled={
+            props.busy ||
+            name.trim().length < 2 ||
+            components.length === 0 ||
+            (externalFood && (supplierId.length === 0 || supplierUnit.length === 0 || commissionUnit.length === 0))
+          }
           type="submit"
         >
           {props.combo === undefined ? (

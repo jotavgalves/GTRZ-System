@@ -53,7 +53,7 @@ export function ComboCard({
     <article className={combo.active ? 'combo-card' : 'combo-card combo-card--inactive'}>
       <div className="combo-card__header">
         <div>
-          <span>Combo</span>
+          <span>Combo · {combo.kind === 'food' ? 'Comida' : 'Bebida'}</span>
           <h3>{combo.name}</h3>
         </div>
         <span className="stock-badge">
@@ -78,11 +78,23 @@ export function ComboCard({
         {combo.financials === null ? null : (
           <>
             <div>
-              <span>{hasChoices ? 'Custo máximo possível' : 'Custo consolidado'}</span>
+              <span>
+                {combo.externalFoodTerms !== null
+                  ? 'Valor do fornecedor'
+                  : hasChoices
+                    ? 'Custo máximo possível'
+                    : 'Custo consolidado'}
+              </span>
               <strong>{formatMoney(combo.financials.costCents)}</strong>
             </div>
             <div>
-              <span>{hasChoices ? 'Lucro mínimo possível' : 'Lucro bruto'}</span>
+              <span>
+                {combo.externalFoodTerms !== null
+                  ? 'Comissão GTRZ'
+                  : hasChoices
+                    ? 'Lucro mínimo possível'
+                    : 'Lucro bruto'}
+              </span>
               <strong>{formatMoney(combo.financials.grossProfitCents)}</strong>
             </div>
             <div>

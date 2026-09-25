@@ -11,6 +11,35 @@ export function recordExternalFoodSettlements(
   items: readonly DatabaseOrderItem[],
   now: number,
 ): void {
+  const comboTermForItem = database.sqlite.prepare(
+    `SELECT supplier_unit_cents, commission_unit_cents
+     FROM food_combo_terms WHERE event_id = ? AND combo_id = ?`,
+  );
+  const insertComboSettlement = database.sqlite.prepare(
+    `INSERT OR IGNORE INTO food_combo_sale_settlements
+     (id,event_id,order_id,combo_id,quantity,received_cents,supplier_cents,commission_cents,created_at)
+     VALUES (?,?,?,?,?,?,?,?,?)`,
+  );
+  for (const item of items) {
+    if (item.itemKind !== 'combo') continue;
+    const term = comboTermForItem.get(eventId, item.itemId) as
+      | { supplier_unit_cents: number; commission_unit_cents: number }
+      | undefined;
+    if (term === undefined) continue;
+    const supplierCents = term.supplier_unit_cents * item.quantity;
+    const commissionCents = term.commission_unit_cents * item.quantity;
+    insertComboSettlement.run(
+      randomUUID(),
+      eventId,
+      orderId,
+      item.itemId,
+      item.quantity,
+      supplierCents + commissionCents,
+      supplierCents,
+      commissionCents,
+      now,
+    );
+  }
   const requirements = buildStockRequirements(database, items);
   const termForProduct = database.sqlite.prepare(
     `SELECT supplier_unit_cents, commission_unit_cents FROM food_product_terms WHERE event_id=? AND product_id=?`,
@@ -41,4 +70,5 @@ export function recordExternalFoodSettlements(
 
 export function clearExternalFoodSettlements(database: DatabaseContext, orderId: string): void {
   database.sqlite.prepare('DELETE FROM food_sale_settlements WHERE order_id=?').run(orderId);
+  database.sqlite.prepare('DELETE FROM food_combo_sale_settlements WHERE order_id=?').run(orderId);
 }

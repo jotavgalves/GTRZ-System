@@ -9,12 +9,21 @@ export interface DatabaseComboComponentInput {
   readonly quantity: number;
   readonly choiceGroup?: string | undefined;
   readonly choiceLabel?: string | undefined;
+  readonly sortOrder?: number | undefined;
 }
 
 interface ComboWriteInput {
   readonly name: string;
+  readonly kind?: 'food' | 'drink' | undefined;
   readonly salePriceCents: number;
   readonly components: readonly DatabaseComboComponentInput[];
+  readonly externalFoodTerms?:
+    | {
+        readonly supplierId: string;
+        readonly supplierUnitCents: number;
+        readonly commissionUnitCents: number;
+      }
+    | undefined;
 }
 
 export interface DatabaseComboComponent {
@@ -25,6 +34,14 @@ export interface DatabaseComboComponent {
   readonly availableQuantity: number;
   readonly choiceGroup: string | null;
   readonly choiceLabel: string | null;
+  readonly sortOrder: number;
+}
+
+export interface DatabaseExternalFoodComboTerms {
+  readonly supplierId: string;
+  readonly supplierName: string;
+  readonly supplierUnitCents: number;
+  readonly commissionUnitCents: number;
 }
 
 export interface DatabaseComboFinancials {
@@ -36,12 +53,14 @@ export interface DatabaseComboFinancials {
 export interface DatabaseInventoryCombo {
   readonly id: string;
   readonly name: string;
+  readonly kind: 'food' | 'drink';
   readonly salePriceCents: number;
   readonly individualSaleTotalCents: number;
   readonly savingsCents: number;
   readonly availableUnits: number;
   readonly active: boolean;
   readonly components: readonly DatabaseComboComponent[];
+  readonly externalFoodTerms: DatabaseExternalFoodComboTerms | null;
   readonly financials: DatabaseComboFinancials | null;
   readonly createdAt: number;
   readonly updatedAt: number;
@@ -50,6 +69,7 @@ export interface DatabaseInventoryCombo {
 interface ComboRow {
   readonly id: string;
   readonly name: string;
+  readonly kind: 'food' | 'drink';
   readonly sale_price_cents: number;
   readonly active: number;
   readonly created_at: number;
@@ -67,6 +87,15 @@ interface ComponentRow {
   readonly available_quantity: number;
   readonly choice_group: string | null;
   readonly choice_label: string | null;
+  readonly sort_order: number;
+}
+
+interface ExternalFoodComboTermsRow {
+  readonly combo_id: string;
+  readonly supplier_id: string;
+  readonly supplier_name: string;
+  readonly supplier_unit_cents: number;
+  readonly commission_unit_cents: number;
 }
 
 interface ProductValidationRow {
@@ -160,6 +189,44 @@ function validateComponents(
   }
 }
 
+function requireExternalFoodTerms(
+  database: DatabaseContext,
+  input: ComboWriteInput,
+): string | null {
+  const terms = input.externalFoodTerms;
+  if (terms === undefined) return null;
+  if ((input.kind ?? 'drink') !== 'food') {
+    throw new Error('Somente um combo de comida pode usar condições de fornecedor externo.');
+  }
+  if (
+    !Number.isInteger(terms.supplierUnitCents) ||
+    !Number.isInteger(terms.commissionUnitCents) ||
+    terms.supplierUnitCents < 0 ||
+    terms.commissionUnitCents < 0 ||
+    terms.supplierUnitCents + terms.commissionUnitCents <= 0
+  ) {
+    throw new Error('Informe o valor do fornecedor ou a comissão da GTRZ.');
+  }
+  if (input.salePriceCents !== terms.supplierUnitCents + terms.commissionUnitCents) {
+    throw new Error('O preço do combo externo deve ser a soma do fornecedor e da comissão GTRZ.');
+  }
+  const event = getSessionState(database).activeEvent;
+  if (event === null) throw new Error('Selecione um evento aberto antes de cadastrar este combo.');
+  const supplier = database.sqlite
+    .prepare(
+      `SELECT supplier.id
+       FROM food_suppliers supplier
+       INNER JOIN food_event_settings setting ON setting.event_id = supplier.event_id
+       WHERE supplier.id = ? AND supplier.event_id = ? AND supplier.active = 1
+         AND setting.supplier_mode = 'external'`,
+    )
+    .get(terms.supplierId, event.id);
+  if (supplier === undefined) {
+    throw new Error('Selecione um fornecedor ativo configurado para comida externa neste evento.');
+  }
+  return event.id;
+}
+
 function calculateMarginPercent(salePriceCents: number, costCents: number): number {
   if (salePriceCents === 0) {
     return 0;
@@ -184,13 +251,14 @@ function listComponentRows(
          p.active AS product_active,
          COALESCE(es.quantity, 0) AS available_quantity,
          cc.choice_group,
-         cc.choice_label
+         cc.choice_label,
+         cc.sort_order
        FROM combo_components cc
        INNER JOIN products p ON p.id = cc.product_id
        LEFT JOIN event_stock es
          ON es.product_id = p.id
         AND es.event_id = ?
-       ORDER BY cc.combo_id, p.name COLLATE NOCASE`,
+       ORDER BY cc.combo_id, cc.sort_order, cc.id`,
     )
     .all(activeEventId) as ComponentRow[];
 }
@@ -200,6 +268,7 @@ function mapCombo(
   componentRows: readonly ComponentRow[],
   activeEventId: string | null,
   showFinancials: boolean,
+  externalFoodTerms: DatabaseExternalFoodComboTerms | null,
 ): DatabaseInventoryCombo {
   const components = componentRows.map((component) => ({
     productId: component.product_id,
@@ -209,6 +278,7 @@ function mapCombo(
     availableQuantity: component.available_quantity,
     choiceGroup: component.choice_group,
     choiceLabel: component.choice_label,
+    sortOrder: component.sort_order,
   }));
   const fixedComponents = componentRows.filter((component) => component.choice_group === null);
   const choiceComponents = new Map<string, ComponentRow[]>();
@@ -256,22 +326,25 @@ function mapCombo(
     activeEventId === null || availabilityLimits.length === 0 || hasUnavailableComponent
       ? 0
       : Math.min(...availabilityLimits);
-  const grossProfitCents = row.sale_price_cents - costCents;
+  const effectiveCostCents = externalFoodTerms?.supplierUnitCents ?? costCents;
+  const grossProfitCents = row.sale_price_cents - effectiveCostCents;
 
   return {
     id: row.id,
     name: row.name,
+    kind: row.kind,
     salePriceCents: row.sale_price_cents,
     individualSaleTotalCents,
     savingsCents: individualSaleTotalCents - row.sale_price_cents,
     availableUnits,
     active: row.active === 1,
     components,
+    externalFoodTerms,
     financials: showFinancials
       ? {
-          costCents,
+          costCents: effectiveCostCents,
           grossProfitCents,
-          marginPercent: calculateMarginPercent(row.sale_price_cents, costCents),
+          marginPercent: calculateMarginPercent(row.sale_price_cents, effectiveCostCents),
         }
       : null,
     createdAt: row.created_at,
@@ -285,12 +358,32 @@ export function listCombos(database: DatabaseContext): readonly DatabaseInventor
   const showFinancials = session.profile === 'production';
   const comboRows = database.sqlite
     .prepare(
-      `SELECT id, name, sale_price_cents, active, created_at, updated_at
+      `SELECT id, name, kind, sale_price_cents, active, created_at, updated_at
        FROM combos
        ORDER BY active DESC, name COLLATE NOCASE`,
     )
     .all() as ComboRow[];
   const componentRows = listComponentRows(database, activeEventId);
+  const externalTermsByCombo = new Map<string, DatabaseExternalFoodComboTerms>();
+  if (activeEventId !== null) {
+    const rows = database.sqlite
+      .prepare(
+        `SELECT terms.combo_id, terms.supplier_id, supplier.name AS supplier_name,
+                terms.supplier_unit_cents, terms.commission_unit_cents
+         FROM food_combo_terms terms
+         INNER JOIN food_suppliers supplier ON supplier.id = terms.supplier_id
+         WHERE terms.event_id = ?`,
+      )
+      .all(activeEventId) as ExternalFoodComboTermsRow[];
+    for (const row of rows) {
+      externalTermsByCombo.set(row.combo_id, {
+        supplierId: row.supplier_id,
+        supplierName: row.supplier_name,
+        supplierUnitCents: row.supplier_unit_cents,
+        commissionUnitCents: row.commission_unit_cents,
+      });
+    }
+  }
   const componentsByCombo = new Map<string, ComponentRow[]>();
 
   for (const component of componentRows) {
@@ -300,7 +393,13 @@ export function listCombos(database: DatabaseContext): readonly DatabaseInventor
   }
 
   return comboRows.map((combo) =>
-    mapCombo(combo, componentsByCombo.get(combo.id) ?? [], activeEventId, showFinancials),
+    mapCombo(
+      combo,
+      componentsByCombo.get(combo.id) ?? [],
+      activeEventId,
+      showFinancials,
+      externalTermsByCombo.get(combo.id) ?? null,
+    ),
   );
 }
 
@@ -320,11 +419,12 @@ function insertComponents(
   components: readonly DatabaseComboComponentInput[],
 ): void {
   const insert = database.sqlite.prepare(
-    `INSERT INTO combo_components (id, combo_id, product_id, quantity, choice_group, choice_label)
-     VALUES (?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO combo_components
+     (id, combo_id, product_id, quantity, choice_group, choice_label, sort_order)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
   );
 
-  for (const component of components) {
+  for (const [index, component] of components.entries()) {
     insert.run(
       randomUUID(),
       comboId,
@@ -332,8 +432,43 @@ function insertComponents(
       component.quantity,
       component.choiceGroup?.trim() ?? null,
       component.choiceLabel?.trim() ?? null,
+      component.sortOrder ?? index,
     );
   }
+}
+
+function saveExternalFoodTerms(
+  database: DatabaseContext,
+  comboId: string,
+  eventId: string | null,
+  terms: ComboWriteInput['externalFoodTerms'],
+  now: number,
+): void {
+  if (terms === undefined) {
+    database.sqlite.prepare('DELETE FROM food_combo_terms WHERE combo_id = ?').run(comboId);
+    return;
+  }
+  if (eventId === null) throw new Error('Selecione um evento aberto antes de salvar o combo.');
+  database.sqlite
+    .prepare(
+      `INSERT INTO food_combo_terms
+       (combo_id, event_id, supplier_id, supplier_unit_cents, commission_unit_cents, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(combo_id, event_id) DO UPDATE SET
+         supplier_id = excluded.supplier_id,
+         supplier_unit_cents = excluded.supplier_unit_cents,
+         commission_unit_cents = excluded.commission_unit_cents,
+         updated_at = excluded.updated_at`,
+    )
+    .run(
+      comboId,
+      eventId,
+      terms.supplierId,
+      terms.supplierUnitCents,
+      terms.commissionUnitCents,
+      now,
+      now,
+    );
 }
 
 export function createCombo(
@@ -344,6 +479,7 @@ export function createCombo(
   const name = input.name.trim();
   requireUniqueName(database, name);
   validateComponents(database, input.components);
+  const externalFoodEventId = requireExternalFoodTerms(database, input);
 
   if (!Number.isInteger(input.salePriceCents) || input.salePriceCents < 0) {
     throw new Error('O preço do combo deve ser informado em centavos inteiros não negativos.');
@@ -356,17 +492,20 @@ export function createCombo(
     database.sqlite
       .prepare(
         `INSERT INTO combos
-         (id, name, sale_price_cents, active, created_at, updated_at)
-         VALUES (?, ?, ?, 1, ?, ?)`,
+         (id, name, kind, sale_price_cents, active, created_at, updated_at)
+         VALUES (?, ?, ?, ?, 1, ?, ?)`,
       )
-      .run(comboId, name, input.salePriceCents, now, now);
+      .run(comboId, name, input.kind ?? 'drink', input.salePriceCents, now, now);
     insertComponents(database, comboId, input.components);
+    saveExternalFoodTerms(database, comboId, externalFoodEventId, input.externalFoodTerms, now);
     appendAudit(database, {
       action: 'combo.created',
       entityType: 'combo',
       entityId: comboId,
       details: {
         components: input.components,
+        externalFoodTerms: input.externalFoodTerms,
+        kind: input.kind ?? 'drink',
         name,
         salePriceCents: input.salePriceCents,
       },
@@ -385,6 +524,7 @@ export function updateCombo(
   const name = input.name.trim();
   requireUniqueName(database, name, input.comboId);
   validateComponents(database, input.components);
+  const externalFoodEventId = requireExternalFoodTerms(database, input);
 
   if (!Number.isInteger(input.salePriceCents) || input.salePriceCents < 0) {
     throw new Error('O preço do combo deve ser informado em centavos inteiros não negativos.');
@@ -396,12 +536,26 @@ export function updateCombo(
     database.sqlite
       .prepare(
         `UPDATE combos
-         SET name = ?, sale_price_cents = ?, active = ?, updated_at = ?
+         SET name = ?, kind = ?, sale_price_cents = ?, active = ?, updated_at = ?
          WHERE id = ?`,
       )
-      .run(name, input.salePriceCents, input.active ? 1 : 0, now, input.comboId);
+      .run(
+        name,
+        input.kind ?? 'drink',
+        input.salePriceCents,
+        input.active ? 1 : 0,
+        now,
+        input.comboId,
+      );
     database.sqlite.prepare('DELETE FROM combo_components WHERE combo_id = ?').run(input.comboId);
     insertComponents(database, input.comboId, input.components);
+    saveExternalFoodTerms(
+      database,
+      input.comboId,
+      externalFoodEventId,
+      input.externalFoodTerms,
+      now,
+    );
     appendAudit(database, {
       action: 'combo.updated',
       entityType: 'combo',
@@ -410,6 +564,8 @@ export function updateCombo(
         after: {
           active: input.active,
           components: input.components,
+          externalFoodTerms: input.externalFoodTerms,
+          kind: input.kind ?? 'drink',
           name,
           salePriceCents: input.salePriceCents,
         },
