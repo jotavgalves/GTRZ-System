@@ -28,6 +28,9 @@ export function CashPage(): React.JSX.Element {
     recordMovement,
     closeRegister,
   } = useCash();
+  if (loading && state === null) {
+    return <div className="route-state">Carregando caixa…</div>;
+  }
   const registerStatus =
     state?.register === null || state === null ? 'not-opened' : state.register.status;
   const sales = state?.salesByMethod;

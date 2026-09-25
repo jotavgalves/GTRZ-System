@@ -27,6 +27,9 @@ export function VouchersPage(): React.JSX.Element {
     setVoucherTotal,
     deleteVoucher,
   } = useVouchers();
+  if (loading && state === null) {
+    return <div className="route-state">Carregando vouchers…</div>;
+  }
   const vouchers = state?.vouchers ?? [];
   const deletedVouchers = state?.deletedVouchers ?? [];
   const servicePoints = state?.servicePoints ?? [];

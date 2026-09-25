@@ -8,38 +8,52 @@ import {
   TriangleAlert,
   Trash2,
 } from 'lucide-react';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { FoodState, InventoryState } from '@gtrz/contracts';
+import { getCachedViewState, setCachedViewState } from '../../shared/navigation/view-state-cache';
 import { useRealtimeReload } from '../../shared/realtime/useRealtimeReload';
+
+interface FoodViewSnapshot {
+  readonly food: FoodState;
+  readonly inventory: InventoryState;
+}
 
 function formatMoney(cents: number): string {
   return new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(cents / 100);
 }
 
 export function FoodPage(): React.JSX.Element {
-  const [state, setState] = useState<FoodState | null>(null);
-  const [inventory, setInventory] = useState<InventoryState | null>(null);
+  const initialSnapshot = useRef(getCachedViewState<FoodViewSnapshot>('food')).current;
+  const [state, setState] = useState<FoodState | null>(() => initialSnapshot?.food ?? null);
+  const [inventory, setInventory] = useState<InventoryState | null>(
+    () => initialSnapshot?.inventory ?? null,
+  );
+  const [loading, setLoading] = useState(() => initialSnapshot === null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [supplier, setSupplier] = useState('');
   const [editingSupplier, setEditingSupplier] = useState<string | null>(null);
   const [supplierDraft, setSupplierDraft] = useState('');
-  const reload = useCallback(async () => {
+  const reload = useCallback(async (silent = false) => {
+    if (!silent) setLoading(true);
     try {
       const [food, stock] = await Promise.all([
         window.gtrz.food.getState(),
         window.gtrz.inventory.getState(),
       ]);
+      setCachedViewState<FoodViewSnapshot>('food', { food, inventory: stock });
       setState(food);
       setInventory(stock);
       setError(null);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : 'Não foi possível carregar Comida.');
+    } finally {
+      if (!silent) setLoading(false);
     }
   }, []);
   useEffect(() => {
-    void reload();
-  }, [reload]);
+    void reload(initialSnapshot !== null);
+  }, [initialSnapshot, reload]);
   useRealtimeReload(reload);
   const run = async (action: () => Promise<unknown>): Promise<void> => {
     setBusy(true);
@@ -57,6 +71,9 @@ export function FoodPage(): React.JSX.Element {
     () => inventory?.products.filter((product) => product.kind === 'food') ?? [],
     [inventory],
   );
+  if (loading && (state === null || inventory === null)) {
+    return <div className="route-state">Carregando comida…</div>;
+  }
   return (
     <section className="feature-page">
       <header className="feature-header">

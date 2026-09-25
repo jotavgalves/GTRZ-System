@@ -53,12 +53,25 @@ export function AppShell(): React.JSX.Element {
   }, []);
 
   useEffect(() => {
-    // The three operational views are the routes operators alternate between most often.
-    // Warm their local SQLite snapshots before a sidebar click so no empty intermediate view is painted.
+    // Warm every sidebar snapshot once. Navigation then swaps complete views instead of first
+    // painting their empty defaults while local SQLite responds.
     void Promise.allSettled([
       preloadViewState('dashboard', () => window.gtrz.dashboard.getState()),
       preloadViewState('inventory', () => window.gtrz.inventory.getState()),
       preloadViewState('operations', () => window.gtrz.operations.getState()),
+      preloadViewState('audit', () => window.gtrz.audit.list({ limit: 100 })),
+      preloadViewState('tickets', () => window.gtrz.tickets.getState()),
+      preloadViewState('vouchers', () => window.gtrz.vouchers.getState()),
+      preloadViewState('expenses', () => window.gtrz.expenses.getState()),
+      preloadViewState('cash', () => window.gtrz.cash.getState()),
+      preloadViewState('events', () => window.gtrz.events.list()),
+      preloadViewState('food', async () => {
+        const [food, inventory] = await Promise.all([
+          window.gtrz.food.getState(),
+          window.gtrz.inventory.getState(),
+        ]);
+        return { food, inventory };
+      }),
     ]);
   }, []);
 
