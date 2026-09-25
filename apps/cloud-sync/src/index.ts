@@ -2259,7 +2259,11 @@ export class EventRoom extends DurableObject<Env> {
     const servicePoints = Array.isArray(context.servicePoints) ? context.servicePoints : [];
     if (
       !servicePoints.some(
-        (point) => isRecord(point) && point.id === servicePointId && point.active === true,
+        (point) =>
+          isRecord(point) &&
+          point.id === servicePointId &&
+          point.type === 'table' &&
+          point.active === true,
       )
     )
       throw new ApiError(
