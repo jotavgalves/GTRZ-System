@@ -1,5 +1,4 @@
-import { useEffect } from 'react';
-import { createHashRouter, useNavigate } from 'react-router';
+import { createHashRouter } from 'react-router';
 
 import { AuditPage } from '../features/audit';
 import { BackupsPage } from '../features/backups';
@@ -18,17 +17,12 @@ import { RequireProduction } from '../shared/session/RequireProduction';
 import { ErrorPage } from './ErrorPage';
 import { AppShell } from './layouts/AppShell';
 
-function RecoverUnknownRoute(): null {
-  const navigate = useNavigate();
-
-  useEffect(() => {
-    // Hash navigation can briefly expose an incomplete route while Electron applies a sidebar click.
-    // Let the intended route settle before falling back to the dashboard for a genuinely invalid URL.
-    const timeout = window.setTimeout(() => navigate('/', { replace: true }), 180);
-    return () => window.clearTimeout(timeout);
-  }, [navigate]);
-
-  return null;
+function UnknownRoute(): React.JSX.Element {
+  return (
+    <section className="route-state route-state--error" role="status">
+      Esta área não existe. Escolha um módulo no menu lateral.
+    </section>
+  );
 }
 
 export const router = createHashRouter([
@@ -55,7 +49,7 @@ export const router = createHashRouter([
       },
       { path: 'estoque', element: <InventoryPage /> },
       { path: 'mesas', element: <TablesPage /> },
-      { path: '*', element: <RecoverUnknownRoute /> },
+      { path: '*', element: <UnknownRoute /> },
     ],
   },
 ]);
