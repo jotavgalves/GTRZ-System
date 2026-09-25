@@ -14,7 +14,7 @@ interface CatalogPanelProps {
   ) => Promise<void>;
 }
 
-type CatalogFilter = 'all' | 'product' | 'drink' | 'food' | 'combo';
+type CatalogFilter = 'all' | 'drink' | 'food';
 
 function formatMoney(cents: number): string {
   return new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(cents / 100);
@@ -29,11 +29,7 @@ export function CatalogPanel({ items, busy, onAdd }: CatalogPanelProps): React.J
     const normalized = search.trim().toLocaleLowerCase('pt-BR');
     return items.filter(
       (item) =>
-        (kind === 'all' ||
-          (kind === 'product' && item.kind === 'product') ||
-          (kind === 'drink' && item.kind === 'product' && item.category === 'drink') ||
-          (kind === 'food' && item.category === 'food') ||
-          (kind === 'combo' && item.kind === 'combo' && item.category === 'drink')) &&
+        (kind === 'all' || item.category === kind) &&
         (normalized.length === 0 || item.name.toLocaleLowerCase('pt-BR').includes(normalized)),
     );
   }, [items, kind, search]);
@@ -79,19 +75,27 @@ export function CatalogPanel({ items, busy, onAdd }: CatalogPanelProps): React.J
             value={search}
           />
         </label>
-        <select
-          aria-label="Filtrar catálogo"
-          onChange={(event) => {
-            setKind(event.target.value as CatalogFilter);
-          }}
-          value={kind}
-        >
-          <option value="all">Todos</option>
-          <option value="product">Produtos</option>
-          <option value="drink">Bebidas</option>
-          <option value="food">Comidas</option>
-          <option value="combo">Combos de bebida</option>
-        </select>
+        <div aria-label="Filtrar catálogo" className="operation-catalog__segments" role="group">
+          {(
+            [
+              ['all', 'Todos'],
+              ['drink', 'Bebidas'],
+              ['food', 'Comidas'],
+            ] as const
+          ).map(([value, label]) => (
+            <button
+              aria-pressed={kind === value}
+              className={kind === value ? 'is-active' : undefined}
+              key={value}
+              onClick={() => {
+                setKind(value);
+              }}
+              type="button"
+            >
+              {label}
+            </button>
+          ))}
+        </div>
       </div>
       <div className="operation-catalog__list">
         {filtered.map((item) => {
