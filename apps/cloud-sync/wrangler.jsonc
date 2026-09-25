@@ -5,8 +5,8 @@
   "workers_dev": true,
   "routes": [
     {
-      "pattern": "pdv.gtrz.com.br",
-      "custom_domain": true,
+      "pattern": "pdv.gtrz.com.br/*",
+      "zone_name": "gtrz.com.br",
     },
   ],
   "r2_buckets": [
