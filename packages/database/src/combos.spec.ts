@@ -157,6 +157,25 @@ describe('combo database', () => {
     upgraded.close();
   });
 
+  it('classifica combos legados formados apenas por comida', async () => {
+    const database = await createTemporaryDatabase();
+    createEvent(database, { name: 'Evento de classificação', startsAt: Date.now() });
+    const { snackId } = createProducts(database);
+    const combo = createCombo(database, {
+      name: 'Combo legado de comida',
+      salePriceCents: 1_600,
+      components: [{ productId: snackId, quantity: 2 }],
+    });
+    database.sqlite.prepare("UPDATE combos SET kind = 'drink' WHERE id = ?").run(combo.id);
+    database.sqlite.prepare('DELETE FROM schema_migrations WHERE version = 29').run();
+    database.close();
+
+    if (temporaryDirectory === null) throw new Error('Diretório temporário não foi criado.');
+    const upgraded = openDatabase(path.join(temporaryDirectory, 'combos.sqlite'));
+    expect(listCombos(upgraded).find((item) => item.id === combo.id)?.kind).toBe('food');
+    upgraded.close();
+  });
+
   it('atualiza composição e preserva histórico de auditoria', async () => {
     const database = await createTemporaryDatabase();
     createEvent(database, { name: 'Evento combos', startsAt: Date.now() });

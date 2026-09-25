@@ -15,6 +15,7 @@ import { comboChoicesMigration } from './combo-choices-migration';
 import { comboChoiceLabelMigration } from './combo-choice-label-migration';
 import { comboComponentOccurrencesMigration } from './combo-component-occurrences-migration';
 import { comboOrderAndFoodTermsMigration } from './combo-order-and-food-terms-migration';
+import { legacyFoodComboClassificationMigration } from './legacy-food-combo-classification-migration';
 import { syncMigration } from './sync-migration';
 import { syncInboxMigration } from './sync-inbox-migration';
 import { syncConflictMigration } from './sync-conflict-migration';
@@ -327,6 +328,7 @@ const migrations: readonly Migration[] = [
   comboChoiceLabelMigration,
   comboComponentOccurrencesMigration,
   comboOrderAndFoodTermsMigration,
+  legacyFoodComboClassificationMigration,
 ];
 
 function ensureMigrationTable(sqlite: BetterSqlite3.Database): void {
