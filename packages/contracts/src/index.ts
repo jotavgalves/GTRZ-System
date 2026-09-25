@@ -82,6 +82,7 @@ export const IPC_CHANNELS = {
   combosList: 'combos:list',
   combosCreate: 'combos:create',
   combosUpdate: 'combos:update',
+  combosDelete: 'combos:delete',
   operationsGetState: 'operations:get-state',
   operationsCreateServicePoint: 'operations:create-service-point',
   operationsRenameServicePoint: 'operations:rename-service-point',

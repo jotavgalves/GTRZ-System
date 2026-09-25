@@ -10,6 +10,7 @@ import {
   cancelOrder,
   closeOrder,
   createCombo,
+  deleteCombo,
   createEvent,
   configureFood,
   createExternalFoodItem,
@@ -203,6 +204,45 @@ describe('combo database', () => {
       .prepare('SELECT action FROM audit_log WHERE entity_id = ? ORDER BY id')
       .all(combo.id);
     expect(actions).toEqual([{ action: 'combo.created' }, { action: 'combo.updated' }]);
+    database.close();
+  });
+
+  it('exclui o combo vazio e bloqueia exclusão quando ele possui venda ativa ou paga', async () => {
+    const database = await createTemporaryDatabase();
+    const event = createEvent(database, { name: 'Evento exclusão de combo', startsAt: Date.now() });
+    const { beerId } = createProducts(database);
+    recordStockMovement(database, { productId: beerId, type: 'purchase', quantity: 4 });
+    const deletable = createCombo(database, {
+      name: 'Combo descartável',
+      salePriceCents: 1_000,
+      components: [{ productId: beerId, quantity: 1 }],
+    });
+    expect(deleteCombo(database, { comboId: deletable.id, reason: 'Limpeza do catálogo' })).toEqual({
+      comboId: deletable.id,
+      deleted: true,
+    });
+    expect(listCombos(database)).toEqual([]);
+
+    const protectedCombo = createCombo(database, {
+      name: 'Combo vendido',
+      salePriceCents: 1_000,
+      components: [{ productId: beerId, quantity: 1 }],
+    });
+    const point = createServicePoint(database, { label: 'Balcão', type: 'counter' });
+    const order = openOrder(database, point.id);
+    addOrderItem(database, {
+      orderId: order.id,
+      itemKind: 'combo',
+      itemId: protectedCombo.id,
+      quantity: 1,
+    });
+    expect(() =>
+      deleteCombo(database, { comboId: protectedCombo.id, reason: 'Limpeza do catálogo' }),
+    ).toThrow('vendas ou comandas registradas');
+    cancelOrder(database, { orderId: order.id, reason: 'Teste de limpeza' });
+    expect(deleteCombo(database, { comboId: protectedCombo.id, reason: 'Limpeza do catálogo' }))
+      .toMatchObject({ comboId: protectedCombo.id, deleted: true });
+    expect(event.name).toBe('Evento exclusão de combo');
     database.close();
   });
 

@@ -66,6 +66,11 @@ export interface DatabaseInventoryCombo {
   readonly updatedAt: number;
 }
 
+export interface DatabaseComboDeletionResult {
+  readonly comboId: string;
+  readonly deleted: true;
+}
+
 interface ComboRow {
   readonly id: string;
   readonly name: string;
@@ -575,4 +580,44 @@ export function updateCombo(
   })();
 
   return requireCombo(database, input.comboId);
+}
+
+export function deleteCombo(
+  database: DatabaseContext,
+  input: { readonly comboId: string; readonly reason: string },
+): DatabaseComboDeletionResult {
+  requireProduction(database);
+  const combo = requireCombo(database, input.comboId);
+  const reason = input.reason.trim();
+  if (reason.length < 3) {
+    throw new Error('Informe o motivo da exclusão do combo.');
+  }
+  const referencedOrders = database.sqlite
+    .prepare(
+      `SELECT COUNT(DISTINCT o.id) AS amount
+       FROM orders o
+       INNER JOIN order_items item ON item.order_id = o.id
+       WHERE item.item_kind = 'combo' AND item.item_id = ? AND o.status != 'cancelled'`,
+    )
+    .get(combo.id) as { readonly amount: number };
+  if (referencedOrders.amount > 0) {
+    throw new Error(
+      'O combo possui vendas ou comandas registradas. Cancele-as ou zere o evento antes de excluí-lo.',
+    );
+  }
+
+  database.sqlite.transaction(() => {
+    database.sqlite.prepare('DELETE FROM food_combo_sale_settlements WHERE combo_id = ?').run(combo.id);
+    database.sqlite.prepare('DELETE FROM food_combo_terms WHERE combo_id = ?').run(combo.id);
+    database.sqlite.prepare('DELETE FROM combo_components WHERE combo_id = ?').run(combo.id);
+    database.sqlite.prepare('DELETE FROM combos WHERE id = ?').run(combo.id);
+    appendAudit(database, {
+      action: 'combo.deleted',
+      entityType: 'combo',
+      entityId: combo.id,
+      details: { name: combo.name, reason },
+    });
+  })();
+
+  return { comboId: combo.id, deleted: true };
 }

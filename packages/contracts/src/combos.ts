@@ -70,6 +70,16 @@ export const updateComboInputSchema = z
   })
   .superRefine(validateUniqueComponents);
 
+export const deleteComboInputSchema = z.object({
+  comboId: z.uuid(),
+  reason: z.string().trim().min(3).max(240),
+});
+
+export const comboDeletionResultSchema = z.object({
+  comboId: z.uuid(),
+  deleted: z.literal(true),
+});
+
 export const comboComponentSchema = z.object({
   productId: z.uuid(),
   productName: z.string().min(1),
@@ -129,6 +139,8 @@ export type ExternalFoodComboTermsInput = z.infer<typeof externalFoodComboTermsI
 export type ExternalFoodComboTerms = z.infer<typeof externalFoodComboTermsSchema>;
 export type CreateComboInput = z.infer<typeof createComboInputSchema>;
 export type UpdateComboInput = z.infer<typeof updateComboInputSchema>;
+export type DeleteComboInput = z.infer<typeof deleteComboInputSchema>;
+export type ComboDeletionResult = z.infer<typeof comboDeletionResultSchema>;
 export type ComboComponent = z.infer<typeof comboComponentSchema>;
 export type ComboFinancials = z.infer<typeof comboFinancialsSchema>;
 export type InventoryCombo = z.infer<typeof comboSchema>;
@@ -137,4 +149,5 @@ export interface ComboApi {
   list(): Promise<readonly InventoryCombo[]>;
   create(input: CreateComboInput): Promise<InventoryCombo>;
   update(input: UpdateComboInput): Promise<InventoryCombo>;
+  delete(input: DeleteComboInput): Promise<ComboDeletionResult>;
 }

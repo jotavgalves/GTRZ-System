@@ -184,6 +184,7 @@ const SYNCHRONIZED_ACTIONS = new Set([
   'inventory.product-deleted',
   'combo.created',
   'combo.updated',
+  'combo.deleted',
   'inventory.stock-moved',
   'inventory.purchase-lot-corrected',
   'inventory.purchase-lot-voided',
@@ -245,6 +246,7 @@ const CATALOG_ACTIONS = new Set([
   'inventory.product-deleted',
   'combo.created',
   'combo.updated',
+  'combo.deleted',
 ]);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -1878,6 +1880,17 @@ export class CloudSyncService {
           )
           .run(`product.image:${payload.entityId}`, after.imageDataUrl, payload.createdAt);
       }
+      return;
+    }
+
+    if (payload.action === 'combo.deleted') {
+      if (payload.entityId === null) throw new Error('Exclusão remota de combo sem identificador.');
+      database.sqlite
+        .prepare('DELETE FROM food_combo_sale_settlements WHERE combo_id = ?')
+        .run(payload.entityId);
+      database.sqlite.prepare('DELETE FROM food_combo_terms WHERE combo_id = ?').run(payload.entityId);
+      database.sqlite.prepare('DELETE FROM combo_components WHERE combo_id = ?').run(payload.entityId);
+      database.sqlite.prepare('DELETE FROM combos WHERE id = ?').run(payload.entityId);
       return;
     }
 
