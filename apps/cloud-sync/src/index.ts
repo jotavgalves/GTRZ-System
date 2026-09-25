@@ -2012,11 +2012,12 @@ export class EventRoom extends DurableObject<Env> {
     const row = this.ctx.storage.sql
       .exec('SELECT payload_json FROM mobile_context WHERE context_id = 1')
       .toArray()[0] as { readonly payload_json: string } | undefined;
-    if (row === undefined) return { ticketLots: [], servicePoints: [], voucherCodes: [] };
+    if (row === undefined)
+      return { ticketLots: [], servicePoints: [], voucherCodes: [], vouchers: [] };
     try {
       return parseStoredJson(row.payload_json);
     } catch {
-      return { ticketLots: [], servicePoints: [], voucherCodes: [] };
+      return { ticketLots: [], servicePoints: [], voucherCodes: [], vouchers: [] };
     }
   }
 
@@ -2030,10 +2031,48 @@ export class EventRoom extends DurableObject<Env> {
   #replaceMobileContext(payload: JsonRecord): JsonRecord {
     const ticketLots = Array.isArray(payload.ticketLots) ? payload.ticketLots : [];
     const servicePoints = Array.isArray(payload.servicePoints) ? payload.servicePoints : [];
+    const vouchers = Array.isArray(payload.vouchers) ? payload.vouchers : [];
     const voucherCodes = Array.isArray(payload.voucherCodes) ? payload.voucherCodes : [];
-    if (ticketLots.length > 500 || servicePoints.length > 500 || voucherCodes.length > 5_000)
+    if (
+      ticketLots.length > 500 ||
+      servicePoints.length > 500 ||
+      vouchers.length > 5_000 ||
+      voucherCodes.length > 5_000
+    )
       throw new ApiError(400, 'INVALID_INPUT', 'Contexto móvel excede o limite permitido.');
-    const normalized = { ticketLots, servicePoints, voucherCodes };
+    const normalizedVouchers = vouchers.map((raw, index) => {
+      if (!isRecord(raw))
+        throw new ApiError(400, 'INVALID_INPUT', `vouchers[${String(index)}] é inválido.`);
+      const status = requiredString(raw.status, `vouchers[${String(index)}].status`, 16);
+      if (status !== 'active' && status !== 'exhausted' && status !== 'cancelled')
+        throw new ApiError(400, 'INVALID_INPUT', 'Status de voucher inválido.');
+      return {
+        id: requiredString(raw.id, `vouchers[${String(index)}].id`),
+        code: requiredString(raw.code, `vouchers[${String(index)}].code`, 32),
+        label: requiredString(raw.label, `vouchers[${String(index)}].label`, 100),
+        remainingBalanceCents: nonNegativeInteger(
+          raw.remainingBalanceCents,
+          `vouchers[${String(index)}].remainingBalanceCents`,
+        ),
+        status,
+        servicePointId:
+          raw.servicePointId === null
+            ? null
+            : requiredString(raw.servicePointId, `vouchers[${String(index)}].servicePointId`),
+      };
+    });
+    const normalizedCodes = [
+      ...new Set([
+        ...voucherCodes.filter((value): value is string => typeof value === 'string'),
+        ...normalizedVouchers.map((voucher) => voucher.code),
+      ]),
+    ];
+    const normalized = {
+      ticketLots,
+      servicePoints,
+      voucherCodes: normalizedCodes,
+      vouchers: normalizedVouchers,
+    };
     this.ctx.storage.sql
       .exec(
         `INSERT INTO mobile_context (context_id, payload_json, updated_at) VALUES (1, ?, ?)
@@ -2237,6 +2276,7 @@ export class EventRoom extends DurableObject<Env> {
     if (voucherCodes.some((value) => value.toLocaleUpperCase('pt-BR') === code))
       throw new ApiError(409, 'VOUCHER_CODE_EXISTS', 'Este código de voucher já existe.');
     const now = Date.now();
+    const voucherId = crypto.randomUUID();
     const journalPayload = {
       commandId,
       deviceId,
@@ -2244,12 +2284,30 @@ export class EventRoom extends DurableObject<Env> {
       profile: 'mobile-vouchers',
       action: 'voucher.created',
       entityType: 'voucher',
-      entityId: crypto.randomUUID(),
+      entityId: voucherId,
       createdAt: now,
       details: { code, initialBalanceCents, label, servicePointId, operatorName: deviceLabel },
     };
     const response = this.ctx.storage.transactionSync(() => {
-      this.#saveMobileContext({ ...context, voucherCodes: [...voucherCodes, code] }, now);
+      const vouchers = Array.isArray(context.vouchers) ? context.vouchers.filter(isRecord) : [];
+      this.#saveMobileContext(
+        {
+          ...context,
+          voucherCodes: [...voucherCodes, code],
+          vouchers: [
+            ...vouchers,
+            {
+              id: voucherId,
+              code,
+              label,
+              remainingBalanceCents: initialBalanceCents,
+              status: 'active',
+              servicePointId,
+            },
+          ],
+        },
+        now,
+      );
       return this.#recordCommand(commandId, 'journal.committed', journalPayload, now);
     });
     this.#broadcast(response.event, eventId);
@@ -2453,8 +2511,14 @@ export class EventRoom extends DurableObject<Env> {
   ): CommandResponse {
     const commandId = requiredString(payload.commandId, 'commandId');
     const saleId = requiredString(payload.saleId, 'saleId');
-    const paymentMethod = requiredString(payload.paymentMethod, 'paymentMethod', 24);
-    if (!['cash', 'pix', 'credit-card', 'debit-card'].includes(paymentMethod)) {
+    const requestedPaymentMethod =
+      payload.paymentMethod === undefined || payload.paymentMethod === null
+        ? null
+        : requiredString(payload.paymentMethod, 'paymentMethod', 24);
+    if (
+      requestedPaymentMethod !== null &&
+      !['cash', 'pix', 'credit-card', 'debit-card'].includes(requestedPaymentMethod)
+    ) {
       throw new ApiError(400, 'INVALID_INPUT', 'Método de pagamento inválido.');
     }
     const rawItems = payload.items;
@@ -2685,14 +2749,6 @@ export class EventRoom extends DurableObject<Env> {
         componentLabels.set(productId, product.label);
       }
       const totalCents = items.reduce((total, item) => total + item.totalCents, 0);
-      const receivedCents =
-        paymentMethod === 'cash'
-          ? nonNegativeInteger(payload.receivedCents, 'receivedCents')
-          : null;
-      if (receivedCents !== null && receivedCents < totalCents) {
-        throw new ApiError(400, 'INVALID_INPUT', 'O valor recebido não cobre o total da venda.');
-      }
-      const changeCents = receivedCents === null ? 0 : receivedCents - totalCents;
       for (const [productId, quantity] of componentQuantities) {
         this.ctx.storage.sql
           .exec(
@@ -2725,6 +2781,94 @@ export class EventRoom extends DurableObject<Env> {
         40,
       );
       const servicePointType = selectedServicePoint.type === 'table' ? 'table' : 'counter';
+      const rawVoucherUse = payload.voucherUse;
+      const voucherUse =
+        rawVoucherUse === undefined || rawVoucherUse === null
+          ? null
+          : (() => {
+              if (!isRecord(rawVoucherUse))
+                throw new ApiError(400, 'INVALID_INPUT', 'Voucher da venda inválido.');
+              return {
+                code: requiredString(rawVoucherUse.code, 'voucherUse.code', 32)
+                  .toLocaleUpperCase('pt-BR')
+                  .replaceAll(/\s+/gu, '-'),
+                amountCents: positiveInteger(rawVoucherUse.amountCents, 'voucherUse.amountCents'),
+              };
+            })();
+      const contextVouchers = Array.isArray(context.vouchers) ? context.vouchers : [];
+      const selectedVoucher =
+        voucherUse === null
+          ? null
+          : contextVouchers.find(
+              (raw) =>
+                isRecord(raw) &&
+                typeof raw.code === 'string' &&
+                raw.code.toLocaleUpperCase('pt-BR') === voucherUse.code,
+            );
+      if (voucherUse !== null && !isRecord(selectedVoucher)) {
+        throw new ApiError(
+          409,
+          'VOUCHER_UNAVAILABLE',
+          'Este voucher não está disponível para uso neste caixa.',
+        );
+      }
+      const voucherBalance =
+        selectedVoucher === null
+          ? 0
+          : nonNegativeInteger(
+              selectedVoucher.remainingBalanceCents,
+              'voucher.remainingBalanceCents',
+            );
+      if (
+        voucherUse !== null &&
+        (selectedVoucher.status !== 'active' ||
+          selectedVoucher.servicePointId !== servicePointId ||
+          voucherUse.amountCents > voucherBalance ||
+          voucherUse.amountCents > totalCents)
+      ) {
+        throw new ApiError(
+          409,
+          'VOUCHER_UNAVAILABLE',
+          'O voucher não possui saldo válido para esta mesa.',
+        );
+      }
+      const voucherCents = voucherUse?.amountCents ?? 0;
+      const paymentCents = totalCents - voucherCents;
+      if (
+        (paymentCents === 0 && requestedPaymentMethod !== null) ||
+        (paymentCents > 0 && requestedPaymentMethod === null)
+      ) {
+        throw new ApiError(
+          400,
+          'INVALID_INPUT',
+          'Informe a forma de pagamento somente para o saldo restante da venda.',
+        );
+      }
+      const receivedCents =
+        requestedPaymentMethod === 'cash'
+          ? nonNegativeInteger(payload.receivedCents, 'receivedCents')
+          : null;
+      if (receivedCents !== null && receivedCents < paymentCents) {
+        throw new ApiError(400, 'INVALID_INPUT', 'O valor recebido não cobre o saldo da venda.');
+      }
+      const changeCents = receivedCents === null ? 0 : receivedCents - paymentCents;
+      if (voucherUse !== null) {
+        this.#saveMobileContext(
+          {
+            ...context,
+            vouchers: contextVouchers.map((raw) =>
+              raw === selectedVoucher
+                ? {
+                    ...raw,
+                    remainingBalanceCents: voucherBalance - voucherUse.amountCents,
+                    status: voucherBalance === voucherUse.amountCents ? 'exhausted' : 'active',
+                  }
+                : raw,
+            ),
+          },
+          now,
+        );
+      }
       const orderItems = items.map((item) => ({
         id: crypto.randomUUID(),
         itemKind: item.itemKind,
@@ -2771,20 +2915,23 @@ export class EventRoom extends DurableObject<Env> {
             servicePointType,
           },
           items: orderItems,
-          payments: [
-            {
-              id: crypto.randomUUID(),
-              method: paymentMethod,
-              amountCents: totalCents,
-              receivedCents,
-              changeCents,
-            },
-          ],
+          payments:
+            requestedPaymentMethod === null
+              ? []
+              : [
+                  {
+                    id: crypto.randomUUID(),
+                    method: requestedPaymentMethod,
+                    amountCents: paymentCents,
+                    receivedCents,
+                    changeCents,
+                  },
+                ],
           subtotalCents: totalCents,
           totalCents,
           totalChangeCents: changeCents,
           stockMovements,
-          vouchers: [],
+          vouchers: voucherUse === null ? [] : [voucherUse],
           operatorName: deviceLabel,
           originLabel: servicePointLabel,
         },
@@ -4502,6 +4649,8 @@ export default {
                   ? context.servicePoints
                   : [],
               voucherCodes: mobile.permissions.vouchers ? context.voucherCodes : [],
+              vouchers:
+                mobile.permissions.sales || mobile.permissions.vouchers ? context.vouchers : [],
             }),
             mobile.token,
           );

@@ -1117,9 +1117,22 @@ export class CloudSyncService {
       readonly type: 'counter' | 'table';
       readonly active: number;
     }[];
-    const voucherCodes = database.sqlite
-      .prepare('SELECT code FROM vouchers WHERE event_id = ?')
-      .all(activeEventId) as readonly { readonly code: string }[];
+    const vouchers = database.sqlite
+      .prepare(
+        `SELECT v.id, v.code, v.label, v.remaining_balance_cents, v.status,
+                binding.value AS service_point_id
+         FROM vouchers v
+         LEFT JOIN app_meta binding ON binding.key = 'voucher.service-point:' || v.id
+         WHERE v.event_id = ?`,
+      )
+      .all(activeEventId) as readonly {
+      readonly id: string;
+      readonly code: string;
+      readonly label: string;
+      readonly remaining_balance_cents: number;
+      readonly status: 'active' | 'exhausted' | 'cancelled';
+      readonly service_point_id: string | null;
+    }[];
     const context = {
       eventId: activeEventId,
       ticketLots: ticketLots.map((lot) => ({
@@ -1137,7 +1150,15 @@ export class CloudSyncService {
         type: point.type,
         active: point.active === 1,
       })),
-      voucherCodes: voucherCodes.map((voucher) => voucher.code),
+      voucherCodes: vouchers.map((voucher) => voucher.code),
+      vouchers: vouchers.map((voucher) => ({
+        id: voucher.id,
+        code: voucher.code,
+        label: voucher.label,
+        remainingBalanceCents: voucher.remaining_balance_cents,
+        status: voucher.status,
+        servicePointId: voucher.service_point_id,
+      })),
     };
     const fingerprint = JSON.stringify(context);
     const stateKey = `mobile.context:${activeEventId}`;
