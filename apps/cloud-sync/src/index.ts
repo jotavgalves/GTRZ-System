@@ -2025,6 +2025,7 @@ export class EventRoom extends DurableObject<Env> {
   }
 
   #mobileContext(): JsonRecord {
+    this.#hydrateVoucherContextFromJournal();
     const current = this.ctx.storage.sql
       .exec('SELECT COALESCE(MAX(sequence), 0) AS sequence FROM event_log')
       .one() as { readonly sequence: number };
@@ -2105,6 +2106,11 @@ export class EventRoom extends DurableObject<Env> {
       servicePoints,
       voucherCodes: normalizedCodes,
       vouchers: contextVouchers,
+      voucherProjectionSequence:
+        typeof storedContext.voucherProjectionSequence === 'number' &&
+        storedContext.voucherProjectionSequence >= 0
+          ? Math.floor(storedContext.voucherProjectionSequence)
+          : 0,
     };
     const changed = JSON.stringify(storedContext) !== JSON.stringify(normalized);
     this.ctx.storage.sql
@@ -2139,6 +2145,51 @@ export class EventRoom extends DurableObject<Env> {
         now,
       )
       .toArray();
+  }
+
+  #hydrateVoucherContextFromJournal(): void {
+    const context = this.#mobileContextPayload();
+    const after =
+      typeof context.voucherProjectionSequence === 'number' &&
+      Number.isInteger(context.voucherProjectionSequence) &&
+      context.voucherProjectionSequence >= 0
+        ? context.voucherProjectionSequence
+        : 0;
+    const events = this.ctx.storage.sql
+      .exec(
+        `SELECT sequence, payload_json
+         FROM event_log
+         WHERE sequence > ? AND type = 'journal.recorded'
+         ORDER BY sequence ASC`,
+        after,
+      )
+      .toArray();
+    if (events.length === 0) return;
+
+    let highestSequence = after;
+    for (const event of events) {
+      highestSequence = Number(event.sequence);
+      const payload = parseStoredJson(storedString(event.payload_json, 'payload_json'));
+      const action = typeof payload.action === 'string' ? payload.action : null;
+      const entityId = payload.entityId === null ? null : payload.entityId;
+      const details = isRecord(payload.details) ? payload.details : null;
+      const createdAt =
+        typeof payload.createdAt === 'number' && Number.isInteger(payload.createdAt)
+          ? payload.createdAt
+          : null;
+      if (action !== null && details !== null && createdAt !== null) {
+        this.#applyVoucherJournalContext(
+          action,
+          typeof entityId === 'string' ? entityId : null,
+          details,
+          createdAt,
+        );
+      }
+    }
+    this.#saveMobileContext(
+      { ...this.#mobileContextPayload(), voucherProjectionSequence: highestSequence },
+      Date.now(),
+    );
   }
 
   #applyVoucherJournalContext(
@@ -3800,6 +3851,12 @@ export class EventRoom extends DurableObject<Env> {
         details,
         createdAt,
       );
+      if (mobileContextChanged) {
+        this.#saveMobileContext(
+          { ...this.#mobileContextPayload(), voucherProjectionSequence: result.event.sequence },
+          now,
+        );
+      }
       if (action === 'operations.order-paid') {
         this.#enqueueReceiptJob(eventId, commandId, {
           action,
