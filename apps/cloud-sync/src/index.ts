@@ -2067,19 +2067,44 @@ export class EventRoom extends DurableObject<Env> {
           raw.servicePointId === null
             ? null
             : requiredString(raw.servicePointId, `vouchers[${String(index)}].servicePointId`),
+        updatedAt:
+          raw.updatedAt === undefined
+            ? 0
+            : nonNegativeInteger(raw.updatedAt, `vouchers[${String(index)}].updatedAt`),
       };
     });
+    const currentVouchers = Array.isArray(storedContext.vouchers)
+      ? storedContext.vouchers.filter(isRecord)
+      : [];
+    const mergedVouchers = new Map<string, JsonRecord>();
+    for (const voucher of currentVouchers) {
+      const id = typeof voucher.id === 'string' ? voucher.id : null;
+      if (id !== null) mergedVouchers.set(id, voucher);
+    }
+    for (const voucher of normalizedVouchers) {
+      const existing = mergedVouchers.get(voucher.id);
+      const existingUpdatedAt =
+        existing !== undefined && typeof existing.updatedAt === 'number' && existing.updatedAt >= 0
+          ? Math.floor(existing.updatedAt)
+          : 0;
+      if (existingUpdatedAt <= voucher.updatedAt) {
+        mergedVouchers.set(voucher.id, voucher);
+      }
+    }
+    const contextVouchers = [...mergedVouchers.values()];
     const normalizedCodes = [
       ...new Set([
         ...voucherCodes.filter((value): value is string => typeof value === 'string'),
-        ...normalizedVouchers.map((voucher) => voucher.code),
+        ...contextVouchers.flatMap((voucher) =>
+          typeof voucher.code === 'string' ? [voucher.code] : [],
+        ),
       ]),
     ];
     const normalized = {
       ticketLots,
       servicePoints,
       voucherCodes: normalizedCodes,
-      vouchers: normalizedVouchers,
+      vouchers: contextVouchers,
     };
     const changed = JSON.stringify(storedContext) !== JSON.stringify(normalized);
     this.ctx.storage.sql
@@ -2114,6 +2139,119 @@ export class EventRoom extends DurableObject<Env> {
         now,
       )
       .toArray();
+  }
+
+  #applyVoucherJournalContext(
+    action: string,
+    entityId: string | null,
+    details: JsonRecord,
+    createdAt: number,
+  ): boolean {
+    if (!action.startsWith('voucher.') || entityId === null) return false;
+    const context = this.#mobileContextPayload();
+    const vouchers = Array.isArray(context.vouchers) ? context.vouchers.filter(isRecord) : [];
+    const index = vouchers.findIndex((voucher) => voucher.id === entityId);
+    const current = index < 0 ? null : (vouchers[index] ?? null);
+    const currentUpdatedAt =
+      current !== null && typeof current.updatedAt === 'number' && current.updatedAt >= 0
+        ? Math.floor(current.updatedAt)
+        : 0;
+    if (currentUpdatedAt > createdAt) return false;
+
+    let next = current === null ? null : { ...current };
+    if (action === 'voucher.created') {
+      const code = typeof details.code === 'string' ? details.code : null;
+      const label = typeof details.label === 'string' ? details.label : null;
+      const initialBalanceCents =
+        typeof details.initialBalanceCents === 'number' &&
+        Number.isInteger(details.initialBalanceCents) &&
+        details.initialBalanceCents > 0
+          ? details.initialBalanceCents
+          : null;
+      if (code === null || label === null || initialBalanceCents === null) return false;
+      next = {
+        id: entityId,
+        code,
+        label,
+        remainingBalanceCents: initialBalanceCents,
+        status: 'active',
+        servicePointId: typeof details.servicePointId === 'string' ? details.servicePointId : null,
+        updatedAt: createdAt,
+      };
+    } else if (next !== null && action === 'voucher.service-point-bound') {
+      if (typeof details.servicePointId !== 'string') return false;
+      next.servicePointId = details.servicePointId;
+      next.updatedAt = createdAt;
+    } else if (next !== null && action === 'voucher.updated') {
+      if (
+        typeof details.code !== 'string' ||
+        typeof details.label !== 'string' ||
+        typeof details.servicePointId !== 'string'
+      ) {
+        return false;
+      }
+      next.code = details.code;
+      next.label = details.label;
+      next.servicePointId = details.servicePointId;
+      next.updatedAt = createdAt;
+    } else if (next !== null && action === 'voucher.balance-added') {
+      const amountCents =
+        typeof details.amountCents === 'number' &&
+        Number.isInteger(details.amountCents) &&
+        details.amountCents > 0
+          ? details.amountCents
+          : null;
+      if (amountCents === null || typeof next.remainingBalanceCents !== 'number') return false;
+      next.remainingBalanceCents = next.remainingBalanceCents + amountCents;
+      if (next.status !== 'cancelled') next.status = 'active';
+      next.updatedAt = createdAt;
+    } else if (next !== null && action === 'voucher.value-updated') {
+      const remainingBalanceCents =
+        typeof details.remainingBalanceCents === 'number' &&
+        Number.isInteger(details.remainingBalanceCents) &&
+        details.remainingBalanceCents >= 0
+          ? details.remainingBalanceCents
+          : null;
+      const status = details.status;
+      if (
+        remainingBalanceCents === null ||
+        (status !== 'active' && status !== 'exhausted' && status !== 'cancelled')
+      ) {
+        return false;
+      }
+      next.remainingBalanceCents = remainingBalanceCents;
+      next.status = status;
+      next.updatedAt = createdAt;
+    } else if (next !== null && (action === 'voucher.cancelled' || action === 'voucher.active')) {
+      next.status = action === 'voucher.active' ? 'active' : 'cancelled';
+      next.updatedAt = createdAt;
+    } else if (action === 'voucher.deleted' || action === 'voucher.deleted-with-reversal') {
+      if (index < 0) return false;
+      vouchers.splice(index, 1);
+      const voucherCodes = Array.isArray(context.voucherCodes)
+        ? context.voucherCodes.filter(
+            (code): code is string => typeof code === 'string' && code !== current?.code,
+          )
+        : [];
+      this.#saveMobileContext({ ...context, voucherCodes, vouchers }, createdAt);
+      return true;
+    } else {
+      return false;
+    }
+
+    if (next === null) return false;
+    if (index < 0) vouchers.push(next);
+    else vouchers[index] = next;
+    const voucherCodes = [
+      ...new Set([
+        ...(Array.isArray(context.voucherCodes)
+          ? context.voucherCodes.filter((code): code is string => typeof code === 'string')
+          : []),
+        typeof next.code === 'string' ? next.code : '',
+      ]),
+    ].filter((code) => code.length > 0);
+    this.#saveMobileContext({ ...context, voucherCodes, vouchers }, createdAt);
+    return true;
   }
 
   #commitMobileTicketSale(
@@ -2328,6 +2466,7 @@ export class EventRoom extends DurableObject<Env> {
               remainingBalanceCents: initialBalanceCents,
               status: 'active',
               servicePointId,
+              updatedAt: now,
             },
           ],
         },
@@ -3655,6 +3794,12 @@ export class EventRoom extends DurableObject<Env> {
         { action, auditId, createdAt, details, deviceId, entityId, entityType, profile },
         now,
       );
+      const mobileContextChanged = this.#applyVoucherJournalContext(
+        action,
+        entityId,
+        details,
+        createdAt,
+      );
       if (action === 'operations.order-paid') {
         this.#enqueueReceiptJob(eventId, commandId, {
           action,
@@ -3678,7 +3823,7 @@ export class EventRoom extends DurableObject<Env> {
           profile,
         });
       }
-      return result;
+      return { ...result, result: { ...result.result, mobileContextChanged } };
     });
     this.#broadcast(response.event, eventId);
     this.#recordJournalInMonitor(eventId, response.event, false);

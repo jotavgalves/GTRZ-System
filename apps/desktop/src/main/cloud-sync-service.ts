@@ -1120,7 +1120,7 @@ export class CloudSyncService {
     }[];
     const vouchers = database.sqlite
       .prepare(
-        `SELECT v.id, v.code, v.label, v.remaining_balance_cents, v.status,
+        `SELECT v.id, v.code, v.label, v.remaining_balance_cents, v.status, v.updated_at,
                 binding.value AS service_point_id
          FROM vouchers v
          LEFT JOIN app_meta binding ON binding.key = 'voucher.service-point:' || v.id
@@ -1132,6 +1132,7 @@ export class CloudSyncService {
       readonly label: string;
       readonly remaining_balance_cents: number;
       readonly status: 'active' | 'exhausted' | 'cancelled';
+      readonly updated_at: number;
       readonly service_point_id: string | null;
     }[];
     const context = {
@@ -1159,6 +1160,7 @@ export class CloudSyncService {
         remainingBalanceCents: voucher.remaining_balance_cents,
         status: voucher.status,
         servicePointId: voucher.service_point_id,
+        updatedAt: voucher.updated_at,
       })),
     };
     const fingerprint = JSON.stringify(context);
