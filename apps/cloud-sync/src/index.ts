@@ -2031,7 +2031,12 @@ export class EventRoom extends DurableObject<Env> {
   #replaceMobileContext(payload: JsonRecord): JsonRecord {
     const ticketLots = Array.isArray(payload.ticketLots) ? payload.ticketLots : [];
     const servicePoints = Array.isArray(payload.servicePoints) ? payload.servicePoints : [];
-    const vouchers = Array.isArray(payload.vouchers) ? payload.vouchers : [];
+    const storedContext = this.#mobileContextPayload();
+    const vouchers = Array.isArray(payload.vouchers)
+      ? payload.vouchers
+      : Array.isArray(storedContext.vouchers)
+        ? storedContext.vouchers
+        : [];
     const voucherCodes = Array.isArray(payload.voucherCodes) ? payload.voucherCodes : [];
     if (
       ticketLots.length > 500 ||
