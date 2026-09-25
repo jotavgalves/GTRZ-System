@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 
 import type { DashboardState } from '@gtrz/contracts';
 
 import { useRealtimeReload } from '../../shared/realtime/useRealtimeReload';
+import { getCachedViewState, setCachedViewState } from '../../shared/navigation/view-state-cache';
 
 interface DashboardViewState {
   readonly state: DashboardState | null;
@@ -16,8 +17,9 @@ function getErrorMessage(error: unknown): string {
 }
 
 export function useDashboard(): DashboardViewState {
-  const [state, setState] = useState<DashboardState | null>(null);
-  const [loading, setLoading] = useState(true);
+  const initialState = useRef(getCachedViewState<DashboardState>('dashboard')).current;
+  const [state, setState] = useState<DashboardState | null>(() => initialState);
+  const [loading, setLoading] = useState(() => initialState === null);
   const [error, setError] = useState<string | null>(null);
 
   const reload = useCallback(async (silent = false): Promise<void> => {
@@ -25,7 +27,7 @@ export function useDashboard(): DashboardViewState {
     setError(null);
 
     try {
-      setState(await window.gtrz.dashboard.getState());
+      setState(setCachedViewState('dashboard', await window.gtrz.dashboard.getState()));
     } catch (loadError: unknown) {
       setError(getErrorMessage(loadError));
     } finally {
@@ -34,8 +36,8 @@ export function useDashboard(): DashboardViewState {
   }, []);
 
   useEffect(() => {
-    void reload();
-  }, [reload]);
+    void reload(initialState !== null);
+  }, [initialState, reload]);
   useRealtimeReload(reload);
 
   return { state, loading, error, reload };

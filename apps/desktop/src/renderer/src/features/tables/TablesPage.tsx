@@ -49,6 +49,14 @@ export function TablesPage(): React.JSX.Element {
       ? []
       : recentOrders.filter((item) => item.servicePointId === selectedServicePoint.id);
 
+  if (loading && state === null) {
+    return (
+      <section className="feature-page">
+        <div className="route-state">Preparando mesas e balcão…</div>
+      </section>
+    );
+  }
+
   return (
     <section className="feature-page">
       <header className="feature-header">

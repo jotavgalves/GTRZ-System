@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 
 import type {
   CloseOrderInput,
@@ -11,6 +11,7 @@ import type {
 } from '@gtrz/contracts';
 
 import { useRealtimeReload } from '../../shared/realtime/useRealtimeReload';
+import { getCachedViewState, setCachedViewState } from '../../shared/navigation/view-state-cache';
 
 interface OperationsViewState {
   readonly state: OperationState | null;
@@ -44,10 +45,11 @@ function getErrorMessage(error: unknown): string {
 }
 
 export function useOperations(): OperationsViewState {
-  const [state, setState] = useState<OperationState | null>(null);
+  const initialState = useRef(getCachedViewState<OperationState>('operations')).current;
+  const [state, setState] = useState<OperationState | null>(() => initialState);
   const [order, setOrder] = useState<Order | null>(null);
   const [selectedServicePoint, setSelectedServicePoint] = useState<ServicePoint | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(() => initialState === null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
@@ -58,7 +60,7 @@ export function useOperations(): OperationsViewState {
 
     try {
       const nextState = await window.gtrz.operations.getState();
-      setState(nextState);
+      setState(setCachedViewState('operations', nextState));
       setSelectedServicePoint((current) => {
         if (current === null) return null;
         return nextState.servicePoints.find((item) => item.id === current.id) ?? null;
@@ -71,8 +73,8 @@ export function useOperations(): OperationsViewState {
   }, []);
 
   useEffect(() => {
-    void reload();
-  }, [reload]);
+    void reload(initialState !== null);
+  }, [initialState, reload]);
   useRealtimeReload(reload);
 
   const run = useCallback(

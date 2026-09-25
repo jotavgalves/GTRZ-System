@@ -6,6 +6,7 @@ import type { CloudSyncStatus, SystemInfo } from '@gtrz/contracts';
 
 import gtrzLockup from '../../assets/brand/gtrz-lockup.svg';
 import { navigationModules } from '../../shared/navigation/modules';
+import { preloadViewState } from '../../shared/navigation/view-state-cache';
 import { ProfileSwitcher } from '../../shared/session/ProfileSwitcher';
 import { useSession } from '../../shared/session/session-context';
 
@@ -49,6 +50,16 @@ export function AppShell(): React.JSX.Element {
     return () => {
       mounted = false;
     };
+  }, []);
+
+  useEffect(() => {
+    // The three operational views are the routes operators alternate between most often.
+    // Warm their local SQLite snapshots before a sidebar click so no empty intermediate view is painted.
+    void Promise.allSettled([
+      preloadViewState('dashboard', () => window.gtrz.dashboard.getState()),
+      preloadViewState('inventory', () => window.gtrz.inventory.getState()),
+      preloadViewState('operations', () => window.gtrz.operations.getState()),
+    ]);
   }, []);
 
   useEffect(() => {
