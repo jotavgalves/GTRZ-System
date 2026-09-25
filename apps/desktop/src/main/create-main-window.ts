@@ -5,9 +5,11 @@ import { fileURLToPath } from 'node:url';
 const mainDirectory = path.dirname(fileURLToPath(import.meta.url));
 
 function getWindowIconPath(): string {
+  const iconName = process.platform === 'win32' ? 'icon.ico' : 'icon.png';
+
   return app.isPackaged
-    ? path.join(process.resourcesPath, 'icon.png')
-    : path.join(mainDirectory, '../../resources/icon.png');
+    ? path.join(process.resourcesPath, iconName)
+    : path.join(mainDirectory, '../../resources', iconName);
 }
 
 interface CreateMainWindowOptions {

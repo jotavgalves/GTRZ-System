@@ -18,6 +18,10 @@ let cloudSyncService: CloudSyncService | null = null;
 const runtimeEnvironment = getRuntimeEnvironment();
 const cloudSyncEnabledForRuntime = process.env.GTRZ_E2E_DISABLE_CLOUD_SYNC !== '1';
 
+if (process.platform === 'win32') {
+  app.setAppUserModelId('br.com.gtrz.system');
+}
+
 if (runtimeEnvironment === 'test') {
   const isolatedTestDataPath = process.env.GTRZ_E2E_USER_DATA_PATH?.trim();
   app.setPath(
