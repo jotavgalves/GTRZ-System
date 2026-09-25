@@ -100,6 +100,7 @@ export const orderSchema = z.object({
 export const operationCatalogItemSchema = z.object({
   id: z.uuid(),
   kind: orderItemKindSchema,
+  category: z.enum(['food', 'drink']),
   name: z.string().trim().min(1).max(120),
   salePriceCents: z.number().int().nonnegative(),
   availableQuantity: z.number().int().nonnegative(),

@@ -75,6 +75,7 @@ export interface DatabaseOrder {
 export interface DatabaseOperationCatalogItem {
   readonly id: string;
   readonly kind: DatabaseOrderItemKind;
+  readonly category: 'food' | 'drink';
   readonly name: string;
   readonly salePriceCents: number;
   readonly availableQuantity: number;

@@ -12,6 +12,7 @@ import type { DatabaseContext } from './types';
 interface ProductCatalogRow {
   readonly id: string;
   readonly name: string;
+  readonly category: 'food' | 'drink';
   readonly sale_price_cents: number;
   readonly active: number;
   readonly available_quantity: number;
@@ -52,6 +53,7 @@ export function listOperationCatalog(
             `SELECT
                p.id,
                p.name,
+               p.kind AS category,
                p.sale_price_cents,
                p.active,
                p.combo_only,
@@ -67,6 +69,7 @@ export function listOperationCatalog(
     return {
       id: product.id,
       kind: 'product' as const,
+      category: product.category,
       name: product.name,
       salePriceCents: product.sale_price_cents,
       availableQuantity: product.available_quantity,
@@ -84,6 +87,7 @@ export function listOperationCatalog(
           .map((combo) => ({
             id: combo.id,
             kind: 'combo' as const,
+            category: combo.kind,
             name: combo.name,
             salePriceCents: combo.salePriceCents,
             availableQuantity: combo.availableUnits,

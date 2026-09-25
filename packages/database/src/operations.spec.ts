@@ -120,6 +120,35 @@ describe('event operations database', () => {
     database.close();
   });
 
+  it('identifica combo de comida separadamente no catálogo de vendas', async () => {
+    const database = await createTemporaryDatabase();
+    createEvent(database, { name: 'Evento de categorias', startsAt: Date.now() });
+    const category = createProductCategory(database, 'Cozinha');
+    const arepa = createInventoryProduct(database, {
+      categoryId: category.id,
+      name: 'Arepa',
+      kind: 'food',
+      costCents: 800,
+      salePriceCents: 1_600,
+      lowStockThreshold: 1,
+    });
+    recordStockMovement(database, { productId: arepa.id, type: 'purchase', quantity: 4 });
+    const combo = createCombo(database, {
+      name: 'Combo de cozinha',
+      kind: 'food',
+      salePriceCents: 2_400,
+      components: [{ productId: arepa.id, quantity: 1 }],
+    });
+
+    expect(getOperationState(database).catalog).toContainEqual(
+      expect.objectContaining({ id: arepa.id, kind: 'product', category: 'food' }),
+    );
+    expect(getOperationState(database).catalog).toContainEqual(
+      expect.objectContaining({ id: combo.id, kind: 'combo', category: 'food' }),
+    );
+    database.close();
+  });
+
   it('fecha com pagamento misto, calcula troco e baixa componentes atomicamente', async () => {
     const database = await createTemporaryDatabase();
     const event = createEvent(database, { name: 'Evento pagamento', startsAt: Date.now() });
