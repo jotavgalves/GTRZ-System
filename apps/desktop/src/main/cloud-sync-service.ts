@@ -216,6 +216,7 @@ const SYNCHRONIZED_ACTIONS = new Set([
   'voucher.service-point-bound',
   'voucher.updated',
   'voucher.balance-added',
+  'voucher.value-updated',
   'voucher.cancelled',
   'voucher.active',
   'voucher.deleted',
@@ -3000,6 +3001,35 @@ export class CloudSyncService {
            WHERE id = ? AND event_id = ?`,
         )
         .run(amount, amount, payload.createdAt, payload.entityId, eventId);
+      return;
+    }
+    if (payload.action === 'voucher.value-updated') {
+      const initialBalanceCents = integerField(payload.details, 'initialBalanceCents');
+      const remainingBalanceCents = integerField(payload.details, 'remainingBalanceCents');
+      const status = stringField(payload.details, 'status');
+      if (
+        initialBalanceCents === null ||
+        initialBalanceCents <= 0 ||
+        remainingBalanceCents === null ||
+        remainingBalanceCents < 0 ||
+        (status !== 'active' && status !== 'exhausted' && status !== 'cancelled')
+      ) {
+        throw new Error('Correção remota de valor de voucher inválida.');
+      }
+      database.sqlite
+        .prepare(
+          `UPDATE vouchers
+           SET initial_balance_cents = ?, remaining_balance_cents = ?, status = ?, updated_at = ?
+           WHERE id = ? AND event_id = ?`,
+        )
+        .run(
+          initialBalanceCents,
+          remainingBalanceCents,
+          status,
+          payload.createdAt,
+          payload.entityId,
+          eventId,
+        );
       return;
     }
     if (payload.action === 'voucher.cancelled' || payload.action === 'voucher.active') {

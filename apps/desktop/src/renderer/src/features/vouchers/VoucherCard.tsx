@@ -14,6 +14,7 @@ import { useState } from 'react';
 import type {
   AddVoucherBalanceInput,
   DeleteVoucherInput,
+  SetVoucherTotalInput,
   UpdateVoucherInput,
   Voucher,
   VoucherServicePoint,
@@ -27,6 +28,7 @@ interface VoucherCardProps {
   readonly onChangeStatus: (voucherId: string, status: 'active' | 'cancelled') => Promise<void>;
   readonly onUpdate: (input: UpdateVoucherInput) => Promise<void>;
   readonly onAddBalance: (input: AddVoucherBalanceInput) => Promise<void>;
+  readonly onSetTotal: (input: SetVoucherTotalInput) => Promise<void>;
   readonly onDelete: (input: DeleteVoucherInput) => Promise<void>;
 }
 
@@ -56,6 +58,7 @@ export function VoucherCard({
   onChangeStatus,
   onUpdate,
   onAddBalance,
+  onSetTotal,
   onDelete,
 }: VoucherCardProps): React.JSX.Element {
   const [managerOpen, setManagerOpen] = useState(false);
@@ -66,6 +69,8 @@ export function VoucherCard({
     voucher.servicePointActive ? (voucher.servicePointId ?? '') : '',
   );
   const [balanceToAdd, setBalanceToAdd] = useState('');
+  const [totalValue, setTotalValue] = useState((voucher.initialBalanceCents / 100).toFixed(2));
+  const [totalValueReason, setTotalValueReason] = useState('');
   const [deleteReason, setDeleteReason] = useState('');
 
   const isDeleted = voucher.deletedAt !== null;
@@ -282,6 +287,65 @@ export function VoucherCard({
               >
                 <WalletCards size={15} aria-hidden="true" />
                 Adicionar
+              </button>
+            </div>
+          </div>
+
+          <div className="voucher-manager__section">
+            <strong>Corrigir valor total</strong>
+            <p className="form-hint">
+              Já utilizado:{' '}
+              {formatMoney(voucher.initialBalanceCents - voucher.remainingBalanceCents)}. O novo
+              total não pode ficar abaixo desse valor. Toda correção fica registrada no diário do
+              evento.
+            </p>
+            <div className="voucher-manager__inline">
+              <label className="form-field">
+                <span>Novo total</span>
+                <input
+                  disabled={busy}
+                  inputMode="decimal"
+                  onChange={(event) => {
+                    setTotalValue(event.target.value);
+                  }}
+                  placeholder="100,00"
+                  value={totalValue}
+                />
+              </label>
+              <label className="form-field">
+                <span>Motivo</span>
+                <input
+                  disabled={busy}
+                  maxLength={250}
+                  onChange={(event) => {
+                    setTotalValueReason(event.target.value);
+                  }}
+                  placeholder="Valor digitado incorretamente"
+                  value={totalValueReason}
+                />
+              </label>
+              <button
+                className="button button--secondary button--compact"
+                disabled={
+                  busy ||
+                  parseMoney(totalValue) <= 0 ||
+                  parseMoney(totalValue) <
+                    voucher.initialBalanceCents - voucher.remainingBalanceCents ||
+                  totalValueReason.trim().length < 2
+                }
+                onClick={() => {
+                  void onSetTotal({
+                    voucherId: voucher.id,
+                    initialBalanceCents: parseMoney(totalValue),
+                    reason: totalValueReason.trim(),
+                  }).then(() => {
+                    setTotalValueReason('');
+                    setTotalValue((parseMoney(totalValue) / 100).toFixed(2));
+                  });
+                }}
+                type="button"
+              >
+                Corrigir valor
               </button>
             </div>
           </div>

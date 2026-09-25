@@ -4,6 +4,7 @@ import type {
   AddVoucherBalanceInput,
   CreateVoucherInput,
   DeleteVoucherInput,
+  SetVoucherTotalInput,
   UpdateVoucherInput,
   VoucherState,
 } from '@gtrz/contracts';
@@ -21,6 +22,7 @@ interface VoucherViewState {
   readonly changeStatus: (voucherId: string, status: 'active' | 'cancelled') => Promise<void>;
   readonly updateVoucher: (input: UpdateVoucherInput) => Promise<void>;
   readonly addBalance: (input: AddVoucherBalanceInput) => Promise<void>;
+  readonly setVoucherTotal: (input: SetVoucherTotalInput) => Promise<void>;
   readonly deleteVoucher: (input: DeleteVoucherInput) => Promise<void>;
 }
 
@@ -104,6 +106,13 @@ export function useVouchers(): VoucherViewState {
     [run],
   );
 
+  const setVoucherTotal = useCallback(
+    async (input: SetVoucherTotalInput): Promise<void> => {
+      await run(() => window.gtrz.vouchers.setTotal(input), 'Valor total do voucher corrigido.');
+    },
+    [run],
+  );
+
   const deleteVoucher = useCallback(
     async (input: DeleteVoucherInput): Promise<void> => {
       await run(async () => {
@@ -125,6 +134,7 @@ export function useVouchers(): VoucherViewState {
     changeStatus,
     updateVoucher,
     addBalance,
+    setVoucherTotal,
     deleteVoucher,
   };
 }

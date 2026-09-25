@@ -7,6 +7,7 @@ import {
   deleteVoucherInputSchema,
   deleteVoucherResultSchema,
   IPC_CHANNELS,
+  setVoucherTotalInputSchema,
   updateVoucherInputSchema,
   voucherSchema,
   voucherStateSchema,
@@ -16,6 +17,7 @@ import {
   type DeleteVoucherInput,
   type DeleteVoucherResult,
   type UpdateVoucherInput,
+  type SetVoucherTotalInput,
   type Voucher,
   type VoucherApi,
   type VoucherState,
@@ -51,6 +53,12 @@ export const voucherApi: VoucherApi = {
   async addBalance(input: AddVoucherBalanceInput): Promise<Voucher> {
     const parsedInput = addVoucherBalanceInputSchema.parse(input);
     const payload: unknown = await ipcRenderer.invoke(IPC_CHANNELS.vouchersAddBalance, parsedInput);
+    return voucherSchema.parse(payload);
+  },
+
+  async setTotal(input: SetVoucherTotalInput): Promise<Voucher> {
+    const parsedInput = setVoucherTotalInputSchema.parse(input);
+    const payload: unknown = await ipcRenderer.invoke(IPC_CHANNELS.vouchersSetTotal, parsedInput);
     return voucherSchema.parse(payload);
   },
 

@@ -101,6 +101,7 @@ export const IPC_CHANNELS = {
   vouchersChangeStatus: 'vouchers:change-status',
   vouchersUpdate: 'vouchers:update',
   vouchersAddBalance: 'vouchers:add-balance',
+  vouchersSetTotal: 'vouchers:set-total',
   vouchersDelete: 'vouchers:delete',
   cashGetState: 'cash:get-state',
   cashOpen: 'cash:open',

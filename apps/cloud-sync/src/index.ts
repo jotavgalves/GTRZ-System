@@ -1907,7 +1907,10 @@ export class EventRoom extends DurableObject<Env> {
       throw new Error('Não foi possível iniciar o canal em tempo real.');
     }
 
-    server.serializeAttachment({ deviceId });
+    server.serializeAttachment({
+      deviceId,
+      mobileContextChannel: streamUrl.searchParams.get('channel') === 'context',
+    });
     this.ctx.acceptWebSocket(server, ['event']);
     sendSocket(server, { type: 'sync', ...this.#snapshot(after) });
 
@@ -2078,6 +2081,7 @@ export class EventRoom extends DurableObject<Env> {
       voucherCodes: normalizedCodes,
       vouchers: normalizedVouchers,
     };
+    const changed = JSON.stringify(storedContext) !== JSON.stringify(normalized);
     this.ctx.storage.sql
       .exec(
         `INSERT INTO mobile_context (context_id, payload_json, updated_at) VALUES (1, ?, ?)
@@ -2086,7 +2090,19 @@ export class EventRoom extends DurableObject<Env> {
         Date.now(),
       )
       .toArray();
+    if (changed) this.#broadcastMobileContextUpdate();
     return this.#mobileContext();
+  }
+
+  #broadcastMobileContextUpdate(): void {
+    for (const socket of this.ctx.getWebSockets('event')) {
+      const attachment = socket.deserializeAttachment() as {
+        readonly mobileContextChannel?: unknown;
+      } | null;
+      if (attachment?.mobileContextChannel === true) {
+        sendSocket(socket, { type: 'mobile.context-updated' });
+      }
+    }
   }
 
   #saveMobileContext(context: JsonRecord, now: number): void {

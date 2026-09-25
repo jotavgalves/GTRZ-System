@@ -24,6 +24,7 @@ export function VouchersPage(): React.JSX.Element {
     changeStatus,
     updateVoucher,
     addBalance,
+    setVoucherTotal,
     deleteVoucher,
   } = useVouchers();
   const vouchers = state?.vouchers ?? [];
@@ -116,6 +117,7 @@ export function VouchersPage(): React.JSX.Element {
                 )}
                 key={voucher.id}
                 onAddBalance={addBalance}
+                onSetTotal={setVoucherTotal}
                 onChangeStatus={changeStatus}
                 onDelete={deleteVoucher}
                 onUpdate={updateVoucher}
@@ -143,6 +145,7 @@ export function VouchersPage(): React.JSX.Element {
                 hasUsage
                 key={voucher.id}
                 onAddBalance={addBalance}
+                onSetTotal={setVoucherTotal}
                 onChangeStatus={changeStatus}
                 onDelete={deleteVoucher}
                 onUpdate={updateVoucher}
