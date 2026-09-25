@@ -1,4 +1,3 @@
-import { WalletCards } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 
 import type { CloseOrderInput, Order, PaymentMethod } from '@gtrz/contracts';
@@ -31,15 +30,12 @@ export function CheckoutForm({
   onUnbindVoucher,
   onClose,
 }: CheckoutFormProps): React.JSX.Element {
-  const [discount, setDiscount] = useState('');
   const [mode, setMode] = useState<CheckoutMode>('simple');
   const [simpleMethod, setSimpleMethod] = useState<PaymentMethod>('cash');
   const [simpleReceived, setSimpleReceived] = useState('');
   const [payments, setPayments] = useState<readonly PaymentDraft[]>([newPayment()]);
   const [voucherAmount, setVoucherAmount] = useState('');
-  const discountCents = parseMoney(discount);
-  const discountInvalid = discountCents > order.subtotalCents;
-  const totalCents = Math.max(order.subtotalCents - discountCents, 0);
+  const totalCents = order.subtotalCents;
   const allocation = order.voucherAllocation;
   const voucherCents = parseMoney(voucherAmount);
   const remainingAfterVoucherCents = Math.max(totalCents - voucherCents, 0);
@@ -93,7 +89,6 @@ export function CheckoutForm({
   const totalChangeCents = mode === 'simple' ? simpleChangeCents : mixedChangeCents;
   const canSubmit =
     !busy &&
-    !discountInvalid &&
     !voucherInvalid &&
     totalCents > 0 &&
     (mode === 'simple'
@@ -136,7 +131,7 @@ export function CheckoutForm({
         ? [{ code: allocation.code, amountCents: voucherCents }]
         : [];
 
-    void onClose({ discountCents, payments: normalizedPayments, voucherUses });
+    void onClose({ discountCents: 0, payments: normalizedPayments, voucherUses });
   };
 
   return (
@@ -147,48 +142,6 @@ export function CheckoutForm({
         submitCheckout();
       }}
     >
-      <div className="checkout-form__heading">
-        <WalletCards size={19} aria-hidden="true" />
-        <div>
-          <h3>Fechar comanda</h3>
-          <p>
-            {mode === 'simple'
-              ? 'Escolha a forma. O valor restante é aplicado automaticamente.'
-              : 'Distribua manualmente o total entre duas ou mais formas.'}
-          </p>
-        </div>
-      </div>
-
-      <label className="form-field">
-        <span>Desconto em reais</span>
-        <input
-          aria-invalid={discountInvalid}
-          disabled={busy}
-          inputMode="decimal"
-          onChange={(event) => {
-            setDiscount(event.target.value);
-          }}
-          placeholder="0,00"
-          value={discount}
-        />
-        {discountInvalid ? <small>O desconto não pode superar o subtotal.</small> : null}
-      </label>
-
-      <div className="checkout-total">
-        <span>Total a receber</span>
-        <strong>{formatMoney(totalCents)}</strong>
-        <small>
-          Voucher: {formatMoney(voucherCents)} · Saldo a pagar:{' '}
-          {formatMoney(remainingAfterVoucherCents)}
-        </small>
-        {mode === 'mixed' ? (
-          <small>
-            Distribuído: {formatMoney(mixedInformedCents)} · Restante:{' '}
-            {formatMoney(Math.max(totalCents - mixedInformedCents, 0))}
-          </small>
-        ) : null}
-      </div>
-
       <VoucherCheckout
         allocation={allocation}
         busy={busy}
