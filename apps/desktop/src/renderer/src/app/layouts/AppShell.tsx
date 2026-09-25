@@ -89,6 +89,8 @@ export function AppShell(): React.JSX.Element {
     [activeProfile],
   );
   const navigationStyle = { '--sidebar-item-count': visibleModules.length } as CSSProperties;
+  const navigationContainerClassName =
+    visibleModules.length <= 3 ? 'sidebar-nav sidebar-nav--compact' : 'sidebar-nav';
 
   return (
     <div className="app-shell">
@@ -110,7 +112,11 @@ export function AppShell(): React.JSX.Element {
           </small>
         </div>
 
-        <nav className="sidebar-nav" aria-label="Módulos do sistema" style={navigationStyle}>
+        <nav
+          className={navigationContainerClassName}
+          aria-label="Módulos do sistema"
+          style={navigationStyle}
+        >
           {visibleModules.map((module) => {
             const Icon = module.icon;
             return (

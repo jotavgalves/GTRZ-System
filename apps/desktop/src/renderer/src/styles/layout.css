@@ -91,6 +91,12 @@
   overflow: hidden;
 }
 
+.sidebar-nav--compact {
+  flex: 0 0 auto;
+  grid-template-rows: repeat(var(--sidebar-item-count, 1), 2.75rem);
+  margin-bottom: auto;
+}
+
 .sidebar-link {
   display: flex;
   min-height: 0;
@@ -105,6 +111,10 @@
     background-color var(--transition-fast),
     color var(--transition-fast),
     transform var(--transition-fast);
+}
+
+.sidebar-nav--compact .sidebar-link {
+  min-height: 2.75rem;
 }
 
 .sidebar-link:hover {
