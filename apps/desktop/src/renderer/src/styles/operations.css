@@ -177,7 +177,7 @@
   background: transparent;
   color: var(--color-text-muted);
   font: inherit;
-  font-size: var(--font-size-sm);
+  font-size: 0.78rem;
   font-weight: 700;
 }
 
