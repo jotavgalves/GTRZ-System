@@ -902,6 +902,7 @@ export class MonitorRoom extends DurableObject<Env> {
       this.ctx.storage.sql
         .exec('UPDATE monitor_metrics SET accepted_commands = accepted_commands + 1 WHERE metrics_id = 1')
         .toArray();
+      this.#trimObservationHistory();
     }
     return { accepted: true };
   }
@@ -945,6 +946,7 @@ export class MonitorRoom extends DurableObject<Env> {
         )
         .toArray();
     }
+    this.#trimObservationHistory();
     return { accepted: true };
   }
 
@@ -971,7 +973,24 @@ export class MonitorRoom extends DurableObject<Env> {
         createdAt,
       )
       .toArray();
+    this.#trimObservationHistory();
     return { accepted: true };
+  }
+
+  #trimObservationHistory(): void {
+    // These tables only power the monitor screens. The authoritative event journal
+    // remains in each EventRoom and is archived in R2, so bounded monitor history
+    // cannot discard a business operation or weaken replay/idempotency.
+    this.ctx.storage.sql
+      .exec(
+        `DELETE FROM command_log
+         WHERE rowid < (SELECT COALESCE(MAX(rowid), 0) - 500 FROM command_log);
+         DELETE FROM transport_log
+         WHERE sequence < (SELECT COALESCE(MAX(sequence), 0) - 500 FROM transport_log);
+         DELETE FROM conflict_log
+         WHERE sequence < (SELECT COALESCE(MAX(sequence), 0) - 200 FROM conflict_log);`,
+      )
+      .toArray();
   }
 
   #enrollCashier(payload: JsonRecord): JsonRecord {

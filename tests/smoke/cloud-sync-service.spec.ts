@@ -31,6 +31,7 @@ vi.mock('ws', async () => {
     static CONNECTING = 0;
     static sockets: Socket[] = [];
     readyState = 0;
+    readonly sent: string[] = [];
     constructor(public url: string) {
       super();
       Socket.sockets.push(this);
@@ -49,12 +50,16 @@ vi.mock('ws', async () => {
     message(payload: unknown): void {
       this.emit('message', Buffer.from(JSON.stringify(payload)));
     }
+    send(payload: string): void {
+      this.sent.push(payload);
+    }
   }
   return { WebSocket: Socket };
 });
 
 type TestSocket = WebSocket & {
   url: string;
+  sent: readonly string[];
   open(): void;
   remoteClose(): void;
   message(payload: unknown): void;
@@ -133,7 +138,9 @@ beforeEach((): void => {
     (url: string): Response =>
       new Response(
         JSON.stringify(
-          url.includes('/global-control') ? { commands: globalCommands, pendingReset: null } : {},
+          url.includes('/global-control')
+            ? { commands: globalCommands, pendingReset: null }
+            : { currentSequence: 0, stock: [], events: [] },
         ),
         {
           status: 200,
@@ -175,6 +182,221 @@ describe('cloud replication invariants', () => {
     expect(getSessionState(db).activeEvent?.id).toBe('remote-event');
   });
 
+  it('hydrates a newly paired PC from the ordered journal before applying event stock', async () => {
+    const catalogEvents = [
+      journal(1, 'inventory.category-created', 'remote-category', {
+        name: 'Remote drinks',
+        engine: 'catalog',
+      }),
+      journal(2, 'inventory.product-created', 'remote-product', {
+        categoryId: 'remote-category',
+        name: 'Remote product',
+        kind: 'drink',
+        costCents: 100,
+        salePriceCents: 200,
+        lowStockThreshold: 0,
+      }),
+    ];
+    const eventEvents = [
+      {
+        ...journal(1, 'inventory.stock-moved', 'remote-stock-entry', {
+          productId: 'remote-product',
+          type: 'purchase',
+          quantity: 12,
+          delta: 12,
+          purchaseTotalCents: 1200,
+          note: 'Initial replica stock',
+        }),
+        commandId: 'other-pc:event-stock-entry',
+      },
+    ];
+    globalCommands = [
+      {
+        sequence: 1,
+        commandId: 'activate-remote-event',
+        type: 'event.activated',
+        eventId: 'remote-event',
+        eventName: 'Remote event',
+        createdAt: Date.now(),
+      },
+    ];
+    request.mockImplementation((url: string): Response => {
+      if (url.includes('/global-control')) {
+        return new Response(JSON.stringify({ commands: globalCommands, pendingReset: null }), {
+          status: 200,
+        });
+      }
+      if (url.includes('/events/_catalog/snapshot')) {
+        return new Response(
+          JSON.stringify({ currentSequence: 2, stock: [], events: catalogEvents }),
+          { status: 200 },
+        );
+      }
+      if (url.includes('/events/remote-event/snapshot')) {
+        return new Response(
+          JSON.stringify({ currentSequence: 1, stock: [], events: eventEvents }),
+          { status: 200 },
+        );
+      }
+      return new Response(JSON.stringify({}), { status: 200 });
+    });
+
+    await service.flushOutbox(db, null);
+
+    expect(getSessionState(db).activeEvent?.id).toBe('remote-event');
+    expect(db.sqlite.prepare('SELECT action, reason FROM sync_conflicts').all()).toEqual([]);
+    expect(
+      db.sqlite.prepare("SELECT id FROM products WHERE id = 'remote-product'").get(),
+    ).toBeDefined();
+    expect(
+      db.sqlite
+        .prepare(
+          "SELECT quantity FROM event_stock WHERE event_id = 'remote-event' AND product_id = 'remote-product'",
+        )
+        .get(),
+    ).toEqual({ quantity: 12 });
+    expect(
+      db.sqlite
+        .prepare("SELECT value FROM sync_state WHERE key = 'inbox.sequence:_catalog'")
+        .get(),
+    ).toEqual({ value: '2' });
+    expect(
+      db.sqlite
+        .prepare("SELECT value FROM sync_state WHERE key = 'inbox.sequence:remote-event'")
+        .get(),
+    ).toEqual({ value: '1' });
+
+    await service.flushOutbox(db, null);
+
+    expect(
+      db.sqlite
+        .prepare(
+          "SELECT quantity FROM event_stock WHERE event_id = 'remote-event' AND product_id = 'remote-product'",
+        )
+        .get(),
+    ).toEqual({ quantity: 12 });
+    expect(db.sqlite.prepare('SELECT COUNT(*) AS amount FROM stock_movements').get()).toEqual({
+      amount: 1,
+    });
+  });
+
+  it('continues journal recovery across the Worker page boundary without skipping commands', async () => {
+    const catalogEvents = Array.from({ length: 41 }, (_, index) =>
+      journal(index + 1, 'inventory.category-created', `remote-category-${String(index + 1)}`, {
+        name: `Remote category ${String(index + 1)}`,
+        engine: 'catalog',
+      }),
+    );
+    globalCommands = [
+      {
+        sequence: 1,
+        commandId: 'activate-paged-event',
+        type: 'event.activated',
+        eventId: 'remote-event',
+        eventName: 'Remote event',
+        createdAt: Date.now(),
+      },
+    ];
+    request.mockImplementation((url: string): Response => {
+      if (url.includes('/global-control')) {
+        return new Response(JSON.stringify({ commands: globalCommands, pendingReset: null }), {
+          status: 200,
+        });
+      }
+      if (url.includes('/events/_catalog/snapshot?after=0')) {
+        return new Response(
+          JSON.stringify({ currentSequence: 41, stock: [], events: catalogEvents.slice(0, 40) }),
+          { status: 200 },
+        );
+      }
+      if (url.includes('/events/_catalog/snapshot?after=40')) {
+        return new Response(
+          JSON.stringify({ currentSequence: 41, stock: [], events: catalogEvents.slice(40) }),
+          { status: 200 },
+        );
+      }
+      return new Response(JSON.stringify({ currentSequence: 0, stock: [], events: [] }), {
+        status: 200,
+      });
+    });
+
+    await service.flushOutbox(db, null);
+
+    expect(
+      db.sqlite
+        .prepare("SELECT COUNT(*) AS amount FROM product_categories WHERE id LIKE 'remote-category-%'")
+        .get(),
+    ).toEqual({ amount: 41 });
+    expect(
+      db.sqlite
+        .prepare("SELECT value FROM sync_state WHERE key = 'inbox.sequence:_catalog'")
+        .get(),
+    ).toEqual({ value: '41' });
+  });
+
+  it('asks the same WebSocket for the next journal page instead of backing off', async () => {
+    await service.flushOutbox(db, null);
+    const catalog = requireSocket('/_catalog/');
+    catalog.open();
+    const events = Array.from({ length: 41 }, (_, index) =>
+      journal(index + 1, 'inventory.category-created', `socket-category-${String(index + 1)}`, {
+        name: `Socket category ${String(index + 1)}`,
+        engine: 'catalog',
+      }),
+    );
+
+    catalog.message({ type: 'sync', currentSequence: 41, events: events.slice(0, 40) });
+
+    expect(catalog.sent).toContain(JSON.stringify({ type: 'sync', after: 40 }));
+    expect(catalog.readyState).toBe(WebSocket.OPEN);
+
+    catalog.message({ type: 'sync', currentSequence: 41, events: events.slice(40) });
+
+    expect(
+      db.sqlite
+        .prepare("SELECT COUNT(*) AS amount FROM product_categories WHERE id LIKE 'socket-category-%'")
+        .get(),
+    ).toEqual({ amount: 41 });
+    expect(catalog.readyState).toBe(WebSocket.OPEN);
+  });
+
+  it('retries a locally committed operation with the same idempotency key after a network failure', async () => {
+    const sentCommands: string[] = [];
+    let centralAvailable = false;
+    request.mockImplementation((url: string, init?: RequestInit): Response => {
+      if (url.includes('/journal')) {
+        sentCommands.push(String(init?.body));
+        return new Response(JSON.stringify({}), { status: centralAvailable ? 200 : 503 });
+      }
+      if (url.includes('/global-control')) {
+        return new Response(JSON.stringify({ commands: globalCommands, pendingReset: null }), {
+          status: 200,
+        });
+      }
+      return new Response(JSON.stringify({ currentSequence: 0, stock: [], events: [] }), {
+        status: 200,
+      });
+    });
+    await service.flushOutbox(db, null);
+    const event = createEvent(db, { name: 'Offline event', startsAt: Date.now() });
+
+    await service.flushOutbox(db, event.id);
+
+    expect(
+      db.sqlite.prepare("SELECT status FROM sync_outbox WHERE status = 'failed'").get(),
+    ).toEqual({ status: 'failed' });
+    expect(sentCommands).toHaveLength(1);
+
+    centralAvailable = true;
+    await service.flushOutbox(db, event.id);
+
+    expect(
+      db.sqlite.prepare("SELECT status FROM sync_outbox WHERE status = 'accepted'").get(),
+    ).toEqual({ status: 'accepted' });
+    expect(sentCommands).toHaveLength(2);
+    expect(sentCommands[1]).toBe(sentCommands[0]);
+  });
+
   it('restores a verified database copy before a fresh paired PC consumes event sales', async () => {
     const snapshot = Buffer.from('verified SQLite replica');
     const checksum = createHash('sha256').update(snapshot).digest('hex');
@@ -202,8 +424,13 @@ describe('cloud replication invariants', () => {
           },
         });
       }
+      if (url.includes('/global-control')) {
+        return new Response(JSON.stringify({ commands: globalCommands, pendingReset: null }), {
+          status: 200,
+        });
+      }
       return new Response(
-        JSON.stringify({ commands: globalCommands, pendingReset: null }),
+        JSON.stringify({ currentSequence: 0, stock: [], events: [] }),
         { status: 200 },
       );
     });
@@ -371,7 +598,9 @@ describe('cloud replication invariants', () => {
                   document: {},
                 },
               }
-            : {},
+            : url.includes('/global-control')
+              ? { commands: globalCommands, pendingReset: null }
+              : { currentSequence: 0, stock: [], events: [] },
         ),
         { status: 200 },
       );

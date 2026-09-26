@@ -65,6 +65,8 @@ interface RemoteJournalEvent {
 interface StreamMessageResult {
   readonly accepted: boolean;
   readonly printQueued: boolean;
+  readonly caughtUp: boolean;
+  readonly cursor: number;
 }
 
 interface QueueCountsRow {
@@ -394,6 +396,10 @@ export class CloudSyncService {
 
       if (pairingKey === null) return;
 
+      // WebSockets reduce the delay of a live update, but recovery must not depend on a
+      // socket frame. A newly paired PC starts with no cursor and must first reconcile
+      // the globally selected event through the durable journal.
+      await this.#pullGlobalControl(database, pairingKey, deviceId);
       const workingDatabase = await this.#applyPendingBootstrap(database, pairingKey, deviceId);
       this.#enqueueNewAudits(workingDatabase, deviceId);
 
@@ -403,6 +409,20 @@ export class CloudSyncService {
       this.#retryRecoverablePaidOrders(workingDatabase);
       this.#ensureControlStream(workingDatabase, deviceId, pairingKey);
       this.#ensureEventStreams(workingDatabase, effectiveActiveEventId, deviceId, pairingKey);
+      if (this.#needsInitialJournalRecovery(workingDatabase, CATALOG_EVENT_ID)) {
+        await this.#reconcileEventJournal(workingDatabase, CATALOG_EVENT_ID, deviceId, pairingKey);
+      }
+      if (
+        effectiveActiveEventId !== null &&
+        this.#needsInitialJournalRecovery(workingDatabase, effectiveActiveEventId)
+      ) {
+        await this.#reconcileEventJournal(
+          workingDatabase,
+          effectiveActiveEventId,
+          deviceId,
+          pairingKey,
+        );
+      }
       await this.#publishCashierCatalog(workingDatabase, effectiveActiveEventId, pairingKey);
       await this.#publishMobileContext(workingDatabase, effectiveActiveEventId, pairingKey);
       this.#applyInbox(workingDatabase, deviceId);
@@ -1053,6 +1073,9 @@ export class CloudSyncService {
           return;
         }
         setActiveEvent(database, event.id);
+        database.sqlite
+          .prepare('DELETE FROM sync_state WHERE key = ?')
+          .run(`replica.reconciled:${event.id}`);
         this.#ensureEventStreams(database, event.id, deviceId, pairingKey);
         this.#onDataChanged();
       } else if (event !== undefined) {
@@ -1638,6 +1661,13 @@ export class CloudSyncService {
         stream.close();
         return;
       }
+      if (!result.caughtUp && stream.readyState === WebSocket.OPEN) {
+        try {
+          stream.send(JSON.stringify({ type: 'sync', after: result.cursor }));
+        } catch {
+          stream.close();
+        }
+      }
       if (result.printQueued && eventId === getSessionState(database).activeEvent?.id) {
         void this.#processPrintQueue(database, eventId, deviceId, pairingKey).catch(
           () => undefined,
@@ -1662,7 +1692,7 @@ export class CloudSyncService {
   ): StreamMessageResult {
     try {
       const envelope: unknown = JSON.parse(websocketMessageText(message));
-      if (!isRecord(envelope)) return { accepted: false, printQueued: false };
+      if (!isRecord(envelope)) return this.#rejectedStreamMessage(database, eventId);
       const printQueued = envelope.type === 'event' && envelope.printQueued === true;
       const events =
         envelope.type === 'event'
@@ -1670,31 +1700,115 @@ export class CloudSyncService {
           : envelope.type === 'sync' && Array.isArray(envelope.events)
             ? envelope.events
             : null;
-      if (events === null) return { accepted: true, printQueued: false };
-      const journalEvents = events.filter(isRemoteJournalEvent);
-      const cursor = this.#getInboxCursor(database, eventId);
-      const newEvents = journalEvents.filter((event) => event.sequence > cursor);
-      if (newEvents.length === 0) return { accepted: true, printQueued };
-      if (newEvents[0]?.sequence !== cursor + 1) return { accepted: false, printQueued: false };
-      for (let index = 1; index < newEvents.length; index += 1) {
-        const previous = newEvents[index - 1];
-        const current = newEvents[index];
-        if (previous === undefined || current?.sequence !== previous.sequence + 1) {
-          return { accepted: false, printQueued: false };
-        }
+      if (events === null) {
+        return {
+          accepted: true,
+          printQueued: false,
+          caughtUp: true,
+          cursor: this.#getInboxCursor(database, eventId),
+        };
       }
-      this.#storeRemoteJournalEvents(database, eventId, newEvents);
-      this.#applyInbox(database, deviceId);
-      const currentSequence = integerField(envelope, 'currentSequence');
-      const latest = newEvents.at(-1);
-      return {
-        accepted:
-          latest !== undefined && (currentSequence === null || latest.sequence >= currentSequence),
-        printQueued,
-      };
+      return { ...this.#applyJournalEnvelope(database, eventId, deviceId, envelope, events), printQueued };
     } catch {
-      return { accepted: false, printQueued: false };
+      return this.#rejectedStreamMessage(database, eventId);
     }
+  }
+
+  #rejectedStreamMessage(database: DatabaseContext, eventId: string): StreamMessageResult {
+    return {
+      accepted: false,
+      printQueued: false,
+      caughtUp: false,
+      cursor: this.#getInboxCursor(database, eventId),
+    };
+  }
+
+  #applyJournalEnvelope(
+    database: DatabaseContext,
+    eventId: string,
+    deviceId: string,
+    envelope: Record<string, unknown>,
+    events: readonly unknown[],
+  ): Omit<StreamMessageResult, 'printQueued'> {
+    const journalEvents = events.filter(isRemoteJournalEvent);
+    if (journalEvents.length !== events.length) return this.#rejectedStreamMessage(database, eventId);
+
+    const cursor = this.#getInboxCursor(database, eventId);
+    const newEvents = journalEvents.filter((event) => event.sequence > cursor);
+    const currentSequence = integerField(envelope, 'currentSequence');
+    if (newEvents.length === 0) {
+      return {
+        accepted: currentSequence === null || currentSequence <= cursor,
+        caughtUp: currentSequence === null || currentSequence <= cursor,
+        cursor,
+      };
+    }
+    if (newEvents[0]?.sequence !== cursor + 1) return this.#rejectedStreamMessage(database, eventId);
+    for (let index = 1; index < newEvents.length; index += 1) {
+      const previous = newEvents[index - 1];
+      const current = newEvents[index];
+      if (previous === undefined || current?.sequence !== previous.sequence + 1) {
+        return this.#rejectedStreamMessage(database, eventId);
+      }
+    }
+    this.#storeRemoteJournalEvents(database, eventId, newEvents);
+    this.#applyInbox(database, deviceId);
+    const nextCursor = this.#getInboxCursor(database, eventId);
+    return {
+      accepted: true,
+      caughtUp: currentSequence === null || nextCursor >= currentSequence,
+      cursor: nextCursor,
+    };
+  }
+
+  async #reconcileEventJournal(
+    database: DatabaseContext,
+    eventId: string,
+    deviceId: string,
+    pairingKey: string,
+  ): Promise<void> {
+    // Limit one pass so a damaged or unexpectedly large log cannot monopolize the
+    // desktop process. The next regular replication pass resumes at the durable cursor.
+    for (let batch = 0; batch < 25; batch += 1) {
+      const cursor = this.#getInboxCursor(database, eventId);
+      const response = await fetch(
+        `${this.#endpoint}/v1/events/${encodeURIComponent(eventId)}/snapshot?after=${String(cursor)}`,
+        {
+          headers: { 'X-GTRZ-Key': pairingKey },
+          signal: AbortSignal.timeout(CONNECTION_TIMEOUT_MS),
+        },
+      );
+      if (!response.ok) {
+        throw new Error(`A central não concluiu a recuperação do diário (${String(response.status)}).`);
+      }
+      const payload: unknown = await response.json();
+      if (!isRecord(payload) || !Array.isArray(payload.events)) {
+        throw new Error('A central enviou um diário de sincronização inválido.');
+      }
+      const result = this.#applyJournalEnvelope(
+        database,
+        eventId,
+        deviceId,
+        payload,
+        payload.events,
+      );
+      if (!result.accepted) {
+        throw new Error('O diário remoto possui uma lacuna de sequência.');
+      }
+      if (result.caughtUp) {
+        database.sqlite
+          .prepare(
+            `INSERT INTO sync_state (key, value, updated_at) VALUES (?, ?, ?)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+          )
+          .run(`replica.reconciled:${eventId}`, String(result.cursor), Date.now());
+        return;
+      }
+      if (result.cursor <= cursor) {
+        throw new Error('A central não avançou o cursor de sincronização.');
+      }
+    }
+    throw new Error('A recuperação local ainda possui muitos registros pendentes.');
   }
 
   #scheduleEventReconnect(
@@ -1722,6 +1836,14 @@ export class CloudSyncService {
       .get(`inbox.sequence:${eventId}`) as { readonly value: string } | undefined;
     const cursor = cursorRow === undefined ? 0 : Number(cursorRow.value);
     return Number.isSafeInteger(cursor) && cursor >= 0 ? cursor : 0;
+  }
+
+  #needsInitialJournalRecovery(database: DatabaseContext, eventId: string): boolean {
+    return (
+      database.sqlite
+        .prepare('SELECT 1 FROM sync_state WHERE key = ?')
+        .get(`replica.reconciled:${eventId}`) === undefined
+    );
   }
 
   #storeRemoteJournalEvents(
