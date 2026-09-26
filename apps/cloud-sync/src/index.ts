@@ -5066,6 +5066,28 @@ function eventRequest(url: URL): boolean {
   );
 }
 
+function cashierPublicationKind(url: URL, method: string): 'catalog' | 'context' | null {
+  if (method !== 'POST') return null;
+  const match = /^\/v1\/events\/[^/]+\/cashier\/(catalog|context)$/.exec(url.pathname);
+  return match?.[1] === 'catalog' || match?.[1] === 'context' ? match[1] : null;
+}
+
+function cashierPublicationCacheRequest(
+  origin: string,
+  eventId: string,
+  kind: 'catalog' | 'context',
+  deviceId: string,
+  payloadHash: string,
+): Request {
+  return new Request(
+    `${origin}/_gtrz/cache/cashier-publication/${encodeURIComponent(eventId)}/${kind}/${encodeURIComponent(deviceId)}/${payloadHash}`,
+  );
+}
+
+function defaultWorkerCache(): Cache {
+  return (caches as CacheStorage & { readonly default: Cache }).default;
+}
+
 function cashierApiRequest(url: URL): boolean {
   return /^\/v1\/cashier\/(catalog|sales|stream)$/.test(url.pathname);
 }
@@ -5451,6 +5473,46 @@ export default {
     } catch (error: unknown) {
       const apiError = error as ApiError;
       return json({ error: { code: apiError.code, message: apiError.message } }, apiError.status);
+    }
+
+    const publicationKind = cashierPublicationKind(url, request.method);
+    if (publicationKind !== null) {
+      // Older desktop releases can retry these immutable snapshots every few seconds after a
+      // transient failure. Deduplicate before waking the event Durable Object so retries do not
+      // consume its free-tier row-read budget. Changed snapshots have a different hash and pass.
+      const body = await request.text();
+      const deviceId = request.headers.get('X-GTRZ-Device-Id')?.slice(0, 160) || 'legacy';
+      const cacheRequest = cashierPublicationCacheRequest(
+        url.origin,
+        eventId,
+        publicationKind,
+        deviceId,
+        await secretHash(body),
+      );
+
+      try {
+        if ((await defaultWorkerCache().match(cacheRequest)) !== undefined) {
+          return new Response(null, { status: 204 });
+        }
+      } catch {
+        // Cache availability is an optimization; an unavailable cache must not block sales sync.
+      }
+
+      const room = env.EVENT_ROOM.get(env.EVENT_ROOM.idFromName(`event:${eventId}`));
+      const response = await room.fetch(
+        new Request(request.url, { method: request.method, headers: request.headers, body }),
+      );
+      if (response.ok) {
+        try {
+          await defaultWorkerCache().put(
+            cacheRequest,
+            new Response(null, { headers: { 'Cache-Control': 'public, max-age=300' } }),
+          );
+        } catch {
+          // The successful publication remains valid even if the dedupe marker cannot be cached.
+        }
+      }
+      return response;
     }
 
     const room = env.EVENT_ROOM.get(env.EVENT_ROOM.idFromName(`event:${eventId}`));
