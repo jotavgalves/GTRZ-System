@@ -448,8 +448,21 @@ export class MonitorRoom extends DurableObject<Env> {
         event_id TEXT NOT NULL,
         event_name TEXT NOT NULL,
         reason TEXT,
+        bootstrap_snapshot_id TEXT,
+        snapshot_source_device_id TEXT,
         created_at INTEGER NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS replica_snapshots (
+        snapshot_id TEXT PRIMARY KEY,
+        event_id TEXT NOT NULL,
+        source_device_id TEXT NOT NULL,
+        object_key TEXT NOT NULL,
+        sha256 TEXT NOT NULL,
+        size_bytes INTEGER NOT NULL CHECK (size_bytes > 0),
+        created_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS replica_snapshots_event_idx
+        ON replica_snapshots (event_id, created_at DESC);
       CREATE TABLE IF NOT EXISTS global_reset_requests (
         request_id TEXT PRIMARY KEY,
         event_id TEXT NOT NULL,
@@ -487,6 +500,19 @@ export class MonitorRoom extends DurableObject<Env> {
          WHERE permissions_json IS NULL`,
       )
       .toArray();
+    const globalCommandColumns = this.ctx.storage.sql
+      .exec('PRAGMA table_info(global_event_commands)')
+      .toArray();
+    if (!globalCommandColumns.some((column) => column.name === 'bootstrap_snapshot_id')) {
+      this.ctx.storage.sql.exec(
+        'ALTER TABLE global_event_commands ADD COLUMN bootstrap_snapshot_id TEXT',
+      );
+    }
+    if (!globalCommandColumns.some((column) => column.name === 'snapshot_source_device_id')) {
+      this.ctx.storage.sql.exec(
+        'ALTER TABLE global_event_commands ADD COLUMN snapshot_source_device_id TEXT',
+      );
+    }
   }
 
   override async fetch(request: Request): Promise<Response> {
@@ -527,6 +553,19 @@ export class MonitorRoom extends DurableObject<Env> {
 
       if (request.method === 'POST' && url.pathname === '/v1/monitor/global-event/reset') {
         return json(this.#requestGlobalReset(await readJson(request)));
+      }
+
+      const replicaSnapshotMatch = /^\/v1\/monitor\/replica-snapshot\/([^/]+)$/.exec(url.pathname);
+      if (request.method === 'POST' && replicaSnapshotMatch !== null) {
+        return json(
+          await this.#receiveReplicaSnapshot(
+            decodeURIComponent(replicaSnapshotMatch[1] ?? ''),
+            request,
+          ),
+        );
+      }
+      if (request.method === 'GET' && replicaSnapshotMatch !== null) {
+        return this.#sendReplicaSnapshot(decodeURIComponent(replicaSnapshotMatch[1] ?? ''));
       }
 
       const resetBackupMatch = /^\/v1\/monitor\/reset-backup\/([^/]+)$/.exec(url.pathname);
@@ -1326,7 +1365,8 @@ export class MonitorRoom extends DurableObject<Env> {
       .toArray()[0] as Record<string, unknown> | undefined;
     const commands = this.ctx.storage.sql
       .exec(
-        `SELECT sequence, command_id, type, event_id, event_name, reason, created_at
+        `SELECT sequence, command_id, type, event_id, event_name, reason,
+                bootstrap_snapshot_id, snapshot_source_device_id, created_at
          FROM global_event_commands WHERE sequence > ? ORDER BY sequence ASC LIMIT 100`,
         after,
       )
@@ -1338,6 +1378,10 @@ export class MonitorRoom extends DurableObject<Env> {
         eventId: storedString(row.event_id, 'event_id'),
         eventName: storedString(row.event_name, 'event_name'),
         reason: typeof row.reason === 'string' ? row.reason : null,
+        bootstrapSnapshotId:
+          typeof row.bootstrap_snapshot_id === 'string' ? row.bootstrap_snapshot_id : null,
+        snapshotSourceDeviceId:
+          typeof row.snapshot_source_device_id === 'string' ? row.snapshot_source_device_id : null,
         createdAt: Number(row.created_at),
       }));
     const pendingReset = this.ctx.storage.sql
@@ -1371,6 +1415,41 @@ export class MonitorRoom extends DurableObject<Env> {
   #setGlobalEvent(payload: JsonRecord): JsonRecord {
     const eventId = requiredString(payload.eventId, 'eventId', 160);
     const eventName = requiredString(payload.eventName, 'eventName', 100);
+    const bootstrapSnapshotId =
+      typeof payload.bootstrapSnapshotId === 'string'
+        ? requiredString(payload.bootstrapSnapshotId, 'bootstrapSnapshotId', 80)
+        : null;
+    const snapshotSourceDeviceId =
+      typeof payload.snapshotSourceDeviceId === 'string'
+        ? requiredString(payload.snapshotSourceDeviceId, 'snapshotSourceDeviceId', 80)
+        : null;
+    if ((bootstrapSnapshotId === null) !== (snapshotSourceDeviceId === null)) {
+      throw new ApiError(
+        400,
+        'INVALID_INPUT',
+        'O snapshot inicial e o computador de origem precisam ser informados juntos.',
+      );
+    }
+    if (bootstrapSnapshotId !== null && snapshotSourceDeviceId !== null) {
+      const snapshot = this.ctx.storage.sql
+        .exec(
+          `SELECT event_id, source_device_id FROM replica_snapshots
+           WHERE snapshot_id = ?`,
+          bootstrapSnapshotId,
+        )
+        .toArray()[0] as Record<string, unknown> | undefined;
+      if (
+        snapshot === undefined ||
+        snapshot.event_id !== eventId ||
+        snapshot.source_device_id !== snapshotSourceDeviceId
+      ) {
+        throw new ApiError(
+          409,
+          'BOOTSTRAP_SNAPSHOT_UNAVAILABLE',
+          'O snapshot inicial deste evento não está disponível.',
+        );
+      }
+    }
     const now = Date.now();
     const commandId = crypto.randomUUID();
     this.ctx.storage.transactionSync(() => {
@@ -1387,11 +1466,15 @@ export class MonitorRoom extends DurableObject<Env> {
         .toArray();
       this.ctx.storage.sql
         .exec(
-          `INSERT INTO global_event_commands (command_id, type, event_id, event_name, reason, created_at)
-           VALUES (?, 'event.activated', ?, ?, NULL, ?)`,
+          `INSERT INTO global_event_commands
+           (command_id, type, event_id, event_name, reason, bootstrap_snapshot_id,
+            snapshot_source_device_id, created_at)
+           VALUES (?, 'event.activated', ?, ?, NULL, ?, ?, ?)`,
           commandId,
           eventId,
           eventName,
+          bootstrapSnapshotId,
+          snapshotSourceDeviceId,
           now,
         )
         .toArray();
@@ -1401,6 +1484,85 @@ export class MonitorRoom extends DurableObject<Env> {
     }
     this.#broadcastDesktopControl();
     return this.#globalControl(0);
+  }
+
+  async #receiveReplicaSnapshot(eventId: string, request: Request): Promise<JsonRecord> {
+    const sourceDeviceId = requiredString(
+      request.headers.get('X-GTRZ-Device-Id'),
+      'X-GTRZ-Device-Id',
+      80,
+    );
+    const sha256 = requiredString(
+      request.headers.get('X-GTRZ-Snapshot-Sha256'),
+      'X-GTRZ-Snapshot-Sha256',
+      128,
+    );
+    const sizeBytes = positiveInteger(
+      Number(request.headers.get('X-GTRZ-Snapshot-Size')),
+      'X-GTRZ-Snapshot-Size',
+    );
+    if (!/^[a-f0-9]{64}$/iu.test(sha256)) {
+      throw new ApiError(400, 'INVALID_INPUT', 'O checksum do snapshot é inválido.');
+    }
+    const contentLength = request.headers.get('Content-Length');
+    if (contentLength !== null && Number(contentLength) !== sizeBytes) {
+      throw new ApiError(400, 'INVALID_INPUT', 'O tamanho declarado do snapshot não confere.');
+    }
+    if (sizeBytes > 50 * 1024 * 1024) {
+      throw new ApiError(413, 'SNAPSHOT_TOO_LARGE', 'O snapshot excede o limite de 50 MB.');
+    }
+    if (request.body === null) {
+      throw new ApiError(400, 'INVALID_INPUT', 'O snapshot não possui conteúdo.');
+    }
+
+    const snapshotId = crypto.randomUUID();
+    const objectKey = `replicas/${encodeURIComponent(eventId)}/${snapshotId}.sqlite`;
+    await this.env.SYNC_AUDIT_ARCHIVE.put(objectKey, request.body, {
+      httpMetadata: { contentType: 'application/vnd.sqlite3' },
+      customMetadata: { eventId, sourceDeviceId, sha256 },
+    });
+    this.ctx.storage.sql
+      .exec(
+        `INSERT INTO replica_snapshots
+         (snapshot_id, event_id, source_device_id, object_key, sha256, size_bytes, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        snapshotId,
+        eventId,
+        sourceDeviceId,
+        objectKey,
+        sha256,
+        sizeBytes,
+        Date.now(),
+      )
+      .toArray();
+    return { snapshotId, eventId, sourceDeviceId, sha256, sizeBytes };
+  }
+
+  async #sendReplicaSnapshot(snapshotId: string): Promise<Response> {
+    const snapshot = this.ctx.storage.sql
+      .exec(
+        `SELECT event_id, source_device_id, object_key, sha256, size_bytes
+         FROM replica_snapshots WHERE snapshot_id = ?`,
+        snapshotId,
+      )
+      .toArray()[0] as Record<string, unknown> | undefined;
+    if (snapshot === undefined) {
+      throw new ApiError(404, 'SNAPSHOT_NOT_FOUND', 'O snapshot inicial não foi encontrado.');
+    }
+    const objectKey = storedString(snapshot.object_key, 'object_key');
+    const object = await this.env.SYNC_AUDIT_ARCHIVE.get(objectKey);
+    if (object === null) {
+      throw new ApiError(404, 'SNAPSHOT_NOT_FOUND', 'O arquivo do snapshot não está disponível.');
+    }
+    return new Response(object.body, {
+      headers: {
+        'Content-Type': 'application/vnd.sqlite3',
+        'Content-Length': String(snapshot.size_bytes),
+        'X-GTRZ-Snapshot-Sha256': storedString(snapshot.sha256, 'sha256'),
+        'X-GTRZ-Snapshot-Event': storedString(snapshot.event_id, 'event_id'),
+        'X-GTRZ-Snapshot-Source': storedString(snapshot.source_device_id, 'source_device_id'),
+      },
+    });
   }
 
   #requestGlobalReset(payload: JsonRecord): JsonRecord {
@@ -4648,7 +4810,7 @@ function mobileApiRequest(url: URL): boolean {
 }
 
 function monitorRequest(url: URL): boolean {
-  return /^\/v1\/monitor\/(stream|heartbeat|snapshot|command|transport|conflict|global-control|global-event|global-event\/reset|reset-backup\/[^/]+)$/.test(
+  return /^\/v1\/monitor\/(stream|heartbeat|snapshot|command|transport|conflict|global-control|global-event|global-event\/reset|reset-backup\/[^/]+|replica-snapshot\/[^/]+)$/.test(
     url.pathname,
   );
 }

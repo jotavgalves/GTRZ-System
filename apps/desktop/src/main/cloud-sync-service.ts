@@ -1,5 +1,6 @@
-import { readFile, writeFile } from 'node:fs/promises';
-import { hostname } from 'node:os';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { hostname, tmpdir } from 'node:os';
+import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { WebSocket, type RawData } from 'ws';
 
@@ -18,6 +19,7 @@ import {
 } from '@gtrz/contracts';
 import {
   getSessionState,
+  createDatabaseSnapshot,
   listCombos,
   redeemVouchers,
   refundOrderVouchers,
@@ -27,6 +29,8 @@ import {
 } from '@gtrz/database';
 import { getProductPresentation } from '@gtrz/database/product-presentation';
 import { getPrintingSettings } from '@gtrz/database/printing';
+
+import type { DatabaseRuntime } from './database-runtime';
 
 const CONNECTION_TIMEOUT_MS = 5_000;
 const OUTBOX_INTERVAL_MS = 3_000;
@@ -109,7 +113,13 @@ interface GlobalEventCommand {
   readonly eventId: string;
   readonly eventName: string;
   readonly reason: string | null;
+  readonly bootstrapSnapshotId: string | null;
+  readonly snapshotSourceDeviceId: string | null;
   readonly createdAt: number;
+}
+
+interface PendingBootstrap {
+  readonly command: GlobalEventCommand;
 }
 
 interface PendingGlobalReset {
@@ -297,6 +307,7 @@ export class CloudSyncService {
   readonly #onDataChanged: () => void;
   readonly #endpoint: string;
   readonly #getDeviceLabel: () => string;
+  readonly #databaseRuntime: DatabaseRuntime | null;
   #printAgent: ((job: ClaimedCloudPrintJob) => Promise<PrintAgentResult>) | null = null;
   #resetBackupAgent: (() => Promise<BackupRecord>) | null = null;
   #outboxTimer: NodeJS.Timeout | null = null;
@@ -312,6 +323,7 @@ export class CloudSyncService {
   #flushInFlight = false;
   #cloudConnected = false;
   #lastLatencyMs = 0;
+  #pendingBootstrap: PendingBootstrap | null = null;
 
   constructor(
     pairingKeyPath: string,
@@ -319,12 +331,14 @@ export class CloudSyncService {
     onDataChanged: () => void = () => undefined,
     endpoint = 'https://gtrz-sync.jvgacontato.workers.dev',
     getDeviceLabel: () => string = hostname,
+    databaseRuntime: DatabaseRuntime | null = null,
   ) {
     this.#pairingKeyPath = pairingKeyPath;
     this.#deviceIdPath = deviceIdPath;
     this.#onDataChanged = onDataChanged;
     this.#endpoint = endpoint;
     this.#getDeviceLabel = getDeviceLabel;
+    this.#databaseRuntime = databaseRuntime;
   }
 
   start(getActiveEventId: () => string | null): void {
@@ -377,20 +391,23 @@ export class CloudSyncService {
     try {
       const deviceId = await this.#readOrCreateDeviceId();
       const pairingKey = await this.#readPairingKey();
-      this.#enqueueNewAudits(database, deviceId);
 
       if (pairingKey === null) return;
 
-      const effectiveActiveEventId = getSessionState(database).activeEvent?.id ?? activeEventId;
+      const workingDatabase = await this.#applyPendingBootstrap(database, pairingKey, deviceId);
+      this.#enqueueNewAudits(workingDatabase, deviceId);
 
-      this.#retryRecoverablePaidOrders(database);
-      this.#ensureControlStream(database, deviceId, pairingKey);
-      this.#ensureEventStreams(database, effectiveActiveEventId, deviceId, pairingKey);
-      await this.#publishCashierCatalog(database, effectiveActiveEventId, pairingKey);
-      await this.#publishMobileContext(database, effectiveActiveEventId, pairingKey);
-      this.#applyInbox(database, deviceId);
+      const effectiveActiveEventId =
+        getSessionState(workingDatabase).activeEvent?.id ?? activeEventId;
 
-      const pending = database.sqlite
+      this.#retryRecoverablePaidOrders(workingDatabase);
+      this.#ensureControlStream(workingDatabase, deviceId, pairingKey);
+      this.#ensureEventStreams(workingDatabase, effectiveActiveEventId, deviceId, pairingKey);
+      await this.#publishCashierCatalog(workingDatabase, effectiveActiveEventId, pairingKey);
+      await this.#publishMobileContext(workingDatabase, effectiveActiveEventId, pairingKey);
+      this.#applyInbox(workingDatabase, deviceId);
+
+      const pending = workingDatabase.sqlite
         .prepare(
           `SELECT audit_id, operation_id, event_id, payload_json
          FROM sync_outbox WHERE status IN ('pending', 'failed')
@@ -414,7 +431,7 @@ export class CloudSyncService {
             throw new Error(`A central respondeu ${String(response.status)}.`);
           }
 
-          database.sqlite
+          workingDatabase.sqlite
             .prepare(
               `UPDATE sync_outbox
              SET status = 'accepted', accepted_at = ?, attempts = attempts + 1,
@@ -424,7 +441,7 @@ export class CloudSyncService {
             .run(Date.now(), Date.now(), item.audit_id);
         } catch (error: unknown) {
           const message = error instanceof Error ? error.message.slice(0, 240) : 'Falha de rede.';
-          database.sqlite
+          workingDatabase.sqlite
             .prepare(
               `UPDATE sync_outbox
              SET status = 'failed', attempts = attempts + 1, last_error = ?, updated_at = ?
@@ -445,9 +462,13 @@ export class CloudSyncService {
       .get(eventId) as { readonly id: string; readonly name: string } | undefined;
     if (event === undefined)
       throw new Error('O evento selecionado não está disponível neste computador.');
+    const deviceId = await this.#readOrCreateDeviceId();
+    const bootstrapSnapshot = await this.#uploadBootstrapSnapshot(database, event.id, deviceId);
     await this.#globalControlRequest('/v1/monitor/global-event', {
       eventId: event.id,
       eventName: event.name,
+      bootstrapSnapshotId: bootstrapSnapshot.snapshotId,
+      snapshotSourceDeviceId: deviceId,
     });
     setActiveEvent(database, event.id);
     this.#onDataChanged();
@@ -692,6 +713,181 @@ export class CloudSyncService {
     throw new Error(message);
   }
 
+  async #uploadBootstrapSnapshot(
+    database: DatabaseContext,
+    eventId: string,
+    deviceId: string,
+  ): Promise<{ readonly snapshotId: string }> {
+    const pairingKey = await this.#readPairingKey();
+    if (pairingKey === null)
+      throw new Error('A chave da nuvem não foi encontrada neste computador.');
+
+    const temporaryDirectory = await mkdtemp(path.join(tmpdir(), 'gtrz-replica-'));
+    const snapshotPath = path.join(temporaryDirectory, 'database.sqlite');
+    try {
+      await createDatabaseSnapshot(database, snapshotPath);
+      const contents = await readFile(snapshotPath);
+      const checksum = createHash('sha256').update(contents).digest('hex');
+      const response = await fetch(
+        `${this.#endpoint}/v1/monitor/replica-snapshot/${encodeURIComponent(eventId)}`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/vnd.sqlite3',
+            'Content-Length': String(contents.byteLength),
+            'X-GTRZ-Key': pairingKey,
+            'X-GTRZ-Device-Id': deviceId,
+            'X-GTRZ-Snapshot-Sha256': checksum,
+            'X-GTRZ-Snapshot-Size': String(contents.byteLength),
+          },
+          body: new Uint8Array(contents).buffer,
+          signal: AbortSignal.timeout(CONNECTION_TIMEOUT_MS * 6),
+        },
+      );
+      const payload: unknown = await response.json().catch(() => null);
+      if (
+        !response.ok ||
+        !isRecord(payload) ||
+        typeof payload.snapshotId !== 'string' ||
+        payload.snapshotId.length === 0
+      ) {
+        const message =
+          isRecord(payload) && isRecord(payload.error) && typeof payload.error.message === 'string'
+            ? payload.error.message
+            : 'A central não conseguiu preparar a cópia inicial do evento.';
+        throw new Error(message);
+      }
+      return { snapshotId: payload.snapshotId };
+    } finally {
+      await rm(temporaryDirectory, { force: true, recursive: true });
+    }
+  }
+
+  async #applyPendingBootstrap(
+    database: DatabaseContext,
+    pairingKey: string,
+    deviceId: string,
+  ): Promise<DatabaseContext> {
+    const pending = this.#pendingBootstrap;
+    if (pending === null || this.#databaseRuntime === null) return database;
+    this.#pendingBootstrap = null;
+
+    const { command } = pending;
+    if (this.#hasAppliedBootstrap(database, command.commandId)) return database;
+    if (!this.#isBootstrapEligible(database, command.eventId)) {
+      this.#markBootstrapApplied(database, command);
+      return database;
+    }
+    if (command.bootstrapSnapshotId === null) return database;
+
+    const response = await fetch(
+      `${this.#endpoint}/v1/monitor/replica-snapshot/${encodeURIComponent(command.bootstrapSnapshotId)}`,
+      {
+        headers: { 'X-GTRZ-Key': pairingKey },
+        signal: AbortSignal.timeout(CONNECTION_TIMEOUT_MS * 6),
+      },
+    );
+    if (!response.ok) {
+      throw new Error('A cópia inicial do evento não pôde ser baixada deste PC.');
+    }
+    if (response.headers.get('X-GTRZ-Snapshot-Event') !== command.eventId) {
+      throw new Error('A cópia inicial recebida pertence a outro evento.');
+    }
+    const expectedChecksum = response.headers.get('X-GTRZ-Snapshot-Sha256');
+    if (expectedChecksum === null || !/^[a-f0-9]{64}$/iu.test(expectedChecksum)) {
+      throw new Error('A cópia inicial não possui verificação de integridade.');
+    }
+    const contents = Buffer.from(await response.arrayBuffer());
+    if (createHash('sha256').update(contents).digest('hex') !== expectedChecksum) {
+      throw new Error('A cópia inicial falhou na verificação de integridade.');
+    }
+
+    const temporaryDirectory = await mkdtemp(path.join(tmpdir(), 'gtrz-replica-import-'));
+    const snapshotPath = path.join(temporaryDirectory, 'database.sqlite');
+    try {
+      await writeFile(snapshotPath, contents, { flag: 'wx' });
+      await this.#databaseRuntime.replaceWith(snapshotPath);
+    } finally {
+      await rm(temporaryDirectory, { force: true, recursive: true });
+    }
+
+    const restored = this.#databaseRuntime.get();
+    const event = restored.sqlite
+      .prepare("SELECT id FROM events WHERE id = ? AND status = 'open'")
+      .get(command.eventId);
+    if (event === undefined) {
+      throw new Error('A cópia inicial não contém o evento global selecionado.');
+    }
+    setActiveEvent(restored, command.eventId);
+    this.#markBootstrapApplied(restored, command);
+    this.#restartStreamsAfterDatabaseRestore();
+    this.#ensureEventStreams(restored, command.eventId, deviceId, pairingKey);
+    this.#onDataChanged();
+    return restored;
+  }
+
+  #isBootstrapEligible(database: DatabaseContext, eventId: string): boolean {
+    const otherEvents = database.sqlite
+      .prepare('SELECT COUNT(*) AS amount FROM events WHERE id <> ?')
+      .get(eventId) as { readonly amount: number };
+    if (otherEvents.amount > 0) return false;
+    const eventData = database.sqlite
+      .prepare(
+        `SELECT
+           (SELECT COUNT(*) FROM orders WHERE event_id = ?) +
+           (SELECT COUNT(*) FROM event_stock WHERE event_id = ?) +
+           (SELECT COUNT(*) FROM service_points WHERE event_id = ?) +
+           (SELECT COUNT(*) FROM vouchers WHERE event_id = ?) +
+           (SELECT COUNT(*) FROM expenses WHERE event_id = ?) +
+           (SELECT COUNT(*) FROM ticket_lots WHERE event_id = ?) AS amount`,
+      )
+      .get(eventId, eventId, eventId, eventId, eventId, eventId) as { readonly amount: number };
+    return eventData.amount === 0;
+  }
+
+  #hasAppliedBootstrap(database: DatabaseContext, commandId: string): boolean {
+    return (
+      database.sqlite
+        .prepare('SELECT 1 FROM sync_state WHERE key = ?')
+        .get(`global.bootstrap:${commandId}`) !== undefined
+    );
+  }
+
+  #markBootstrapApplied(database: DatabaseContext, command: GlobalEventCommand): void {
+    database.sqlite.transaction(() => {
+      database.sqlite
+        .prepare(
+          `INSERT INTO sync_state (key, value, updated_at) VALUES (?, 'applied', ?)
+           ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+        )
+        .run(`global.bootstrap:${command.commandId}`, Date.now());
+      database.sqlite
+        .prepare(
+          `INSERT INTO sync_state (key, value, updated_at) VALUES (?, 'applied', ?)
+           ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+        )
+        .run(`global.event-command:${command.commandId}`, Date.now());
+      database.sqlite
+        .prepare(
+          `INSERT INTO sync_state (key, value, updated_at) VALUES (?, ?, ?)
+           ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+        )
+        .run('global.event-control.cursor', String(command.sequence), Date.now());
+    })();
+  }
+
+  #restartStreamsAfterDatabaseRestore(): void {
+    this.#stopControlHeartbeat();
+    this.#controlStream?.close();
+    this.#controlStream = null;
+    if (this.#controlReconnectTimer !== null) clearTimeout(this.#controlReconnectTimer);
+    this.#controlReconnectTimer = null;
+    for (const timer of this.#eventReconnectTimers.values()) clearTimeout(timer);
+    this.#eventReconnectTimers.clear();
+    for (const stream of this.#eventStreams.values()) stream.close();
+    this.#eventStreams.clear();
+  }
+
   #ensureControlStream(database: DatabaseContext, deviceId: string, pairingKey: string): void {
     if (this.#controlReconnectTimer !== null) return;
     if (
@@ -811,6 +1007,12 @@ export class CloudSyncService {
         eventId: candidate.eventId,
         eventName: candidate.eventName,
         reason: typeof candidate.reason === 'string' ? candidate.reason : null,
+        bootstrapSnapshotId:
+          typeof candidate.bootstrapSnapshotId === 'string' ? candidate.bootstrapSnapshotId : null,
+        snapshotSourceDeviceId:
+          typeof candidate.snapshotSourceDeviceId === 'string'
+            ? candidate.snapshotSourceDeviceId
+            : null,
         createdAt: candidate.createdAt,
       };
       const appliedKey = `global.event-command:${command.commandId}`;
@@ -840,6 +1042,16 @@ export class CloudSyncService {
         event = { id: command.eventId, name: command.eventName };
       }
       if (event !== undefined && command.type === 'event.activated') {
+        if (
+          command.bootstrapSnapshotId !== null &&
+          command.snapshotSourceDeviceId !== null &&
+          command.snapshotSourceDeviceId !== deviceId &&
+          this.#databaseRuntime !== null &&
+          !this.#hasAppliedBootstrap(database, command.commandId)
+        ) {
+          this.#pendingBootstrap = { command };
+          return;
+        }
         setActiveEvent(database, event.id);
         this.#ensureEventStreams(database, event.id, deviceId, pairingKey);
         this.#onDataChanged();

@@ -87,6 +87,7 @@ if (!hasSingleInstanceLock) {
         },
         cloudSyncEndpoint(runtimeEnvironment),
         () => getPrintingSettings(requireDatabaseRuntime().get()).machineName,
+        databaseRuntime,
       );
 
       const printService = registerIpcHandlers({

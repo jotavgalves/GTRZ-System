@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { WebSocket } from 'ws';
 import {
@@ -15,10 +16,12 @@ import { CloudSyncService } from '../../apps/desktop/src/main/cloud-sync-service
 
 // No real sockets, credentials, printers, database files, or cloud requests are used.
 vi.mock('node:fs/promises', () => ({
+  mkdtemp: vi.fn((): Promise<string> => Promise.resolve('audit-temporary-directory')),
   readFile: vi.fn(
     (path: string): Promise<string> =>
       Promise.resolve(path === 'audit-key' ? 'isolated-audit-key' : 'audit-pc'),
   ),
+  rm: vi.fn((): Promise<void> => Promise.resolve()),
   writeFile: vi.fn((): Promise<void> => Promise.resolve()),
 }));
 vi.mock('ws', async () => {
@@ -170,6 +173,75 @@ describe('cloud replication invariants', () => {
         .get(),
     ).toEqual({ value: 'applied' });
     expect(getSessionState(db).activeEvent?.id).toBe('remote-event');
+  });
+
+  it('restores a verified database copy before a fresh paired PC consumes event sales', async () => {
+    const snapshot = Buffer.from('verified SQLite replica');
+    const checksum = createHash('sha256').update(snapshot).digest('hex');
+    const replaceWith = vi.fn(async (): Promise<void> => undefined);
+    const databaseRuntime = {
+      get: (): ReturnType<typeof openDatabase> => db,
+      replaceWith,
+    };
+    service.stop();
+    service = new CloudSyncService(
+      'audit-key',
+      'audit-device',
+      (): void => undefined,
+      'https://audit.invalid',
+      (): string => 'Audit PC',
+      databaseRuntime as never,
+    );
+    request.mockImplementation((url: string): Response => {
+      if (url.includes('/replica-snapshot/')) {
+        return new Response(snapshot, {
+          status: 200,
+          headers: {
+            'X-GTRZ-Snapshot-Event': 'remote-event',
+            'X-GTRZ-Snapshot-Sha256': checksum,
+          },
+        });
+      }
+      return new Response(
+        JSON.stringify({ commands: globalCommands, pendingReset: null }),
+        { status: 200 },
+      );
+    });
+
+    await service.flushOutbox(db, null);
+    globalCommands = [
+      {
+        sequence: 1,
+        commandId: 'activate-with-bootstrap',
+        type: 'event.activated',
+        eventId: 'remote-event',
+        eventName: 'Remote event',
+        bootstrapSnapshotId: 'snapshot-1',
+        snapshotSourceDeviceId: 'source-device',
+        createdAt: Date.now(),
+      },
+    ];
+    const control = requireSocket('/monitor/');
+    control.open();
+    control.message({ type: 'global.sync' });
+    await settle();
+
+    expect(replaceWith).not.toHaveBeenCalled();
+    await service.flushOutbox(db, null);
+
+    expect(replaceWith).toHaveBeenCalledTimes(1);
+    expect(request).toHaveBeenCalledWith(
+      expect.stringContaining('/replica-snapshot/snapshot-1'),
+      expect.objectContaining({ headers: { 'X-GTRZ-Key': 'isolated-audit-key' } }),
+    );
+    expect(getSessionState(db).activeEvent?.id).toBe('remote-event');
+    expect(
+      db.sqlite
+        .prepare(
+          "SELECT value FROM sync_state WHERE key = 'global.bootstrap:activate-with-bootstrap'",
+        )
+        .get(),
+    ).toEqual({ value: 'applied' });
   });
 
   it('puts event renames and combo creation into the shared journal', async () => {
