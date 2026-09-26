@@ -606,6 +606,14 @@ export class MonitorRoom extends DurableObject<Env> {
         return json(await this.#authorizeDesktopDevice(await readJson(request)));
       }
 
+      if (request.method === 'GET' && url.pathname === '/v1/monitor/desktop/devices') {
+        return json(this.#desktopDevices());
+      }
+
+      if (request.method === 'POST' && url.pathname === '/v1/monitor/desktop/devices/revoke') {
+        return json(this.#revokeDesktopDevice(await readJson(request)));
+      }
+
       const replicaSnapshotMatch = /^\/v1\/monitor\/replica-snapshot\/([^/]+)$/.exec(url.pathname);
       if (request.method === 'POST' && replicaSnapshotMatch !== null) {
         return json(
@@ -901,6 +909,43 @@ export class MonitorRoom extends DurableObject<Env> {
       .exec('UPDATE desktop_devices SET last_seen_at = ? WHERE device_id = ?', Date.now(), deviceId)
       .toArray();
     return { authorized: true };
+  }
+
+  #desktopDevices(): JsonRecord {
+    return {
+      devices: this.ctx.storage.sql
+        .exec(
+          `SELECT device_id, label, created_at, last_seen_at, revoked_at
+           FROM desktop_devices ORDER BY created_at DESC LIMIT 100`,
+        )
+        .toArray()
+        .map((row) => ({
+          deviceId: storedString(row.device_id, 'device_id'),
+          label: storedString(row.label, 'label'),
+          createdAt: Number(row.created_at),
+          lastSeenAt: Number(row.last_seen_at),
+          revokedAt: row.revoked_at === null ? null : Number(row.revoked_at),
+        })),
+    };
+  }
+
+  #revokeDesktopDevice(payload: JsonRecord): JsonRecord {
+    const deviceId = requiredString(payload.deviceId, 'deviceId', 80);
+    const result = this.ctx.storage.sql
+      .exec(
+        `UPDATE desktop_devices SET revoked_at = ?
+         WHERE device_id = ? AND revoked_at IS NULL`,
+        Date.now(),
+        deviceId,
+      )
+      .toArray();
+    if (result.length === 0) {
+      const exists = this.ctx.storage.sql
+        .exec('SELECT 1 FROM desktop_devices WHERE device_id = ?', deviceId)
+        .toArray()[0];
+      if (exists === undefined) throw new ApiError(404, 'NOT_FOUND', 'Computador não encontrado.');
+    }
+    return { success: true };
   }
 
   #snapshot(): JsonRecord {
@@ -5098,6 +5143,28 @@ export default {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ ...payload, createdByDeviceId: deviceId }),
+        }),
+      );
+    }
+
+    if (request.method === 'GET' && url.pathname === '/v1/desktop/devices') {
+      if (!masterAuthorized(request, env)) {
+        return json({ error: { code: 'UNAUTHORIZED', message: 'Chave de acesso inválida.' } }, 401);
+      }
+      const monitor = env.MONITOR_ROOM.get(env.MONITOR_ROOM.idFromName('gtrz-monitor'));
+      return monitor.fetch(new Request('https://monitor.internal/v1/monitor/desktop/devices'));
+    }
+
+    if (request.method === 'POST' && url.pathname === '/v1/desktop/devices/revoke') {
+      if (!masterAuthorized(request, env)) {
+        return json({ error: { code: 'UNAUTHORIZED', message: 'Chave de acesso inválida.' } }, 401);
+      }
+      const monitor = env.MONITOR_ROOM.get(env.MONITOR_ROOM.idFromName('gtrz-monitor'));
+      return monitor.fetch(
+        new Request('https://monitor.internal/v1/monitor/desktop/devices/revoke', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(await readJson(request)),
         }),
       );
     }

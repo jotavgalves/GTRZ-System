@@ -8,7 +8,9 @@ import {
   cloudSyncStatusSchema,
   cloudMonitorSchema,
   desktopEnrollmentSchema,
+  desktopDeviceListSchema,
   exchangeDesktopEnrollmentInputSchema,
+  revokeDesktopDeviceInputSchema,
   createMobileOperatorInputSchema,
   deleteMobileOperatorInputSchema,
   endMobileOperatorSessionsInputSchema,
@@ -42,7 +44,9 @@ import {
   type CloudSyncStatus,
   type CloudMonitor,
   type DesktopEnrollment,
+  type DesktopDevice,
   type ExchangeDesktopEnrollmentInput,
+  type RevokeDesktopDeviceInput,
   type CreateMobileOperatorInput,
   type DeleteMobileOperatorInput,
   type EndMobileOperatorSessionsInput,
@@ -197,6 +201,17 @@ const api: GtrzDesktopApi = {
       const payload: unknown = await ipcRenderer.invoke(
         IPC_CHANNELS.settingsExchangeDesktopEnrollment,
         exchangeDesktopEnrollmentInputSchema.parse(input),
+      );
+      return operationResultSchema.parse(payload);
+    },
+    async listDesktopDevices(): Promise<readonly DesktopDevice[]> {
+      const payload: unknown = await ipcRenderer.invoke(IPC_CHANNELS.settingsListDesktopDevices);
+      return desktopDeviceListSchema.parse(payload);
+    },
+    async revokeDesktopDevice(input: RevokeDesktopDeviceInput): Promise<OperationResult> {
+      const payload: unknown = await ipcRenderer.invoke(
+        IPC_CHANNELS.settingsRevokeDesktopDevice,
+        revokeDesktopDeviceInputSchema.parse(input),
       );
       return operationResultSchema.parse(payload);
     },

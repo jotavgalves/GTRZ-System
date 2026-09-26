@@ -12,7 +12,7 @@ import {
 } from 'lucide-react';
 import { useCallback, useEffect, useState } from 'react';
 
-import type { CloudMonitor } from '@gtrz/contracts';
+import type { CloudMonitor, DesktopDevice } from '@gtrz/contracts';
 
 import { MobileOperatorsPanel } from './MobileOperatorsPanel';
 import { CloudEventSelector } from './CloudEventSelector';
@@ -192,6 +192,7 @@ export function CloudMonitorPage(): React.JSX.Element {
   const [enrollmentBusy, setEnrollmentBusy] = useState(false);
   const [enrollmentError, setEnrollmentError] = useState<string | null>(null);
   const [enrollmentNotice, setEnrollmentNotice] = useState<string | null>(null);
+  const [desktopDevices, setDesktopDevices] = useState<readonly DesktopDevice[]>([]);
 
   const load = useCallback(async (): Promise<void> => {
     setLoading(true);
@@ -210,6 +211,19 @@ export function CloudMonitorPage(): React.JSX.Element {
   useEffect(() => {
     void load();
   }, [load]);
+
+  const loadDesktopDevices = useCallback(async (): Promise<void> => {
+    try {
+      setDesktopDevices(await window.gtrz.settings.listDesktopDevices());
+    } catch {
+      // This is expected on a newly enrolled PC, which is not an administrator.
+      setDesktopDevices([]);
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadDesktopDevices();
+  }, [loadDesktopDevices]);
 
   const averageLatency =
     monitor === null || monitor.activeDevices.length === 0
@@ -231,6 +245,7 @@ export function CloudMonitorPage(): React.JSX.Element {
       setEnrollmentExpiresAt(enrollment.expiresAt);
       await navigator.clipboard.writeText(enrollment.enrollmentCode);
       setEnrollmentNotice('Código criado e copiado. Ele pode ser usado uma única vez.');
+      void loadDesktopDevices();
     } catch (createError: unknown) {
       setEnrollmentError(
         createError instanceof Error ? createError.message : 'Não foi possível criar o código.',
@@ -253,6 +268,23 @@ export function CloudMonitorPage(): React.JSX.Element {
     } catch (exchangeError: unknown) {
       setEnrollmentError(
         exchangeError instanceof Error ? exchangeError.message : 'Não foi possível vincular este computador.',
+      );
+    } finally {
+      setEnrollmentBusy(false);
+    }
+  };
+
+  const revokeDesktopDevice = async (device: DesktopDevice): Promise<void> => {
+    setEnrollmentBusy(true);
+    setEnrollmentError(null);
+    setEnrollmentNotice(null);
+    try {
+      await window.gtrz.settings.revokeDesktopDevice({ deviceId: device.deviceId });
+      setEnrollmentNotice(`${device.label} foi bloqueado e não poderá sincronizar novamente.`);
+      await loadDesktopDevices();
+    } catch (revokeError: unknown) {
+      setEnrollmentError(
+        revokeError instanceof Error ? revokeError.message : 'Não foi possível bloquear o computador.',
       );
     } finally {
       setEnrollmentBusy(false);
@@ -313,6 +345,29 @@ export function CloudMonitorPage(): React.JSX.Element {
                     minute: '2-digit',
                   }).format(enrollmentExpiresAt ?? Date.now())}.`}
                 </small>
+              </div>
+            )}
+            {desktopDevices.length === 0 ? null : (
+              <div className="cloud-enrollment__devices">
+                <strong>Computadores vinculados</strong>
+                {desktopDevices.map((device) => (
+                  <div key={device.deviceId}>
+                    <span>
+                      <b>{device.label}</b>
+                      <small>{device.revokedAt === null ? 'Ativo' : 'Bloqueado'}</small>
+                    </span>
+                    {device.revokedAt !== null ? null : (
+                      <button
+                        className="button button--danger"
+                        disabled={enrollmentBusy}
+                        onClick={() => void revokeDesktopDevice(device)}
+                        type="button"
+                      >
+                        Bloquear
+                      </button>
+                    )}
+                  </div>
+                ))}
               </div>
             )}
           </div>

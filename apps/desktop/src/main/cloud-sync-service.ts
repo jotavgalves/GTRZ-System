@@ -440,6 +440,64 @@ export class CloudSyncService {
     );
   }
 
+  async listDesktopDevices(): Promise<
+    readonly {
+      readonly deviceId: string;
+      readonly label: string;
+      readonly createdAt: number;
+      readonly lastSeenAt: number;
+      readonly revokedAt: number | null;
+    }[]
+  > {
+    const administratorKey = await this.#readLegacyPairingKey();
+    if (administratorKey === null) {
+      throw new Error('Somente o computador administrador pode listar os dispositivos vinculados.');
+    }
+    const response = await fetch(`${this.#endpoint}/v1/desktop/devices`, {
+      headers: { 'X-GTRZ-Key': administratorKey },
+      signal: AbortSignal.timeout(CONNECTION_TIMEOUT_MS),
+    });
+    const payload: unknown = await response.json();
+    if (!response.ok || !isRecord(payload) || !Array.isArray(payload.devices)) {
+      throw new Error('A nuvem não conseguiu listar os computadores vinculados.');
+    }
+    return payload.devices.flatMap((device) => {
+      if (
+        !isRecord(device) ||
+        typeof device.deviceId !== 'string' ||
+        typeof device.label !== 'string' ||
+        typeof device.createdAt !== 'number' ||
+        typeof device.lastSeenAt !== 'number' ||
+        (device.revokedAt !== null && typeof device.revokedAt !== 'number')
+      ) {
+        return [];
+      }
+      return [
+        {
+          deviceId: device.deviceId,
+          label: device.label,
+          createdAt: device.createdAt,
+          lastSeenAt: device.lastSeenAt,
+          revokedAt: device.revokedAt,
+        },
+      ];
+    });
+  }
+
+  async revokeDesktopDevice(deviceId: string): Promise<void> {
+    const administratorKey = await this.#readLegacyPairingKey();
+    if (administratorKey === null) {
+      throw new Error('Somente o computador administrador pode bloquear outro computador.');
+    }
+    const response = await fetch(`${this.#endpoint}/v1/desktop/devices/revoke`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-GTRZ-Key': administratorKey },
+      body: JSON.stringify({ deviceId }),
+      signal: AbortSignal.timeout(CONNECTION_TIMEOUT_MS),
+    });
+    if (!response.ok) throw new Error('A nuvem não conseguiu bloquear este computador.');
+  }
+
   async flushOutbox(database: DatabaseContext, activeEventId: string | null): Promise<void> {
     if (this.#flushInFlight) return;
     this.#flushInFlight = true;

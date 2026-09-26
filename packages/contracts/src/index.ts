@@ -44,6 +44,8 @@ export const IPC_CHANNELS = {
   settingsGetCloudMonitor: 'settings:get-cloud-monitor',
   settingsCreateDesktopEnrollment: 'settings:create-desktop-enrollment',
   settingsExchangeDesktopEnrollment: 'settings:exchange-desktop-enrollment',
+  settingsListDesktopDevices: 'settings:list-desktop-devices',
+  settingsRevokeDesktopDevice: 'settings:revoke-desktop-device',
   settingsSetGlobalEvent: 'settings:set-global-event',
   settingsResetGlobalEvent: 'settings:reset-global-event',
   settingsListMobileOperators: 'settings:list-mobile-operators',
@@ -256,6 +258,16 @@ export const exchangeDesktopEnrollmentInputSchema = z.object({
   enrollmentCode: z.string().trim().min(20).max(160),
 });
 
+export const desktopDeviceSchema = z.object({
+  deviceId: z.string().min(1).max(80),
+  label: z.string().min(1).max(80),
+  createdAt: z.number().int().nonnegative(),
+  lastSeenAt: z.number().int().nonnegative(),
+  revokedAt: z.number().int().nonnegative().nullable(),
+});
+export const desktopDeviceListSchema = z.array(desktopDeviceSchema);
+export const revokeDesktopDeviceInputSchema = z.object({ deviceId: z.string().min(1).max(80) });
+
 export const mobilePermissionsSchema = z.object({
   sales: z.boolean(),
   inventory: z.boolean(),
@@ -427,6 +439,8 @@ export type OperationResult = z.infer<typeof operationResultSchema>;
 export type CloudSyncStatus = z.infer<typeof cloudSyncStatusSchema>;
 export type DesktopEnrollment = z.infer<typeof desktopEnrollmentSchema>;
 export type ExchangeDesktopEnrollmentInput = z.infer<typeof exchangeDesktopEnrollmentInputSchema>;
+export type DesktopDevice = z.infer<typeof desktopDeviceSchema>;
+export type RevokeDesktopDeviceInput = z.infer<typeof revokeDesktopDeviceInputSchema>;
 export type MobilePermissions = z.infer<typeof mobilePermissionsSchema>;
 export type MobileOperator = z.infer<typeof mobileOperatorSchema>;
 export type CreateMobileOperatorInput = z.infer<typeof createMobileOperatorInputSchema>;
@@ -473,6 +487,8 @@ export interface GtrzDesktopApi {
     getCloudMonitor(): Promise<CloudMonitor>;
     createDesktopEnrollment(): Promise<DesktopEnrollment>;
     exchangeDesktopEnrollment(input: ExchangeDesktopEnrollmentInput): Promise<OperationResult>;
+    listDesktopDevices(): Promise<readonly DesktopDevice[]>;
+    revokeDesktopDevice(input: RevokeDesktopDeviceInput): Promise<OperationResult>;
     setGlobalEvent(input: SetGlobalEventInput): Promise<SessionState>;
     resetGlobalEvent(input: ResetGlobalEventInput): Promise<OperationResult>;
     listMobileOperators(): Promise<readonly MobileOperator[]>;

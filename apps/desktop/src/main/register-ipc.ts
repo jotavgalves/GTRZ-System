@@ -8,7 +8,9 @@ import {
   cloudSyncStatusSchema,
   cloudMonitorSchema,
   desktopEnrollmentSchema,
+  desktopDeviceListSchema,
   exchangeDesktopEnrollmentInputSchema,
+  revokeDesktopDeviceInputSchema,
   createEventInputSchema,
   createMobileOperatorInputSchema,
   deleteMobileOperatorInputSchema,
@@ -93,6 +95,8 @@ const CONTROL_CHANNELS = [
   IPC_CHANNELS.settingsGetCloudMonitor,
   IPC_CHANNELS.settingsCreateDesktopEnrollment,
   IPC_CHANNELS.settingsExchangeDesktopEnrollment,
+  IPC_CHANNELS.settingsListDesktopDevices,
+  IPC_CHANNELS.settingsRevokeDesktopDevice,
   IPC_CHANNELS.settingsSetGlobalEvent,
   IPC_CHANNELS.settingsResetGlobalEvent,
   IPC_CHANNELS.settingsListMobileOperators,
@@ -229,6 +233,23 @@ export function registerIpcHandlers(options: RegisterIpcOptions): ThermalPrintSe
   ipcMain.handle(IPC_CHANNELS.settingsExchangeDesktopEnrollment, async (_event, payload: unknown) => {
     await options.cloudSyncService.exchangeDesktopEnrollment(
       exchangeDesktopEnrollmentInputSchema.parse(payload).enrollmentCode,
+    );
+    return operationResultSchema.parse({ success: true });
+  });
+
+  ipcMain.handle(IPC_CHANNELS.settingsListDesktopDevices, async () => {
+    if (getSessionState(options.getDatabase()).profile !== 'production') {
+      throw new Error('Entre no perfil Produção para administrar computadores vinculados.');
+    }
+    return desktopDeviceListSchema.parse(await options.cloudSyncService.listDesktopDevices());
+  });
+
+  ipcMain.handle(IPC_CHANNELS.settingsRevokeDesktopDevice, async (_event, payload: unknown) => {
+    if (getSessionState(options.getDatabase()).profile !== 'production') {
+      throw new Error('Entre no perfil Produção para bloquear outro computador.');
+    }
+    await options.cloudSyncService.revokeDesktopDevice(
+      revokeDesktopDeviceInputSchema.parse(payload).deviceId,
     );
     return operationResultSchema.parse({ success: true });
   });
