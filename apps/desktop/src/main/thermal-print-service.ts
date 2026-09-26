@@ -1,4 +1,6 @@
 import { BrowserWindow } from 'electron';
+import { mkdir, writeFile } from 'node:fs/promises';
+import path from 'node:path';
 
 import type {
   PrinterInfo,
@@ -8,14 +10,17 @@ import type {
 } from '@gtrz/contracts';
 import type { DatabaseContext } from '@gtrz/database';
 import {
+  type DatabaseOrderReceipt,
   getOrderReceipt,
   getPrintingSettings,
   updatePrintingSettings,
 } from '@gtrz/database/printing';
 
 import { buildReceiptHtml, estimateReceiptHeightMm } from './receipt-html';
+import type { ClaimedCloudPrintJob } from './cloud-sync-service';
 
 interface ThermalPrintServiceOptions {
+  readonly archiveDirectory: string;
   readonly getDatabase: () => DatabaseContext;
 }
 
@@ -32,9 +37,11 @@ function createHiddenWindow(): BrowserWindow {
 
 export class ThermalPrintService {
   readonly #getDatabase: () => DatabaseContext;
+  readonly #archiveDirectory: string;
 
   constructor(options: ThermalPrintServiceOptions) {
     this.#getDatabase = options.getDatabase;
+    this.#archiveDirectory = options.archiveDirectory;
   }
 
   getSettings(): PrintingSettings {
@@ -70,6 +77,22 @@ export class ThermalPrintService {
     return this.#printOrder(orderId, true);
   }
 
+  async printCloudJob(job: ClaimedCloudPrintJob): Promise<PrintOrderResult> {
+    const settings = getPrintingSettings(this.#getDatabase());
+    if (!settings.automaticPrinting) {
+      return {
+        success: false,
+        skipped: true,
+        message: 'Este PC não está habilitado para imprimir.',
+      };
+    }
+    const receipt: DatabaseOrderReceipt = {
+      ...job.document,
+      printedByLabel: settings.machineName,
+    };
+    return this.#printReceipt(receipt, settings);
+  }
+
   async #printOrder(orderId: string, force: boolean): Promise<PrintOrderResult> {
     const settings = getPrintingSettings(this.#getDatabase());
     if (!force && !settings.automaticPrinting) {
@@ -78,11 +101,27 @@ export class ThermalPrintService {
 
     try {
       const receipt = getOrderReceipt(this.#getDatabase(), orderId);
-      const html = buildReceiptHtml(receipt, settings.paperWidthMm);
+      return await this.#printReceipt(receipt, settings);
+    } catch (error: unknown) {
+      return {
+        success: false,
+        skipped: false,
+        message: error instanceof Error ? error.message : 'Falha ao imprimir a nota de retirada.',
+      };
+    }
+  }
+
+  async #printReceipt(
+    receipt: DatabaseOrderReceipt,
+    settings: PrintingSettings,
+  ): Promise<PrintOrderResult> {
+    try {
+      const html = await buildReceiptHtml(receipt, settings.paperWidthMm);
       const window = createHiddenWindow();
 
       try {
         await window.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`);
+        await this.#archiveReceipt(window, receipt.orderId, receipt.closedAt);
         const success = await new Promise<boolean>((resolve) => {
           const printOptions = {
             silent: true,
@@ -116,5 +155,19 @@ export class ThermalPrintService {
         message: error instanceof Error ? error.message : 'Falha ao imprimir a nota de retirada.',
       };
     }
+  }
+
+  async #archiveReceipt(window: BrowserWindow, orderId: string, closedAt: number): Promise<void> {
+    const occurredAt = new Date(closedAt);
+    const folder = path.join(
+      this.#archiveDirectory,
+      String(occurredAt.getFullYear()),
+      `${String(occurredAt.getMonth() + 1).padStart(2, '0')}-${String(occurredAt.getDate()).padStart(2, '0')}`,
+    );
+    await mkdir(folder, { recursive: true });
+    await writeFile(
+      path.join(folder, `Pedido-${orderId}.pdf`),
+      await window.webContents.printToPDF({ printBackground: true }),
+    );
   }
 }

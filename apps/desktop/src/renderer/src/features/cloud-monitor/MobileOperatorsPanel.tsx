@@ -1,18 +1,70 @@
 import { KeyRound, Pencil, ShieldCheck, UserRoundCheck, X } from 'lucide-react';
 import { useCallback, useEffect, useState, type SyntheticEvent } from 'react';
 
-import type { MobileOperator, MobileOperatorRole } from '@gtrz/contracts';
+import type { MobileOperator, MobilePermissions } from '@gtrz/contracts';
 
-function roleLabel(role: MobileOperatorRole): string {
-  if (role === 'sales') return 'Venda';
-  if (role === 'inventory') return 'Estoque';
-  return 'Estoque e venda';
-}
+const EMPTY_PERMISSIONS: MobilePermissions = {
+  sales: false,
+  inventory: false,
+  tickets: false,
+  expenses: false,
+  vouchers: false,
+};
+
+const PERMISSION_LABELS: readonly (readonly [keyof MobilePermissions, string])[] = [
+  ['sales', 'Vendas'],
+  ['inventory', 'Estoque'],
+  ['tickets', 'Ingressos'],
+  ['expenses', 'Despesas'],
+  ['vouchers', 'Vouchers'],
+];
 
 function formatLastSeen(timestamp: number | null): string {
   if (timestamp === null) return 'Nunca acessou';
   return new Intl.DateTimeFormat('pt-BR', { dateStyle: 'short', timeStyle: 'short' }).format(
     timestamp,
+  );
+}
+
+function enabledPermissions(permissions: MobilePermissions): string {
+  const labels = PERMISSION_LABELS.filter(([key]) => permissions[key]).map(([, label]) => label);
+  return labels.length === 0 ? 'Sem acesso operacional' : labels.join(' · ');
+}
+
+interface PermissionSwitchesProps {
+  readonly disabled?: boolean;
+  readonly idPrefix: string;
+  readonly onChange: (permissions: MobilePermissions) => void;
+  readonly permissions: MobilePermissions;
+}
+
+function PermissionSwitches({
+  disabled = false,
+  idPrefix,
+  onChange,
+  permissions,
+}: PermissionSwitchesProps): React.JSX.Element {
+  return (
+    <div className="mobile-permission-switches" aria-label="Permissões mobile">
+      {PERMISSION_LABELS.map(([key, label]) => {
+        const inputId = `${idPrefix}-${key}`;
+        return (
+          <label className="mobile-permission-switch" htmlFor={inputId} key={key}>
+            <span>{label}</span>
+            <input
+              checked={permissions[key]}
+              disabled={disabled}
+              id={inputId}
+              onChange={(event) => {
+                onChange({ ...permissions, [key]: event.target.checked });
+              }}
+              type="checkbox"
+            />
+            <i aria-hidden="true" />
+          </label>
+        );
+      })}
+    </div>
   );
 }
 
@@ -22,12 +74,16 @@ export function MobileOperatorsPanel(): React.JSX.Element {
   const [submitting, setSubmitting] = useState(false);
   const [name, setName] = useState('');
   const [password, setPassword] = useState('');
-  const [role, setRole] = useState<MobileOperatorRole>('sales');
+  const [permissions, setPermissions] = useState<MobilePermissions>({
+    ...EMPTY_PERMISSIONS,
+    sales: true,
+  });
   const [editing, setEditing] = useState<MobileOperator | null>(null);
   const [editName, setEditName] = useState('');
   const [editPassword, setEditPassword] = useState('');
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [updatingOperatorId, setUpdatingOperatorId] = useState<string | null>(null);
 
   const load = useCallback(async (): Promise<void> => {
     setLoading(true);
@@ -55,11 +111,11 @@ export function MobileOperatorsPanel(): React.JSX.Element {
     setError(null);
     setMessage(null);
     try {
-      await window.gtrz.settings.createMobileOperator({ name, password, role });
+      await window.gtrz.settings.createMobileOperator({ name, password, permissions });
       setName('');
       setPassword('');
-      setRole('sales');
-      setMessage('Perfil criado. O celular já pode entrar com esta senha.');
+      setPermissions({ ...EMPTY_PERMISSIONS, sales: true });
+      setMessage('Perfil criado. As permissões já estão disponíveis no celular.');
       await load();
     } catch (createError: unknown) {
       setError(
@@ -75,20 +131,27 @@ export function MobileOperatorsPanel(): React.JSX.Element {
     changes: {
       readonly name?: string;
       readonly password?: string;
-      readonly role?: MobileOperatorRole;
+      readonly permissions?: MobilePermissions;
       readonly active?: boolean;
     },
   ): Promise<boolean> {
     setError(null);
+    setUpdatingOperatorId(operator.id);
     try {
-      await window.gtrz.settings.updateMobileOperator({ operatorId: operator.id, ...changes });
-      await load();
+      const updated = await window.gtrz.settings.updateMobileOperator({
+        operatorId: operator.id,
+        ...changes,
+      });
+      setOperators((current) => current.map((item) => (item.id === updated.id ? updated : item)));
+      setEditing((current) => (current?.id === updated.id ? updated : current));
       return true;
     } catch (updateError: unknown) {
       setError(
         updateError instanceof Error ? updateError.message : 'Não foi possível atualizar o perfil.',
       );
       return false;
+    } finally {
+      setUpdatingOperatorId(null);
     }
   }
 
@@ -162,10 +225,9 @@ export function MobileOperatorsPanel(): React.JSX.Element {
         <UserRoundCheck size={20} aria-hidden="true" />
         <div>
           <h2>Perfis mobile</h2>
-          <p>Senhas, acesso e permissões enviados aos celulares em tempo real.</p>
+          <p>Permissões e sessões chegam aos celulares conectados em tempo real.</p>
         </div>
       </div>
-
       <form
         className="cloud-mobile-operators__create"
         onSubmit={(event) => void createOperator(event)}
@@ -174,7 +236,9 @@ export function MobileOperatorsPanel(): React.JSX.Element {
           <span>Nome</span>
           <input
             value={name}
-            onChange={(event) => setName(event.target.value)}
+            onChange={(event) => {
+              setName(event.target.value);
+            }}
             minLength={2}
             maxLength={60}
             required
@@ -184,24 +248,20 @@ export function MobileOperatorsPanel(): React.JSX.Element {
           <span>Senha</span>
           <input
             value={password}
-            onChange={(event) => setPassword(event.target.value)}
+            onChange={(event) => {
+              setPassword(event.target.value);
+            }}
             minLength={6}
             maxLength={128}
             type="password"
             required
           />
         </label>
-        <label className="form-field">
-          <span>Permissão</span>
-          <select
-            value={role}
-            onChange={(event) => setRole(event.target.value as MobileOperatorRole)}
-          >
-            <option value="sales">Venda</option>
-            <option value="inventory">Estoque</option>
-            <option value="sales-and-inventory">Estoque e venda</option>
-          </select>
-        </label>
+        <PermissionSwitches
+          idPrefix="create-mobile-permission"
+          permissions={permissions}
+          onChange={setPermissions}
+        />
         <button
           className="button button--primary"
           disabled={submitting || password.length < 6}
@@ -211,10 +271,8 @@ export function MobileOperatorsPanel(): React.JSX.Element {
           Criar perfil
         </button>
       </form>
-
       {error === null ? null : <p className="form-error">{error}</p>}
       {message === null ? null : <p className="form-success">{message}</p>}
-
       {editing === null ? null : (
         <form className="cloud-mobile-operators__edit" onSubmit={(event) => void saveEdit(event)}>
           <div>
@@ -225,7 +283,9 @@ export function MobileOperatorsPanel(): React.JSX.Element {
             <span>Nome</span>
             <input
               value={editName}
-              onChange={(event) => setEditName(event.target.value)}
+              onChange={(event) => {
+                setEditName(event.target.value);
+              }}
               minLength={2}
               maxLength={60}
               required
@@ -235,8 +295,9 @@ export function MobileOperatorsPanel(): React.JSX.Element {
             <span>Nova senha</span>
             <input
               value={editPassword}
-              onChange={(event) => setEditPassword(event.target.value)}
-              minLength={0}
+              onChange={(event) => {
+                setEditPassword(event.target.value);
+              }}
               maxLength={128}
               type="password"
             />
@@ -250,87 +311,86 @@ export function MobileOperatorsPanel(): React.JSX.Element {
               <Pencil size={16} aria-hidden="true" />
               Salvar
             </button>
-            <button className="button button--ghost" onClick={() => setEditing(null)} type="button">
+            <button
+              className="button button--ghost"
+              onClick={() => {
+                setEditing(null);
+              }}
+              type="button"
+            >
               <X size={16} aria-hidden="true" />
               Cancelar
             </button>
           </div>
         </form>
       )}
-
       <div className="cloud-mobile-operators__list">
-        {loading ? (
-          <p className="cloud-empty">Carregando perfis da nuvem...</p>
-        ) : operators.length === 0 ? (
+        {loading ? <p className="cloud-empty">Carregando perfis da nuvem...</p> : null}
+        {!loading && operators.length === 0 ? (
           <p className="cloud-empty">Nenhum perfil mobile criado.</p>
-        ) : (
-          operators.map((operator) => (
-            <article className="cloud-mobile-operator" key={operator.id}>
-              <div className="cloud-mobile-operator__identity">
-                <span
-                  className={
-                    operator.active
-                      ? 'cloud-mobile-operator__status'
-                      : 'cloud-mobile-operator__status cloud-mobile-operator__status--inactive'
-                  }
-                  aria-label={operator.active ? 'Ativo' : 'Desativado'}
-                />
-                <div>
-                  <strong>{operator.name}</strong>
-                  <small>{`${roleLabel(operator.role)} · ${operator.active ? `${String(operator.sessionCount)} sessão(ões)` : 'Desativado'} · ${formatLastSeen(operator.lastSeenAt)}`}</small>
-                </div>
+        ) : null}
+        {operators.map((operator) => (
+          <article className="cloud-mobile-operator" key={operator.id}>
+            <div className="cloud-mobile-operator__identity">
+              <span
+                className={
+                  operator.active
+                    ? 'cloud-mobile-operator__status'
+                    : 'cloud-mobile-operator__status cloud-mobile-operator__status--inactive'
+                }
+                aria-label={operator.active ? 'Ativo' : 'Desativado'}
+              />
+              <div>
+                <strong>{operator.name}</strong>
+                <small>{`${enabledPermissions(operator.permissions)} · ${operator.active ? `${String(operator.sessionCount)} sessão(ões)` : 'Desativado'} · ${formatLastSeen(operator.lastSeenAt)}`}</small>
               </div>
-              <div className="cloud-mobile-operator__actions">
-                <select
-                  aria-label={`Permissão de ${operator.name}`}
-                  disabled={!operator.active}
-                  value={operator.role}
-                  onChange={(event) =>
-                    void updateOperator(operator, {
-                      role: event.target.value as MobileOperatorRole,
-                    })
-                  }
-                >
-                  <option value="sales">Venda</option>
-                  <option value="inventory">Estoque</option>
-                  <option value="sales-and-inventory">Estoque e venda</option>
-                </select>
-                <button
-                  className="button button--ghost"
-                  onClick={() => openEdit(operator)}
-                  type="button"
-                  title="Editar perfil"
-                >
-                  <Pencil size={16} aria-hidden="true" />
-                  Editar
-                </button>
-                <button
-                  className="button button--ghost"
-                  onClick={() => void requirePassword(operator)}
-                  type="button"
-                  title="Exigir senha novamente"
-                >
-                  <KeyRound size={16} aria-hidden="true" />
-                  Senha
-                </button>
-                <button
-                  className="button button--ghost"
-                  onClick={() => void updateOperator(operator, { active: !operator.active })}
-                  type="button"
-                >
-                  {operator.active ? 'Desativar' : 'Ativar'}
-                </button>
-                <button
-                  className="button button--danger"
-                  onClick={() => void deleteOperator(operator)}
-                  type="button"
-                >
-                  Excluir
-                </button>
-              </div>
-            </article>
-          ))
-        )}
+            </div>
+            <PermissionSwitches
+              disabled={!operator.active || updatingOperatorId === operator.id}
+              idPrefix={`operator-${operator.id}`}
+              permissions={operator.permissions}
+              onChange={(nextPermissions) =>
+                void updateOperator(operator, { permissions: nextPermissions })
+              }
+            />
+            <div className="cloud-mobile-operator__actions">
+              <button
+                className="button button--ghost"
+                onClick={() => {
+                  openEdit(operator);
+                }}
+                type="button"
+                title="Editar perfil"
+              >
+                <Pencil size={16} aria-hidden="true" />
+                Editar
+              </button>
+              <button
+                className="button button--ghost"
+                onClick={() => void requirePassword(operator)}
+                type="button"
+                title="Exigir senha novamente"
+              >
+                <KeyRound size={16} aria-hidden="true" />
+                Senha
+              </button>
+              <button
+                className="button button--ghost"
+                onClick={() => void updateOperator(operator, { active: !operator.active })}
+                type="button"
+              >
+                {operator.active ? 'Desativar' : 'Ativar'}
+              </button>
+              <button
+                className="button button--danger"
+                onClick={() => void deleteOperator(operator)}
+                type="button"
+              >
+                Excluir
+              </button>
+            </div>
+          </article>
+        ))}
       </div>
     </section>
   );

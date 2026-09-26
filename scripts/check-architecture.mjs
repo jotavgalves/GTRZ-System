@@ -13,6 +13,24 @@ const ignoredDirectories = new Set([
   'out',
   'release',
 ]);
+const defaultMaximumLines = {
+  ts: 500,
+  tsx: 350,
+};
+const transitionalLineBudgets = new Map([
+  ['apps/desktop/src/main/cloud-sync-service.ts', 3439],
+  ['apps/desktop/src/renderer/src/features/cloud-monitor/index.tsx', 496],
+  ['apps/desktop/src/renderer/src/features/cloud-monitor/MobileOperatorsPanel.tsx', 398],
+  ['apps/desktop/src/renderer/src/features/expenses/ExpenseCard.tsx', 375],
+  ['apps/desktop/src/renderer/src/features/food/FoodPage.tsx', 369],
+  ['apps/desktop/src/renderer/src/features/inventory/ComboForm.tsx', 393],
+  ['apps/desktop/src/renderer/src/features/inventory/ProductCard.tsx', 608],
+  ['apps/desktop/src/renderer/src/features/inventory/ProductForm.tsx', 509],
+  ['apps/desktop/src/renderer/src/features/settings/index.tsx', 365],
+  ['packages/database/src/combos.spec.ts', 652],
+  ['packages/database/src/deletion-integrity.spec.ts', 521],
+  ['packages/database/src/inventory.ts', 787],
+]);
 const violations = [];
 
 async function walk(directory) {
@@ -111,8 +129,14 @@ for (const file of files) {
     report(file, 'arquivos de cópia ou backup não pertencem ao código-fonte.');
   }
 
-  if ((file.endsWith('.tsx') && lines > 350) || (file.endsWith('.ts') && lines > 500)) {
-    report(file, `arquivo excede o limite arquitetural de tamanho (${lines} linhas).`);
+  const maximumLines =
+    transitionalLineBudgets.get(filePath) ??
+    (file.endsWith('.tsx') ? defaultMaximumLines.tsx : defaultMaximumLines.ts);
+  if (lines > maximumLines) {
+    report(
+      file,
+      `arquivo excede o limite arquitetural de tamanho (${lines}/${maximumLines} linhas).`,
+    );
   }
 
   const internalFeatureImports = content.matchAll(

@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 
 import type {
   CloseOrderInput,
+  ComboComponentSelection,
   OperationCatalogItem,
   OperationState,
   Order,
@@ -10,6 +11,7 @@ import type {
 } from '@gtrz/contracts';
 
 import { useRealtimeReload } from '../../shared/realtime/useRealtimeReload';
+import { getCachedViewState, setCachedViewState } from '../../shared/navigation/view-state-cache';
 
 interface OperationsViewState {
   readonly state: OperationState | null;
@@ -25,7 +27,10 @@ interface OperationsViewState {
   readonly setServicePointPinned: (servicePointId: string, pinned: boolean) => Promise<void>;
   readonly deleteServicePoint: (input: DeleteServicePointInput) => Promise<void>;
   readonly openServicePoint: (servicePoint: ServicePoint) => Promise<void>;
-  readonly addItem: (item: OperationCatalogItem) => Promise<void>;
+  readonly addItem: (
+    item: OperationCatalogItem,
+    componentSelections?: readonly ComboComponentSelection[],
+  ) => Promise<void>;
   readonly removeItem: (orderItemId: string) => Promise<void>;
   readonly bindVoucher: (code: string) => Promise<void>;
   readonly unbindVoucher: () => Promise<void>;
@@ -40,10 +45,11 @@ function getErrorMessage(error: unknown): string {
 }
 
 export function useOperations(): OperationsViewState {
-  const [state, setState] = useState<OperationState | null>(null);
+  const initialState = useRef(getCachedViewState<OperationState>('operations')).current;
+  const [state, setState] = useState<OperationState | null>(() => initialState);
   const [order, setOrder] = useState<Order | null>(null);
   const [selectedServicePoint, setSelectedServicePoint] = useState<ServicePoint | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(() => initialState === null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
@@ -54,7 +60,7 @@ export function useOperations(): OperationsViewState {
 
     try {
       const nextState = await window.gtrz.operations.getState();
-      setState(nextState);
+      setState(setCachedViewState('operations', nextState));
       setSelectedServicePoint((current) => {
         if (current === null) return null;
         return nextState.servicePoints.find((item) => item.id === current.id) ?? null;
@@ -67,8 +73,8 @@ export function useOperations(): OperationsViewState {
   }, []);
 
   useEffect(() => {
-    void reload();
-  }, [reload]);
+    void reload(initialState !== null);
+  }, [initialState, reload]);
   useRealtimeReload(reload);
 
   const run = useCallback(
@@ -167,7 +173,10 @@ export function useOperations(): OperationsViewState {
   );
 
   const addItem = useCallback(
-    async (item: OperationCatalogItem): Promise<void> => {
+    async (
+      item: OperationCatalogItem,
+      componentSelections?: readonly ComboComponentSelection[],
+    ): Promise<void> => {
       if (selectedServicePoint === null) {
         throw new Error('Selecione uma mesa ou o balcão antes de adicionar itens.');
       }
@@ -179,12 +188,18 @@ export function useOperations(): OperationsViewState {
               itemKind: item.kind,
               itemId: item.id,
               quantity: 1,
+              ...(componentSelections === undefined
+                ? {}
+                : { componentSelections: [...componentSelections] }),
             })
           : window.gtrz.operations.addItem({
               orderId: order.id,
               itemKind: item.kind,
               itemId: item.id,
               quantity: 1,
+              ...(componentSelections === undefined
+                ? {}
+                : { componentSelections: [...componentSelections] }),
             }),
       );
       setOrder(updated);
@@ -247,11 +262,20 @@ export function useOperations(): OperationsViewState {
   const cancelOrder = useCallback(
     async (orderId: string, reason: string): Promise<void> => {
       const paidOrder = state?.recentOrders.find((candidate) => candidate.id === orderId);
-      const refunds = paidOrder?.status === 'paid'
-        ? paidOrder.payments.map((payment) => ({ method: payment.method, amountCents: payment.amountCents }))
-        : undefined;
+      const refunds =
+        paidOrder?.status === 'paid'
+          ? paidOrder.payments.map((payment) => ({
+              method: payment.method,
+              amountCents: payment.amountCents,
+            }))
+          : undefined;
       await run(
-        () => window.gtrz.operations.cancelOrder({ orderId, reason, ...(refunds === undefined ? {} : { refunds }) }),
+        () =>
+          window.gtrz.operations.cancelOrder({
+            orderId,
+            reason,
+            ...(refunds === undefined ? {} : { refunds }),
+          }),
         'Comanda cancelada e operação auditada.',
       );
 

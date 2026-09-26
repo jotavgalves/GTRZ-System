@@ -25,6 +25,9 @@ export function ExpensesPage(): React.JSX.Element {
     cancelExpense,
     deleteExpense,
   } = useExpenses();
+  if (loading && state === null) {
+    return <div className="route-state">Carregando despesas…</div>;
+  }
   const expenses = state?.expenses ?? [];
   const activeExpenses = expenses.filter((expense) => expense.status === 'active');
   const totalCents = activeExpenses.reduce((total, expense) => total + expense.amountCents, 0);
@@ -41,7 +44,8 @@ export function ExpensesPage(): React.JSX.Element {
           <span className="eyebrow">Compromissos financeiros do evento</span>
           <h1>Despesas</h1>
           <p>
-            Compromissos reduzem o resultado; somente pagamentos reais entram na conciliação física do caixa.
+            Compromissos reduzem o resultado; somente pagamentos reais entram na conciliação física
+            do caixa.
           </p>
         </div>
         <button

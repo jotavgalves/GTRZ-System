@@ -10,7 +10,8 @@ import {
 describe('inventory contracts', () => {
   it('normaliza categoria e produto antes de atravessar o IPC', () => {
     expect(createCategoryInputSchema.parse({ name: '  Cervejas  ' })).toEqual({
-      name: 'Cervejas', engine: 'catalog',
+      name: 'Cervejas',
+      engine: 'catalog',
     });
     expect(
       createProductInputSchema.parse({
@@ -54,7 +55,9 @@ describe('inventory contracts', () => {
     expect(() => recordStockMovementInputSchema.parse(base)).toThrow(
       'Informe o valor total pago nesta compra.',
     );
-    expect(recordStockMovementInputSchema.parse({ ...base, purchaseTotalCents: 3_600 })).toMatchObject({
+    expect(
+      recordStockMovementInputSchema.parse({ ...base, purchaseTotalCents: 3_600 }),
+    ).toMatchObject({
       purchaseTotalCents: 3_600,
     });
   });

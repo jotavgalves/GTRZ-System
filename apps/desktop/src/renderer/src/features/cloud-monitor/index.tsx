@@ -1,12 +1,22 @@
-import { Activity, ArrowDownToLine, ArrowUpFromLine, Cloud, Laptop, RefreshCw, Server, Wifi } from 'lucide-react';
+import {
+  Activity,
+  ArrowDownToLine,
+  ArrowUpFromLine,
+  Cloud,
+  Copy,
+  KeyRound,
+  Laptop,
+  RefreshCw,
+  Server,
+  Wifi,
+} from 'lucide-react';
 import { useCallback, useEffect, useState } from 'react';
 
-import type { CloudMonitor } from '@gtrz/contracts';
+import type { CloudMonitor, DesktopDevice } from '@gtrz/contracts';
 
 import { MobileOperatorsPanel } from './MobileOperatorsPanel';
+import { CloudEventSelector } from './CloudEventSelector';
 import { EnvironmentSelector } from './EnvironmentSelector';
-
-const REFRESH_INTERVAL_MS = 5_000;
 
 function formatTime(timestamp: number): string {
   return new Intl.DateTimeFormat('pt-BR', {
@@ -64,22 +74,36 @@ interface CommandPresentation {
   readonly chips: readonly string[];
 }
 
-function presentCommand(command: CloudMonitor['recentCommands'][number], labels: ReadonlyMap<string, string>): CommandPresentation {
+function presentCommand(
+  command: CloudMonitor['recentCommands'][number],
+  labels: ReadonlyMap<string, string>,
+): CommandPresentation {
   const details = isRecord(command.payload.details) ? command.payload.details : {};
   const profile = text(command.payload.profile);
   const mobileOperatorName = text(details.operatorName);
-  const source = mobileOperatorName ?? labels.get(command.deviceId) ?? (profile === 'cashier' ? 'Caixa mobile' : `Dispositivo ${shortDeviceId(command.deviceId)}`);
+  const source =
+    mobileOperatorName ??
+    labels.get(command.deviceId) ??
+    (profile === 'cashier' ? 'Caixa mobile' : `Dispositivo ${shortDeviceId(command.deviceId)}`);
 
   if (command.action === 'inventory.stock-moved') {
-    const product = text(details.productLabel) ?? text(details.productName) ?? 'Produto sem identificação';
+    const product =
+      text(details.productLabel) ?? text(details.productName) ?? 'Produto sem identificação';
     const delta = number(details.delta);
     const before = number(details.beforeQuantity);
     const after = number(details.afterQuantity);
-    const movement = delta === null ? 'movimentou o estoque' : `${delta > 0 ? 'adicionou' : 'baixou'} ${String(Math.abs(delta))} unidade${Math.abs(delta) === 1 ? '' : 's'}`;
+    const movement =
+      delta === null
+        ? 'movimentou o estoque'
+        : `${delta > 0 ? 'adicionou' : 'baixou'} ${String(Math.abs(delta))} unidade${Math.abs(delta) === 1 ? '' : 's'}`;
     return {
       source,
       summary: `${source} ${movement} de ${product}.`,
-      chips: [before === null || after === null ? 'Saldo não informado' : `Saldo: ${String(before)} para ${String(after)}`],
+      chips: [
+        before === null || after === null
+          ? 'Saldo não informado'
+          : `Saldo: ${String(before)} para ${String(after)}`,
+      ],
     };
   }
 
@@ -108,32 +132,67 @@ function presentCommand(command: CloudMonitor['recentCommands'][number], labels:
   }
 
   if (command.action === 'cashier.sale-rejected') {
-    return { source, summary: 'A central corrigiu uma venda que não foi aplicada na cópia local.', chips: [] };
+    return {
+      source,
+      summary: 'A central corrigiu uma venda que não foi aplicada na cópia local.',
+      chips: [],
+    };
   }
 
   if (command.action === 'expense.payment-recorded') {
-    return { source, summary: `${source} pagou ${text(details.description) ?? 'uma despesa'} em ${money(number(details.amountCents))}.`, chips: [text(details.method) ?? 'Meio não informado'] };
+    return {
+      source,
+      summary: `${source} pagou ${text(details.description) ?? 'uma despesa'} em ${money(number(details.amountCents))}.`,
+      chips: [text(details.method) ?? 'Meio não informado'],
+    };
   }
 
   if (command.action === 'capital.contribution-created') {
-    return { source, summary: `${source} registrou o aporte de ${text(details.contributorName) ?? 'responsável'}: ${money(number(details.amountCents))}.`, chips: [text(details.kind) === 'inventory' ? `Estoque remanescente: ${money(number(details.remainingStockValueCents))}` : 'Aporte em dinheiro'] };
+    return {
+      source,
+      summary: `${source} registrou o aporte de ${text(details.contributorName) ?? 'responsável'}: ${money(number(details.amountCents))}.`,
+      chips: [
+        text(details.kind) === 'inventory'
+          ? `Estoque remanescente: ${money(number(details.remainingStockValueCents))}`
+          : 'Aporte em dinheiro',
+      ],
+    };
   }
 
   if (command.action === 'capital.reimbursed') {
-    return { source, summary: `${source} registrou reembolso prioritário de ${money(number(details.amountCents))}.`, chips: [text(details.contributorName) ?? 'Responsável do aporte'] };
+    return {
+      source,
+      summary: `${source} registrou reembolso prioritário de ${money(number(details.amountCents))}.`,
+      chips: [text(details.contributorName) ?? 'Responsável do aporte'],
+    };
   }
 
   if (command.action === 'operations.order-cancelled') {
-    return { source, summary: `${source} estornou uma venda e devolveu o estoque correspondente.`, chips: [`Devolução: ${money(number(details.totalCents))}`] };
+    return {
+      source,
+      summary: `${source} estornou uma venda e devolveu o estoque correspondente.`,
+      chips: [`Devolução: ${money(number(details.totalCents))}`],
+    };
   }
 
-  return { source, summary: `${source} registrou ${commandLabel(command.action).toLowerCase()}.`, chips: [] };
+  return {
+    source,
+    summary: `${source} registrou ${commandLabel(command.action).toLowerCase()}.`,
+    chips: [],
+  };
 }
 
 export function CloudMonitorPage(): React.JSX.Element {
   const [monitor, setMonitor] = useState<CloudMonitor | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [enrollmentCode, setEnrollmentCode] = useState<string | null>(null);
+  const [enrollmentExpiresAt, setEnrollmentExpiresAt] = useState<number | null>(null);
+  const [enrollmentInput, setEnrollmentInput] = useState('');
+  const [enrollmentBusy, setEnrollmentBusy] = useState(false);
+  const [enrollmentError, setEnrollmentError] = useState<string | null>(null);
+  const [enrollmentNotice, setEnrollmentNotice] = useState<string | null>(null);
+  const [desktopDevices, setDesktopDevices] = useState<readonly DesktopDevice[]>([]);
 
   const load = useCallback(async (): Promise<void> => {
     setLoading(true);
@@ -141,7 +200,9 @@ export function CloudMonitorPage(): React.JSX.Element {
       setMonitor(await window.gtrz.settings.getCloudMonitor());
       setError(null);
     } catch (loadError: unknown) {
-      setError(loadError instanceof Error ? loadError.message : 'Não foi possível consultar a nuvem.');
+      setError(
+        loadError instanceof Error ? loadError.message : 'Não foi possível consultar a nuvem.',
+      );
     } finally {
       setLoading(false);
     }
@@ -149,11 +210,20 @@ export function CloudMonitorPage(): React.JSX.Element {
 
   useEffect(() => {
     void load();
-    const interval = window.setInterval(() => void load(), REFRESH_INTERVAL_MS);
-    return () => {
-      window.clearInterval(interval);
-    };
   }, [load]);
+
+  const loadDesktopDevices = useCallback(async (): Promise<void> => {
+    try {
+      setDesktopDevices(await window.gtrz.settings.listDesktopDevices());
+    } catch {
+      // This is expected on a newly enrolled PC, which is not an administrator.
+      setDesktopDevices([]);
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadDesktopDevices();
+  }, [loadDesktopDevices]);
 
   const averageLatency =
     monitor === null || monitor.activeDevices.length === 0
@@ -165,6 +235,62 @@ export function CloudMonitorPage(): React.JSX.Element {
 
   const deviceLabels = new Map(monitor?.activeDevices.map((device) => [device.id, device.label]));
 
+  const createEnrollment = async (): Promise<void> => {
+    setEnrollmentBusy(true);
+    setEnrollmentError(null);
+    setEnrollmentNotice(null);
+    try {
+      const enrollment = await window.gtrz.settings.createDesktopEnrollment();
+      setEnrollmentCode(enrollment.enrollmentCode);
+      setEnrollmentExpiresAt(enrollment.expiresAt);
+      await navigator.clipboard.writeText(enrollment.enrollmentCode);
+      setEnrollmentNotice('Código criado e copiado. Ele pode ser usado uma única vez.');
+      void loadDesktopDevices();
+    } catch (createError: unknown) {
+      setEnrollmentError(
+        createError instanceof Error ? createError.message : 'Não foi possível criar o código.',
+      );
+    } finally {
+      setEnrollmentBusy(false);
+    }
+  };
+
+  const exchangeEnrollment = async (event: React.FormEvent<HTMLFormElement>): Promise<void> => {
+    event.preventDefault();
+    setEnrollmentBusy(true);
+    setEnrollmentError(null);
+    setEnrollmentNotice(null);
+    try {
+      await window.gtrz.settings.exchangeDesktopEnrollment({ enrollmentCode: enrollmentInput });
+      setEnrollmentInput('');
+      setEnrollmentNotice('Este computador foi vinculado. A sincronização começará em instantes.');
+      void load();
+    } catch (exchangeError: unknown) {
+      setEnrollmentError(
+        exchangeError instanceof Error ? exchangeError.message : 'Não foi possível vincular este computador.',
+      );
+    } finally {
+      setEnrollmentBusy(false);
+    }
+  };
+
+  const revokeDesktopDevice = async (device: DesktopDevice): Promise<void> => {
+    setEnrollmentBusy(true);
+    setEnrollmentError(null);
+    setEnrollmentNotice(null);
+    try {
+      await window.gtrz.settings.revokeDesktopDevice({ deviceId: device.deviceId });
+      setEnrollmentNotice(`${device.label} foi bloqueado e não poderá sincronizar novamente.`);
+      await loadDesktopDevices();
+    } catch (revokeError: unknown) {
+      setEnrollmentError(
+        revokeError instanceof Error ? revokeError.message : 'Não foi possível bloquear o computador.',
+      );
+    } finally {
+      setEnrollmentBusy(false);
+    }
+  };
+
   return (
     <section className="module-page cloud-monitor-page">
       <header className="module-page__header">
@@ -173,7 +299,12 @@ export function CloudMonitorPage(): React.JSX.Element {
           <h1>Nuvem em tempo real</h1>
           <p>Presença, comandos idempotentes e fila SQLite deste computador.</p>
         </div>
-        <button className="button button--ghost" disabled={loading} onClick={() => void load()} type="button">
+        <button
+          className="button button--ghost"
+          disabled={loading}
+          onClick={() => void load()}
+          type="button"
+        >
           <RefreshCw size={17} aria-hidden="true" />
           Atualizar
         </button>
@@ -182,6 +313,83 @@ export function CloudMonitorPage(): React.JSX.Element {
       {error === null ? null : <p className="form-error">{error}</p>}
 
       <EnvironmentSelector />
+      <CloudEventSelector />
+
+      <section className="panel cloud-enrollment">
+        <div className="panel__heading">
+          <KeyRound size={20} aria-hidden="true" />
+          <div>
+            <h2>Vincular computador</h2>
+            <p>O instalador não contém a chave mestre. Use um código temporário e de uso único.</p>
+          </div>
+        </div>
+        <div className="cloud-enrollment__grid">
+          <div>
+            <strong>Computador administrador</strong>
+            <p>Crie o código neste PC e informe-o no computador que será adicionado.</p>
+            <button
+              className="button button--ghost"
+              disabled={enrollmentBusy}
+              onClick={() => void createEnrollment()}
+              type="button"
+            >
+              <Copy size={16} aria-hidden="true" />
+              Gerar código temporário
+            </button>
+            {enrollmentCode === null ? null : (
+              <div className="cloud-enrollment__code">
+                <code>{enrollmentCode}</code>
+                <small>
+                  {`Expira às ${new Intl.DateTimeFormat('pt-BR', {
+                    hour: '2-digit',
+                    minute: '2-digit',
+                  }).format(enrollmentExpiresAt ?? Date.now())}.`}
+                </small>
+              </div>
+            )}
+            {desktopDevices.length === 0 ? null : (
+              <div className="cloud-enrollment__devices">
+                <strong>Computadores vinculados</strong>
+                {desktopDevices.map((device) => (
+                  <div key={device.deviceId}>
+                    <span>
+                      <b>{device.label}</b>
+                      <small>{device.revokedAt === null ? 'Ativo' : 'Bloqueado'}</small>
+                    </span>
+                    {device.revokedAt !== null ? null : (
+                      <button
+                        className="button button--danger"
+                        disabled={enrollmentBusy}
+                        onClick={() => void revokeDesktopDevice(device)}
+                        type="button"
+                      >
+                        Bloquear
+                      </button>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+          <form onSubmit={(event) => void exchangeEnrollment(event)}>
+            <label className="form-field">
+              <span>Vincular este computador</span>
+              <input
+                autoComplete="off"
+                disabled={enrollmentBusy}
+                onChange={(event) => setEnrollmentInput(event.target.value)}
+                placeholder="Cole o código temporário"
+                value={enrollmentInput}
+              />
+            </label>
+            <button className="button button--primary" disabled={enrollmentBusy} type="submit">
+              Vincular à nuvem
+            </button>
+          </form>
+        </div>
+        {enrollmentError === null ? null : <p className="form-error">{enrollmentError}</p>}
+        {enrollmentNotice === null ? null : <p className="cloud-enrollment__notice">{enrollmentNotice}</p>}
+      </section>
 
       <div className="cloud-monitor-summary">
         <article className="panel cloud-metric">
@@ -308,12 +516,25 @@ export function CloudMonitorPage(): React.JSX.Element {
                     <p>{presentation.summary}</p>
                     {presentation.chips.length === 0 ? null : (
                       <div className="cloud-command-row__chips">
-                        {presentation.chips.map((chip, index) => <span key={`${command.commandId}-${String(index)}`}>{chip}</span>)}
+                        {presentation.chips.map((chip, index) => (
+                          <span key={`${command.commandId}-${String(index)}`}>{chip}</span>
+                        ))}
                       </div>
                     )}
                     <details className="cloud-command-row__technical">
                       <summary>Dados técnicos e códigos</summary>
-                      <pre>{JSON.stringify({ commandId: command.commandId, auditId: command.auditId, deviceId: command.deviceId, payload: command.payload }, null, 2)}</pre>
+                      <pre>
+                        {JSON.stringify(
+                          {
+                            commandId: command.commandId,
+                            auditId: command.auditId,
+                            deviceId: command.deviceId,
+                            payload: command.payload,
+                          },
+                          null,
+                          2,
+                        )}
+                      </pre>
                     </details>
                   </div>
                 </article>
@@ -352,7 +573,10 @@ export function CloudMonitorPage(): React.JSX.Element {
           <Activity size={20} aria-hidden="true" />
           <div>
             <h2>Conflitos reportados pela central</h2>
-            <p>Ocorrências de qualquer computador que exigem decisão humana antes de alterar os dados.</p>
+            <p>
+              Ocorrências de qualquer computador que exigem decisão humana antes de alterar os
+              dados.
+            </p>
           </div>
         </div>
         <div className="cloud-flow-list">
@@ -374,14 +598,25 @@ export function CloudMonitorPage(): React.JSX.Element {
           <ArrowDownToLine size={20} aria-hidden="true" />
           <div>
             <h2>Réplica local e auditoria</h2>
-            <p>O banco SQLite continua no computador. Eventos recebidos ficam preservados para conferência antes de qualquer ajuste automático.</p>
+            <p>
+              O banco SQLite continua no computador. Eventos recebidos ficam preservados para
+              conferência antes de qualquer ajuste automático.
+            </p>
           </div>
         </div>
         <div className="cloud-queue-stats">
-          <span><b>{monitor?.localQueue.outboxFailed ?? 0}</b> com falha de envio</span>
-          <span><b>{monitor?.localQueue.inboxReceived ?? 0}</b> recebidos da central</span>
-          <span><b>{monitor?.localQueue.inboxAwaitingApply ?? 0}</b> aguardando aplicação/auditoria</span>
-          <span><b>{monitor?.localQueue.conflictsOpen ?? 0}</b> conflitos abertos para auditoria</span>
+          <span>
+            <b>{monitor?.localQueue.outboxFailed ?? 0}</b> com falha de envio
+          </span>
+          <span>
+            <b>{monitor?.localQueue.inboxReceived ?? 0}</b> recebidos da central
+          </span>
+          <span>
+            <b>{monitor?.localQueue.inboxAwaitingApply ?? 0}</b> aguardando aplicação/auditoria
+          </span>
+          <span>
+            <b>{monitor?.localQueue.conflictsOpen ?? 0}</b> conflitos abertos para auditoria
+          </span>
         </div>
       </section>
 
@@ -390,7 +625,10 @@ export function CloudMonitorPage(): React.JSX.Element {
           <Activity size={20} aria-hidden="true" />
           <div>
             <h2>Conflitos para auditoria</h2>
-            <p>Ocorrências que não foram alteradas automaticamente para preservar a verdade dos dois bancos.</p>
+            <p>
+              Ocorrências que não foram alteradas automaticamente para preservar a verdade dos dois
+              bancos.
+            </p>
           </div>
         </div>
         <div className="cloud-flow-list">

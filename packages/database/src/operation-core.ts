@@ -68,6 +68,14 @@ interface PaymentRow {
   readonly created_at: number;
 }
 
+interface ComponentAllocationRow {
+  readonly product_id: string;
+  readonly product_name: string;
+  readonly choice_group: string | null;
+  readonly choice_label: string | null;
+  readonly quantity: number;
+}
+
 export function requireActiveOperationEvent(database: DatabaseContext): string {
   const event = getSessionState(database).activeEvent;
 
@@ -99,7 +107,18 @@ function mapServicePoint(row: ServicePointRow): DatabaseServicePoint {
   };
 }
 
-function mapOrderItem(row: OrderItemRow): DatabaseOrderItem {
+function mapOrderItem(database: DatabaseContext, row: OrderItemRow): DatabaseOrderItem {
+  const componentAllocations = database.sqlite
+    .prepare(
+      `SELECT allocation.product_id, product.name AS product_name, allocation.choice_group,
+              allocation.choice_label,
+              allocation.quantity
+       FROM order_item_component_allocations allocation
+       INNER JOIN products product ON product.id = allocation.product_id
+       WHERE allocation.order_item_id = ?
+       ORDER BY allocation.choice_group, product.name COLLATE NOCASE`,
+    )
+    .all(row.id) as ComponentAllocationRow[];
   return {
     id: row.id,
     orderId: row.order_id,
@@ -109,6 +128,13 @@ function mapOrderItem(row: OrderItemRow): DatabaseOrderItem {
     quantity: row.quantity,
     unitPriceCents: row.unit_price_cents,
     totalCents: row.total_cents,
+    componentAllocations: componentAllocations.map((allocation) => ({
+      productId: allocation.product_id,
+      productName: allocation.product_name,
+      choiceGroup: allocation.choice_group,
+      choiceLabel: allocation.choice_label,
+      quantity: allocation.quantity,
+    })),
     createdAt: row.created_at,
   };
 }
@@ -140,7 +166,7 @@ export function listOrderItems(
        ORDER BY created_at, item_name COLLATE NOCASE`,
     )
     .all(orderId) as OrderItemRow[];
-  return rows.map(mapOrderItem);
+  return rows.map((row) => mapOrderItem(database, row));
 }
 
 function listPayments(database: DatabaseContext, orderId: string): readonly DatabasePayment[] {

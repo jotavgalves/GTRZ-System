@@ -3,6 +3,7 @@ import path from 'node:path';
 
 import { IPC_EVENTS } from '@gtrz/contracts';
 import { getSessionState } from '@gtrz/database';
+import { getPrintingSettings } from '@gtrz/database/printing';
 
 import { BackupService } from './backup-service';
 import { CloudSyncService } from './cloud-sync-service';
@@ -15,9 +16,20 @@ let mainWindow: BrowserWindow | null = null;
 let databaseRuntime: DatabaseRuntime | null = null;
 let cloudSyncService: CloudSyncService | null = null;
 const runtimeEnvironment = getRuntimeEnvironment();
+const cloudSyncEnabledForRuntime = process.env.GTRZ_E2E_DISABLE_CLOUD_SYNC !== '1';
+
+if (process.platform === 'win32') {
+  app.setAppUserModelId('br.com.gtrz.system');
+}
 
 if (runtimeEnvironment === 'test') {
-  app.setPath('userData', path.join(app.getPath('appData'), '@gtrz', 'desktop-test'));
+  const isolatedTestDataPath = process.env.GTRZ_E2E_USER_DATA_PATH?.trim();
+  app.setPath(
+    'userData',
+    isolatedTestDataPath && isolatedTestDataPath.length > 0
+      ? isolatedTestDataPath
+      : path.join(app.getPath('appData'), '@gtrz', 'desktop-test'),
+  );
 }
 
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
@@ -48,10 +60,10 @@ if (!hasSingleInstanceLock) {
   void app.whenReady().then(async () => {
     try {
       const userDataPath = app.getPath('userData');
-      const documentsFolder = path.join(
-        app.getPath('documents'),
-        runtimeEnvironment === 'test' ? 'GTRZ System - Teste' : 'GTRZ System',
-      );
+      const documentsFolder =
+        runtimeEnvironment === 'test'
+          ? path.join(userDataPath, 'test-files')
+          : path.join(app.getPath('documents'), 'GTRZ System');
       const databasePath = path.join(userDataPath, 'gtrz-system.sqlite');
       databaseRuntime = new DatabaseRuntime(databasePath);
       const backupService = new BackupService({
@@ -74,22 +86,33 @@ if (!hasSingleInstanceLock) {
           }
         },
         cloudSyncEndpoint(runtimeEnvironment),
+        () => getPrintingSettings(requireDatabaseRuntime().get()).machineName,
+        databaseRuntime,
+        path.join(userDataPath, 'gtrz-cloud-device-credential.json'),
       );
 
-      registerIpcHandlers({
+      const printService = registerIpcHandlers({
         getDatabase: () => requireDatabaseRuntime().get(),
         databaseReady: () => requireDatabaseRuntime().isReady(),
         backupService,
         cloudSyncService,
+        receiptArchiveDirectory: path.join(documentsFolder, 'Notas'),
         runtimeEnvironment,
       });
-      cloudSyncService.start(
-        () => getSessionState(requireDatabaseRuntime().get()).activeEvent?.id ?? null,
-      );
-      cloudSyncService.startReplication(
-        () => requireDatabaseRuntime().get(),
-        () => getSessionState(requireDatabaseRuntime().get()).activeEvent?.id ?? null,
-      );
+      cloudSyncService.setPrintAgent(async (job) => {
+        const result = await printService.printCloudJob(job);
+        return { success: result.success, message: result.message };
+      });
+      cloudSyncService.setResetBackupAgent(() => backupService.createBackup('pre-event-reset'));
+      if (cloudSyncEnabledForRuntime) {
+        cloudSyncService.start(
+          () => getSessionState(requireDatabaseRuntime().get()).activeEvent?.id ?? null,
+        );
+        cloudSyncService.startReplication(
+          () => requireDatabaseRuntime().get(),
+          () => getSessionState(requireDatabaseRuntime().get()).activeEvent?.id ?? null,
+        );
+      }
 
       await backupService.createBackup('automatic').catch(() => undefined);
       mainWindow = createMainWindow({ title: environmentLabel(runtimeEnvironment) });

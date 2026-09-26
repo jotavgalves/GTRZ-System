@@ -1,6 +1,7 @@
-import { readFile, writeFile } from 'node:fs/promises';
-import { hostname } from 'node:os';
-import { randomUUID } from 'node:crypto';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { hostname, tmpdir } from 'node:os';
+import path from 'node:path';
+import { createHash, randomUUID } from 'node:crypto';
 import { WebSocket, type RawData } from 'ws';
 
 import {
@@ -14,12 +15,27 @@ import {
   cloudMonitorSchema,
   type CloudMonitor,
   type CloudSyncStatus,
+  type BackupRecord,
 } from '@gtrz/contracts';
-import type { DatabaseContext } from '@gtrz/database';
+import {
+  getSessionState,
+  createDatabaseSnapshot,
+  listCombos,
+  redeemVouchers,
+  refundOrderVouchers,
+  resetEventData,
+  setActiveEvent,
+  type DatabaseContext,
+} from '@gtrz/database';
+import { getProductPresentation } from '@gtrz/database/product-presentation';
+import { getPrintingSettings } from '@gtrz/database/printing';
+
+import type { DatabaseRuntime } from './database-runtime';
 
 const CONNECTION_TIMEOUT_MS = 5_000;
-const HEARTBEAT_INTERVAL_MS = 15_000;
 const OUTBOX_INTERVAL_MS = 3_000;
+const STREAM_RECONNECT_MAX_MS = 60_000;
+const CONTROL_HEARTBEAT_INTERVAL_MS = 15_000;
 
 interface AuditRow {
   readonly id: number;
@@ -44,6 +60,13 @@ interface RemoteJournalEvent {
   readonly commandId: string;
   readonly type: string;
   readonly payload: unknown;
+}
+
+interface StreamMessageResult {
+  readonly accepted: boolean;
+  readonly printQueued: boolean;
+  readonly caughtUp: boolean;
+  readonly cursor: number;
 }
 
 interface QueueCountsRow {
@@ -85,18 +108,108 @@ interface RecoverableConflictRow {
   readonly payload_json: string;
 }
 
+interface GlobalEventCommand {
+  readonly sequence: number;
+  readonly commandId: string;
+  readonly type: 'event.activated' | 'event.reset';
+  readonly eventId: string;
+  readonly eventName: string;
+  readonly reason: string | null;
+  readonly bootstrapSnapshotId: string | null;
+  readonly snapshotSourceDeviceId: string | null;
+  readonly createdAt: number;
+}
+
+interface PendingBootstrap {
+  readonly command: GlobalEventCommand;
+}
+
+interface PendingGlobalReset {
+  readonly requestId: string;
+  readonly eventId: string;
+  readonly eventName: string;
+  readonly reason: string;
+  readonly targetDeviceIds: readonly string[];
+}
+
+interface CloudPrintReceipt {
+  readonly orderId: string;
+  readonly eventName: string;
+  readonly servicePointLabel: string;
+  readonly servicePointType: 'counter' | 'table';
+  readonly subtotalCents: number;
+  readonly discountCents: number;
+  readonly totalCents: number;
+  readonly closedAt: number;
+  readonly operatorName: string;
+  readonly originLabel: string;
+  readonly items: readonly {
+    readonly name: string;
+    readonly quantity: number;
+    readonly unitPriceCents: number;
+    readonly totalCents: number;
+    readonly preparation?: readonly {
+      readonly label: string;
+      readonly productName: string;
+      readonly quantity: number;
+    }[];
+  }[];
+  readonly payments: readonly {
+    readonly method: 'cash' | 'pix' | 'credit-card' | 'debit-card';
+    readonly amountCents: number;
+    readonly receivedCents: number | null;
+    readonly changeCents: number;
+  }[];
+  readonly vouchers: readonly { readonly code: string; readonly amountCents: number }[];
+  readonly documentType?: 'sale-batch' | 'internal-decrement';
+  readonly internalReason?: string;
+  readonly recipient?: string;
+  readonly authorizedBy?: string;
+  readonly referenceCode?: string;
+}
+
+export interface ClaimedCloudPrintJob {
+  readonly jobId: string;
+  readonly claimToken: string;
+  readonly printerLabel: string;
+  readonly document: CloudPrintReceipt;
+}
+
+interface PrintAgentResult {
+  readonly success: boolean;
+  readonly message: string;
+}
+
 const CATALOG_EVENT_ID = '_catalog';
 const SYNCHRONIZED_ACTIONS = new Set([
   'event.created',
+  'event.renamed',
+  'event.open',
+  'event.closed',
+  'event.archived',
+  'event.deleted-permanently',
   'inventory.category-created',
+  'inventory.category-updated',
+  'inventory.category-deleted',
   'inventory.product-created',
+  'inventory.product-updated',
+  'inventory.product-deleted',
+  'combo.created',
+  'combo.updated',
+  'combo.deleted',
   'inventory.stock-moved',
   'inventory.purchase-lot-corrected',
   'inventory.purchase-lot-voided',
   'food.configured',
   'food.supplier-created',
+  'food.supplier-updated',
+  'food.supplier-archived',
+  'food.supplier-deleted',
   'food.external-item-created',
   'operations.service-point-created',
+  'operations.service-point-renamed',
+  'operations.service-point-pinned',
+  'operations.service-point-deleted',
   'operations.order-paid',
   'operations.order-cancelled',
   'expense.created',
@@ -104,6 +217,7 @@ const SYNCHRONIZED_ACTIONS = new Set([
   'expense.payment-status-changed',
   'expense.payment-recorded',
   'expense.cancelled',
+  'expense.deleted',
   'capital.contribution-created',
   'capital.contribution-updated',
   'capital.reimbursed',
@@ -111,11 +225,40 @@ const SYNCHRONIZED_ACTIONS = new Set([
   'cash.supply',
   'cash.withdrawal',
   'cash.closed',
+  'voucher.created',
+  'voucher.service-point-bound',
+  'voucher.updated',
+  'voucher.balance-added',
+  'voucher.value-updated',
+  'voucher.cancelled',
+  'voucher.active',
+  'voucher.deleted',
+  'voucher.deleted-with-reversal',
   'ticket.lot-created',
   'ticket.lot-updated',
   'ticket.sale-created',
   'ticket.courtesy-created',
   'ticket.sale-cancelled',
+  'ticket.lot-deleted',
+  'ticket.sale-deleted',
+]);
+
+const CATALOG_ACTIONS = new Set([
+  'event.created',
+  'event.renamed',
+  'event.open',
+  'event.closed',
+  'event.archived',
+  'event.deleted-permanently',
+  'inventory.category-created',
+  'inventory.category-updated',
+  'inventory.category-deleted',
+  'inventory.product-created',
+  'inventory.product-updated',
+  'inventory.product-deleted',
+  'combo.created',
+  'combo.updated',
+  'combo.deleted',
 ]);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -163,55 +306,75 @@ function journalPayload(value: unknown): JournalPayload | null {
 export class CloudSyncService {
   readonly #pairingKeyPath: string;
   readonly #deviceIdPath: string;
+  readonly #deviceCredentialPath: string;
   readonly #onDataChanged: () => void;
   readonly #endpoint: string;
-  #heartbeatTimer: NodeJS.Timeout | null = null;
+  readonly #getDeviceLabel: () => string;
+  readonly #databaseRuntime: DatabaseRuntime | null;
+  #printAgent: ((job: ClaimedCloudPrintJob) => Promise<PrintAgentResult>) | null = null;
+  #resetBackupAgent: (() => Promise<BackupRecord>) | null = null;
   #outboxTimer: NodeJS.Timeout | null = null;
-  #stream: WebSocket | null = null;
-  #streamEventId: string | null = null;
+  readonly #eventStreams = new Map<string, WebSocket>();
+  readonly #eventReconnectTimers = new Map<string, NodeJS.Timeout>();
+  readonly #eventReconnectDelays = new Map<string, number>();
+  #controlStream: WebSocket | null = null;
+  #controlReconnectTimer: NodeJS.Timeout | null = null;
+  #controlHeartbeatTimer: NodeJS.Timeout | null = null;
+  #controlReconnectDelayMs = 1_000;
+  #printQueueInFlight: Promise<void> | null = null;
+  #replicationRunning = true;
+  #flushInFlight = false;
+  #cloudConnected = false;
   #lastLatencyMs = 0;
+  #pendingBootstrap: PendingBootstrap | null = null;
 
   constructor(
     pairingKeyPath: string,
     deviceIdPath: string,
     onDataChanged: () => void = () => undefined,
     endpoint = 'https://gtrz-sync.jvgacontato.workers.dev',
+    getDeviceLabel: () => string = hostname,
+    databaseRuntime: DatabaseRuntime | null = null,
+    deviceCredentialPath = path.join(path.dirname(deviceIdPath), 'gtrz-cloud-device-credential.json'),
   ) {
     this.#pairingKeyPath = pairingKeyPath;
     this.#deviceIdPath = deviceIdPath;
+    this.#deviceCredentialPath = deviceCredentialPath;
     this.#onDataChanged = onDataChanged;
     this.#endpoint = endpoint;
+    this.#getDeviceLabel = getDeviceLabel;
+    this.#databaseRuntime = databaseRuntime;
   }
 
   start(getActiveEventId: () => string | null): void {
-    this.stop();
-    const heartbeat = (): void => {
-      void this.getMonitor(getActiveEventId()).catch(() => undefined);
-    };
-    heartbeat();
-    this.#heartbeatTimer = setInterval(heartbeat, HEARTBEAT_INTERVAL_MS);
+    // Replication owns the persistent WebSocket streams once the local database is ready.
+    void getActiveEventId;
   }
 
   stop(): void {
-    if (this.#heartbeatTimer !== null) {
-      clearInterval(this.#heartbeatTimer);
-      this.#heartbeatTimer = null;
-    }
+    this.#replicationRunning = false;
     if (this.#outboxTimer !== null) {
       clearInterval(this.#outboxTimer);
       this.#outboxTimer = null;
     }
-    if (this.#stream !== null) {
-      this.#stream.close();
-      this.#stream = null;
-      this.#streamEventId = null;
-    }
+    if (this.#controlReconnectTimer !== null) clearTimeout(this.#controlReconnectTimer);
+    this.#controlReconnectTimer = null;
+    if (this.#controlHeartbeatTimer !== null) clearInterval(this.#controlHeartbeatTimer);
+    this.#controlHeartbeatTimer = null;
+    this.#controlStream?.close();
+    this.#controlStream = null;
+    for (const timer of this.#eventReconnectTimers.values()) clearTimeout(timer);
+    this.#eventReconnectTimers.clear();
+    for (const stream of this.#eventStreams.values()) stream.close();
+    this.#eventStreams.clear();
+    this.#cloudConnected = false;
   }
 
   startReplication(
     getDatabase: () => DatabaseContext,
     getActiveEventId: () => string | null,
   ): void {
+    this.#replicationRunning = true;
     const flush = (): void => {
       void this.flushOutbox(getDatabase(), getActiveEventId()).catch(() => undefined);
     };
@@ -219,140 +382,276 @@ export class CloudSyncService {
     this.#outboxTimer = setInterval(flush, OUTBOX_INTERVAL_MS);
   }
 
-  async flushOutbox(database: DatabaseContext, activeEventId: string | null): Promise<void> {
+  setPrintAgent(agent: (job: ClaimedCloudPrintJob) => Promise<PrintAgentResult>): void {
+    this.#printAgent = agent;
+  }
+
+  setResetBackupAgent(agent: () => Promise<BackupRecord>): void {
+    this.#resetBackupAgent = agent;
+  }
+
+  async createDesktopEnrollment(): Promise<{
+    readonly enrollmentCode: string;
+    readonly expiresAt: number;
+  }> {
+    const administratorKey = await this.#readLegacyPairingKey();
+    if (administratorKey === null) {
+      throw new Error('Somente o computador administrador pode gerar um código de vínculo.');
+    }
     const deviceId = await this.#readOrCreateDeviceId();
-    const pairingKey = await this.#readPairingKey();
-    this.#enqueueNewAudits(database, deviceId);
+    const response = await fetch(`${this.#endpoint}/v1/desktop/enrollment`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-GTRZ-Key': administratorKey,
+        'X-GTRZ-Device-Id': deviceId,
+      },
+      body: JSON.stringify({}),
+      signal: AbortSignal.timeout(CONNECTION_TIMEOUT_MS),
+    });
+    const payload: unknown = await response.json();
+    if (
+      !response.ok ||
+      !isRecord(payload) ||
+      typeof payload.enrollmentCode !== 'string' ||
+      typeof payload.expiresAt !== 'number'
+    ) {
+      throw new Error('A nuvem não conseguiu criar o código de vínculo.');
+    }
+    return { enrollmentCode: payload.enrollmentCode, expiresAt: payload.expiresAt };
+  }
 
-    if (pairingKey === null) return;
+  async exchangeDesktopEnrollment(enrollmentCode: string): Promise<void> {
+    const deviceId = await this.#readOrCreateDeviceId();
+    const response = await fetch(`${this.#endpoint}/v1/desktop/enrollment/exchange`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enrollmentCode, deviceId, label: this.#getDeviceLabel() }),
+      signal: AbortSignal.timeout(CONNECTION_TIMEOUT_MS),
+    });
+    const payload: unknown = await response.json();
+    if (!response.ok || !isRecord(payload) || typeof payload.token !== 'string') {
+      throw new Error('O código de vínculo é inválido, expirou ou já foi utilizado.');
+    }
+    await writeFile(
+      this.#deviceCredentialPath,
+      JSON.stringify({ deviceId, token: payload.token }),
+      { encoding: 'utf8', mode: 0o600 },
+    );
+  }
 
-    this.#retryRecoverablePaidOrders(database);
-    await this.#publishCashierCatalog(database, activeEventId, pairingKey);
-    this.#ensureStream(database, activeEventId, deviceId, pairingKey);
+  async listDesktopDevices(): Promise<
+    readonly {
+      readonly deviceId: string;
+      readonly label: string;
+      readonly createdAt: number;
+      readonly lastSeenAt: number;
+      readonly revokedAt: number | null;
+    }[]
+  > {
+    const administratorKey = await this.#readLegacyPairingKey();
+    if (administratorKey === null) {
+      throw new Error('Somente o computador administrador pode listar os dispositivos vinculados.');
+    }
+    const response = await fetch(`${this.#endpoint}/v1/desktop/devices`, {
+      headers: { 'X-GTRZ-Key': administratorKey },
+      signal: AbortSignal.timeout(CONNECTION_TIMEOUT_MS),
+    });
+    const payload: unknown = await response.json();
+    if (!response.ok || !isRecord(payload) || !Array.isArray(payload.devices)) {
+      throw new Error('A nuvem não conseguiu listar os computadores vinculados.');
+    }
+    return payload.devices.flatMap((device) => {
+      if (
+        !isRecord(device) ||
+        typeof device.deviceId !== 'string' ||
+        typeof device.label !== 'string' ||
+        typeof device.createdAt !== 'number' ||
+        typeof device.lastSeenAt !== 'number' ||
+        (device.revokedAt !== null && typeof device.revokedAt !== 'number')
+      ) {
+        return [];
+      }
+      return [
+        {
+          deviceId: device.deviceId,
+          label: device.label,
+          createdAt: device.createdAt,
+          lastSeenAt: device.lastSeenAt,
+          revokedAt: device.revokedAt,
+        },
+      ];
+    });
+  }
 
-    const pending = database.sqlite
-      .prepare(
-        `SELECT audit_id, operation_id, event_id, payload_json
+  async revokeDesktopDevice(deviceId: string): Promise<void> {
+    const administratorKey = await this.#readLegacyPairingKey();
+    if (administratorKey === null) {
+      throw new Error('Somente o computador administrador pode bloquear outro computador.');
+    }
+    const response = await fetch(`${this.#endpoint}/v1/desktop/devices/revoke`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-GTRZ-Key': administratorKey },
+      body: JSON.stringify({ deviceId }),
+      signal: AbortSignal.timeout(CONNECTION_TIMEOUT_MS),
+    });
+    if (!response.ok) throw new Error('A nuvem não conseguiu bloquear este computador.');
+  }
+
+  async flushOutbox(database: DatabaseContext, activeEventId: string | null): Promise<void> {
+    if (this.#flushInFlight) return;
+    this.#flushInFlight = true;
+    try {
+      const deviceId = await this.#readOrCreateDeviceId();
+      const pairingKey = await this.#readPairingKey();
+
+      if (pairingKey === null) return;
+
+      // WebSockets reduce the delay of a live update, but recovery must not depend on a
+      // socket frame. A newly paired PC starts with no cursor and must first reconcile
+      // the globally selected event through the durable journal.
+      await this.#pullGlobalControl(database, pairingKey, deviceId);
+      const workingDatabase = await this.#applyPendingBootstrap(database, pairingKey, deviceId);
+      this.#enqueueNewAudits(workingDatabase, deviceId);
+
+      const effectiveActiveEventId =
+        getSessionState(workingDatabase).activeEvent?.id ?? activeEventId;
+
+      this.#retryRecoverablePaidOrders(workingDatabase);
+      this.#ensureControlStream(workingDatabase, deviceId, pairingKey);
+      this.#ensureEventStreams(workingDatabase, effectiveActiveEventId, deviceId, pairingKey);
+      if (this.#needsInitialJournalRecovery(workingDatabase, CATALOG_EVENT_ID)) {
+        await this.#reconcileEventJournal(workingDatabase, CATALOG_EVENT_ID, deviceId, pairingKey);
+      }
+      if (
+        effectiveActiveEventId !== null &&
+        this.#needsInitialJournalRecovery(workingDatabase, effectiveActiveEventId)
+      ) {
+        await this.#reconcileEventJournal(
+          workingDatabase,
+          effectiveActiveEventId,
+          deviceId,
+          pairingKey,
+        );
+      }
+      await this.#publishCashierCatalog(workingDatabase, effectiveActiveEventId, pairingKey);
+      await this.#publishMobileContext(workingDatabase, effectiveActiveEventId, pairingKey);
+      this.#applyInbox(workingDatabase, deviceId);
+
+      const pending = workingDatabase.sqlite
+        .prepare(
+          `SELECT audit_id, operation_id, event_id, payload_json
          FROM sync_outbox WHERE status IN ('pending', 'failed')
          ORDER BY audit_id ASC LIMIT 30`,
-      )
-      .all() as OutboxRow[];
+        )
+        .all() as OutboxRow[];
 
-    for (const item of pending) {
-      try {
-        const response = await fetch(
-          `${this.#endpoint}/v1/events/${encodeURIComponent(item.event_id)}/journal`,
-          {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'X-GTRZ-Key': pairingKey },
-            body: item.payload_json,
-            signal: AbortSignal.timeout(CONNECTION_TIMEOUT_MS),
-          },
-        );
+      for (const item of pending) {
+        try {
+          const response = await fetch(
+            `${this.#endpoint}/v1/events/${encodeURIComponent(item.event_id)}/journal`,
+            {
+              method: 'POST',
+              headers: await this.#cloudHeaders(pairingKey, { 'Content-Type': 'application/json' }),
+              body: item.payload_json,
+              signal: AbortSignal.timeout(CONNECTION_TIMEOUT_MS),
+            },
+          );
 
-        if (!response.ok) {
-          throw new Error(`A central respondeu ${String(response.status)}.`);
-        }
+          if (!response.ok) {
+            throw new Error(`A central respondeu ${String(response.status)}.`);
+          }
 
-        database.sqlite
-          .prepare(
-            `UPDATE sync_outbox
+          workingDatabase.sqlite
+            .prepare(
+              `UPDATE sync_outbox
              SET status = 'accepted', accepted_at = ?, attempts = attempts + 1,
                  last_error = NULL, updated_at = ?
              WHERE audit_id = ?`,
-          )
-          .run(Date.now(), Date.now(), item.audit_id);
-      } catch (error: unknown) {
-        const message = error instanceof Error ? error.message.slice(0, 240) : 'Falha de rede.';
-        database.sqlite
-          .prepare(
-            `UPDATE sync_outbox
+            )
+            .run(Date.now(), Date.now(), item.audit_id);
+        } catch (error: unknown) {
+          const message = error instanceof Error ? error.message.slice(0, 240) : 'Falha de rede.';
+          workingDatabase.sqlite
+            .prepare(
+              `UPDATE sync_outbox
              SET status = 'failed', attempts = attempts + 1, last_error = ?, updated_at = ?
              WHERE audit_id = ?`,
-          )
-          .run(message, Date.now(), item.audit_id);
-        return;
+            )
+            .run(message, Date.now(), item.audit_id);
+          return;
+        }
       }
+    } finally {
+      this.#flushInFlight = false;
     }
+  }
 
-    await this.#pullRemoteJournal(database, pairingKey, activeEventId, deviceId);
+  async setGlobalEvent(database: DatabaseContext, eventId: string): Promise<void> {
+    const event = database.sqlite
+      .prepare("SELECT id, name FROM events WHERE id = ? AND status = 'open'")
+      .get(eventId) as { readonly id: string; readonly name: string } | undefined;
+    if (event === undefined)
+      throw new Error('O evento selecionado não está disponível neste computador.');
+    const deviceId = await this.#readOrCreateDeviceId();
+    const bootstrapSnapshot = await this.#uploadBootstrapSnapshot(database, event.id, deviceId);
+    await this.#globalControlRequest('/v1/monitor/global-event', {
+      eventId: event.id,
+      eventName: event.name,
+      bootstrapSnapshotId: bootstrapSnapshot.snapshotId,
+      snapshotSourceDeviceId: deviceId,
+    });
+    setActiveEvent(database, event.id);
+    this.#onDataChanged();
+  }
+
+  async resetGlobalEvent(
+    database: DatabaseContext,
+    input: { readonly eventId: string; readonly confirmationName: string; readonly reason: string },
+  ): Promise<void> {
+    const event = database.sqlite
+      .prepare('SELECT id, name FROM events WHERE id = ?')
+      .get(input.eventId) as { readonly id: string; readonly name: string } | undefined;
+    if (event === undefined) throw new Error('O evento informado não existe neste computador.');
+    if (input.confirmationName.trim() !== event.name) {
+      throw new Error('Digite exatamente o nome do evento para confirmar a limpeza.');
+    }
+    const deviceId = await this.#readOrCreateDeviceId();
+    const pairingKey = await this.#readPairingKey();
+    if (pairingKey === null)
+      throw new Error('A chave da nuvem não foi encontrada neste computador.');
+    await this.#globalControlRequest('/v1/monitor/global-event/reset', {
+      eventId: event.id,
+      eventName: event.name,
+      reason: input.reason.trim(),
+      deviceId,
+    });
+    await this.#pullGlobalControl(database, pairingKey, deviceId);
   }
 
   async getStatus(): Promise<CloudSyncStatus> {
     const checkedAt = Date.now();
     const pairingKey = await this.#readPairingKey();
-
-    try {
-      const health = await fetch(`${this.#endpoint}/health`, {
-        signal: AbortSignal.timeout(CONNECTION_TIMEOUT_MS),
-      });
-
-      if (!health.ok) {
-        return this.#status({
-          checkedAt,
-          connection: 'offline',
-          apiReachable: false,
-          credentialPresent: pairingKey !== null,
-          credentialAccepted: false,
-          message: 'A API da nuvem respondeu com erro.',
-        });
-      }
-    } catch {
-      return this.#status({
-        checkedAt,
-        connection: 'offline',
-        apiReachable: false,
-        credentialPresent: pairingKey !== null,
-        credentialAccepted: false,
-        message: 'Não foi possível alcançar a API da nuvem.',
-      });
-    }
-
     if (pairingKey === null) {
       return this.#status({
         checkedAt,
         connection: 'attention',
-        apiReachable: true,
+        apiReachable: this.#cloudConnected,
         credentialPresent: false,
         credentialAccepted: false,
         message: 'API online, mas a chave de pareamento não foi encontrada neste computador.',
       });
     }
 
-    try {
-      const verification = await fetch(`${this.#endpoint}/v1/verify`, {
-        headers: { 'X-GTRZ-Key': pairingKey },
-        signal: AbortSignal.timeout(CONNECTION_TIMEOUT_MS),
-      });
-
-      if (!verification.ok) {
-        return this.#status({
-          checkedAt,
-          connection: 'attention',
-          apiReachable: true,
-          credentialPresent: true,
-          credentialAccepted: false,
-          message: 'A API está online, mas recusou a chave de pareamento.',
-        });
-      }
-    } catch {
-      return this.#status({
-        checkedAt,
-        connection: 'attention',
-        apiReachable: true,
-        credentialPresent: true,
-        credentialAccepted: false,
-        message: 'A API respondeu, mas não foi possível validar a chave de pareamento.',
-      });
-    }
-
     return this.#status({
       checkedAt,
-      connection: 'connected',
-      apiReachable: true,
+      connection: this.#cloudConnected ? 'connected' : 'attention',
+      apiReachable: this.#cloudConnected,
       credentialPresent: true,
-      credentialAccepted: true,
-      message: 'Nuvem conectada e chave de pareamento validada.',
+      credentialAccepted: this.#cloudConnected,
+      message: this.#cloudConnected
+        ? 'Nuvem conectada pelo canal em tempo real.'
+        : 'Aguardando a conexão segura com a nuvem.',
     });
   }
 
@@ -366,10 +665,10 @@ export class CloudSyncService {
     const startedAt = performance.now();
     const heartbeat = await fetch(`${this.#endpoint}/v1/monitor/heartbeat`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-GTRZ-Key': pairingKey },
+      headers: await this.#cloudHeaders(pairingKey, { 'Content-Type': 'application/json' }),
       body: JSON.stringify({
         deviceId,
-        label: hostname(),
+        label: this.#getDeviceLabel(),
         activeEventId,
         latencyMs: this.#lastLatencyMs,
       }),
@@ -382,7 +681,7 @@ export class CloudSyncService {
     }
 
     const snapshot = await fetch(`${this.#endpoint}/v1/monitor/snapshot`, {
-      headers: { 'X-GTRZ-Key': pairingKey },
+      headers: await this.#cloudHeaders(pairingKey),
       signal: AbortSignal.timeout(CONNECTION_TIMEOUT_MS),
     });
 
@@ -508,10 +807,7 @@ export class CloudSyncService {
     }
     const response = await fetch(`${this.#endpoint}${path}`, {
       method,
-      headers: {
-        'Content-Type': 'application/json',
-        'X-GTRZ-Key': pairingKey,
-      },
+      headers: await this.#cloudHeaders(pairingKey, { 'Content-Type': 'application/json' }),
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
       signal: AbortSignal.timeout(CONNECTION_TIMEOUT_MS),
     });
@@ -524,6 +820,470 @@ export class CloudSyncService {
       throw new Error(message);
     }
     return schema === undefined ? (payload as TResult) : schema.parse(payload);
+  }
+
+  async #globalControlRequest(path: string, body: Record<string, unknown>): Promise<void> {
+    const pairingKey = await this.#readPairingKey();
+    if (pairingKey === null)
+      throw new Error('A chave da nuvem não foi encontrada neste computador.');
+    const response = await fetch(`${this.#endpoint}${path}`, {
+      method: 'POST',
+      headers: await this.#cloudHeaders(pairingKey, { 'Content-Type': 'application/json' }),
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(CONNECTION_TIMEOUT_MS),
+    });
+    const payload: unknown = await response.json().catch(() => null);
+    if (response.ok) return;
+    const message =
+      isRecord(payload) && isRecord(payload.error) && typeof payload.error.message === 'string'
+        ? payload.error.message
+        : 'A central não confirmou o comando global.';
+    throw new Error(message);
+  }
+
+  async #uploadBootstrapSnapshot(
+    database: DatabaseContext,
+    eventId: string,
+    deviceId: string,
+  ): Promise<{ readonly snapshotId: string }> {
+    const pairingKey = await this.#readPairingKey();
+    if (pairingKey === null)
+      throw new Error('A chave da nuvem não foi encontrada neste computador.');
+
+    const temporaryDirectory = await mkdtemp(path.join(tmpdir(), 'gtrz-replica-'));
+    const snapshotPath = path.join(temporaryDirectory, 'database.sqlite');
+    try {
+      await createDatabaseSnapshot(database, snapshotPath);
+      const contents = await readFile(snapshotPath);
+      const checksum = createHash('sha256').update(contents).digest('hex');
+      const response = await fetch(
+        `${this.#endpoint}/v1/monitor/replica-snapshot/${encodeURIComponent(eventId)}`,
+        {
+          method: 'POST',
+          headers: await this.#cloudHeaders(pairingKey, {
+            'Content-Type': 'application/vnd.sqlite3',
+            'Content-Length': String(contents.byteLength),
+            'X-GTRZ-Device-Id': deviceId,
+            'X-GTRZ-Snapshot-Sha256': checksum,
+            'X-GTRZ-Snapshot-Size': String(contents.byteLength),
+          }),
+          body: new Uint8Array(contents).buffer,
+          signal: AbortSignal.timeout(CONNECTION_TIMEOUT_MS * 6),
+        },
+      );
+      const payload: unknown = await response.json().catch(() => null);
+      if (
+        !response.ok ||
+        !isRecord(payload) ||
+        typeof payload.snapshotId !== 'string' ||
+        payload.snapshotId.length === 0
+      ) {
+        const message =
+          isRecord(payload) && isRecord(payload.error) && typeof payload.error.message === 'string'
+            ? payload.error.message
+            : 'A central não conseguiu preparar a cópia inicial do evento.';
+        throw new Error(message);
+      }
+      return { snapshotId: payload.snapshotId };
+    } finally {
+      await rm(temporaryDirectory, { force: true, recursive: true });
+    }
+  }
+
+  async #applyPendingBootstrap(
+    database: DatabaseContext,
+    pairingKey: string,
+    deviceId: string,
+  ): Promise<DatabaseContext> {
+    const pending = this.#pendingBootstrap;
+    if (pending === null || this.#databaseRuntime === null) return database;
+    this.#pendingBootstrap = null;
+
+    const { command } = pending;
+    if (this.#hasAppliedBootstrap(database, command.commandId)) return database;
+    if (!this.#isBootstrapEligible(database, command.eventId)) {
+      this.#markBootstrapApplied(database, command);
+      return database;
+    }
+    if (command.bootstrapSnapshotId === null) return database;
+
+    const response = await fetch(
+      `${this.#endpoint}/v1/monitor/replica-snapshot/${encodeURIComponent(command.bootstrapSnapshotId)}`,
+      {
+        headers: await this.#cloudHeaders(pairingKey),
+        signal: AbortSignal.timeout(CONNECTION_TIMEOUT_MS * 6),
+      },
+    );
+    if (!response.ok) {
+      throw new Error('A cópia inicial do evento não pôde ser baixada deste PC.');
+    }
+    if (response.headers.get('X-GTRZ-Snapshot-Event') !== command.eventId) {
+      throw new Error('A cópia inicial recebida pertence a outro evento.');
+    }
+    const expectedChecksum = response.headers.get('X-GTRZ-Snapshot-Sha256');
+    if (expectedChecksum === null || !/^[a-f0-9]{64}$/iu.test(expectedChecksum)) {
+      throw new Error('A cópia inicial não possui verificação de integridade.');
+    }
+    const contents = Buffer.from(await response.arrayBuffer());
+    if (createHash('sha256').update(contents).digest('hex') !== expectedChecksum) {
+      throw new Error('A cópia inicial falhou na verificação de integridade.');
+    }
+
+    const temporaryDirectory = await mkdtemp(path.join(tmpdir(), 'gtrz-replica-import-'));
+    const snapshotPath = path.join(temporaryDirectory, 'database.sqlite');
+    try {
+      await writeFile(snapshotPath, contents, { flag: 'wx' });
+      await this.#databaseRuntime.replaceWith(snapshotPath);
+    } finally {
+      await rm(temporaryDirectory, { force: true, recursive: true });
+    }
+
+    const restored = this.#databaseRuntime.get();
+    const event = restored.sqlite
+      .prepare("SELECT id FROM events WHERE id = ? AND status = 'open'")
+      .get(command.eventId);
+    if (event === undefined) {
+      throw new Error('A cópia inicial não contém o evento global selecionado.');
+    }
+    setActiveEvent(restored, command.eventId);
+    this.#markBootstrapApplied(restored, command);
+    this.#restartStreamsAfterDatabaseRestore();
+    this.#ensureEventStreams(restored, command.eventId, deviceId, pairingKey);
+    this.#onDataChanged();
+    return restored;
+  }
+
+  #isBootstrapEligible(database: DatabaseContext, eventId: string): boolean {
+    const otherEvents = database.sqlite
+      .prepare('SELECT COUNT(*) AS amount FROM events WHERE id <> ?')
+      .get(eventId) as { readonly amount: number };
+    if (otherEvents.amount > 0) return false;
+    const eventData = database.sqlite
+      .prepare(
+        `SELECT
+           (SELECT COUNT(*) FROM orders WHERE event_id = ?) +
+           (SELECT COUNT(*) FROM event_stock WHERE event_id = ?) +
+           (SELECT COUNT(*) FROM service_points WHERE event_id = ?) +
+           (SELECT COUNT(*) FROM vouchers WHERE event_id = ?) +
+           (SELECT COUNT(*) FROM expenses WHERE event_id = ?) +
+           (SELECT COUNT(*) FROM ticket_lots WHERE event_id = ?) AS amount`,
+      )
+      .get(eventId, eventId, eventId, eventId, eventId, eventId) as { readonly amount: number };
+    return eventData.amount === 0;
+  }
+
+  #hasAppliedBootstrap(database: DatabaseContext, commandId: string): boolean {
+    return (
+      database.sqlite
+        .prepare('SELECT 1 FROM sync_state WHERE key = ?')
+        .get(`global.bootstrap:${commandId}`) !== undefined
+    );
+  }
+
+  #markBootstrapApplied(database: DatabaseContext, command: GlobalEventCommand): void {
+    database.sqlite.transaction(() => {
+      database.sqlite
+        .prepare(
+          `INSERT INTO sync_state (key, value, updated_at) VALUES (?, 'applied', ?)
+           ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+        )
+        .run(`global.bootstrap:${command.commandId}`, Date.now());
+      database.sqlite
+        .prepare(
+          `INSERT INTO sync_state (key, value, updated_at) VALUES (?, 'applied', ?)
+           ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+        )
+        .run(`global.event-command:${command.commandId}`, Date.now());
+      database.sqlite
+        .prepare(
+          `INSERT INTO sync_state (key, value, updated_at) VALUES (?, ?, ?)
+           ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+        )
+        .run('global.event-control.cursor', String(command.sequence), Date.now());
+    })();
+  }
+
+  #restartStreamsAfterDatabaseRestore(): void {
+    this.#stopControlHeartbeat();
+    this.#controlStream?.close();
+    this.#controlStream = null;
+    if (this.#controlReconnectTimer !== null) clearTimeout(this.#controlReconnectTimer);
+    this.#controlReconnectTimer = null;
+    for (const timer of this.#eventReconnectTimers.values()) clearTimeout(timer);
+    this.#eventReconnectTimers.clear();
+    for (const stream of this.#eventStreams.values()) stream.close();
+    this.#eventStreams.clear();
+  }
+
+  #ensureControlStream(database: DatabaseContext, deviceId: string, pairingKey: string): void {
+    if (this.#controlReconnectTimer !== null) return;
+    if (
+      this.#controlStream !== null &&
+      (this.#controlStream.readyState === WebSocket.OPEN ||
+        this.#controlStream.readyState === WebSocket.CONNECTING)
+    ) {
+      return;
+    }
+    const cursorRow = database.sqlite
+      .prepare("SELECT value FROM sync_state WHERE key = 'global.event-control.cursor'")
+      .get() as { readonly value: string } | undefined;
+    const cursor = Number.parseInt(cursorRow?.value ?? '0', 10) || 0;
+    const streamUrl = `${this.#endpoint.replace(/^https:/u, 'wss:').replace(/^http:/u, 'ws:')}/v1/monitor/stream?after=${String(cursor)}`;
+    const stream = new WebSocket(streamUrl, {
+      headers: {
+        'X-GTRZ-Key': pairingKey,
+        'X-GTRZ-Device-Id': deviceId,
+        'X-GTRZ-Device-Label': this.#getDeviceLabel(),
+      },
+      handshakeTimeout: CONNECTION_TIMEOUT_MS,
+    });
+    this.#controlStream = stream;
+    stream.on('open', () => {
+      this.#cloudConnected = true;
+      this.#controlReconnectDelayMs = 1_000;
+      this.#startControlHeartbeat(stream, database);
+    });
+    stream.on('message', () => {
+      // The control frame is a push signal. The snapshot is requested only on
+      // connection/recovery or when the global control actually changes.
+      void this.#pullGlobalControl(database, pairingKey, deviceId).catch(() => undefined);
+    });
+    stream.on('error', () => undefined);
+    stream.on('close', () => {
+      if (this.#controlStream !== stream) return;
+      this.#controlStream = null;
+      this.#cloudConnected = false;
+      this.#stopControlHeartbeat();
+      if (!this.#replicationRunning) return;
+      this.#scheduleControlReconnect(database, deviceId, pairingKey);
+    });
+  }
+
+  #scheduleControlReconnect(database: DatabaseContext, deviceId: string, pairingKey: string): void {
+    if (!this.#replicationRunning) return;
+    if (this.#controlReconnectTimer !== null) return;
+    const delay = this.#controlReconnectDelayMs;
+    this.#controlReconnectDelayMs = Math.min(delay * 2, STREAM_RECONNECT_MAX_MS);
+    this.#controlReconnectTimer = setTimeout(() => {
+      this.#controlReconnectTimer = null;
+      this.#ensureControlStream(database, deviceId, pairingKey);
+    }, delay);
+  }
+
+  #startControlHeartbeat(stream: WebSocket, database: DatabaseContext): void {
+    this.#stopControlHeartbeat();
+    const sendHeartbeat = (): void => {
+      if (this.#controlStream !== stream || stream.readyState !== WebSocket.OPEN) return;
+      try {
+        stream.send(
+          JSON.stringify({
+            type: 'global.heartbeat',
+            activeEventId: getSessionState(database).activeEvent?.id ?? null,
+            latencyMs: this.#lastLatencyMs,
+          }),
+        );
+      } catch {
+        // The close handler owns reconnecting a broken control stream.
+      }
+    };
+    sendHeartbeat();
+    this.#controlHeartbeatTimer = setInterval(sendHeartbeat, CONTROL_HEARTBEAT_INTERVAL_MS);
+  }
+
+  #stopControlHeartbeat(): void {
+    if (this.#controlHeartbeatTimer !== null) clearInterval(this.#controlHeartbeatTimer);
+    this.#controlHeartbeatTimer = null;
+  }
+
+  async #pullGlobalControl(
+    database: DatabaseContext,
+    pairingKey: string,
+    deviceId: string,
+  ): Promise<void> {
+    const cursorKey = 'global.event-control.cursor';
+    const cursorRow = database.sqlite
+      .prepare('SELECT value FROM sync_state WHERE key = ?')
+      .get(cursorKey) as { readonly value: string } | undefined;
+    const after = Number.parseInt(cursorRow?.value ?? '0', 10) || 0;
+    const response = await fetch(
+      `${this.#endpoint}/v1/monitor/global-control?after=${String(after)}`,
+      {
+        headers: await this.#cloudHeaders(pairingKey),
+        signal: AbortSignal.timeout(CONNECTION_TIMEOUT_MS),
+      },
+    );
+    if (!response.ok) return;
+    const payload: unknown = await response.json();
+    if (!isRecord(payload) || !Array.isArray(payload.commands)) return;
+    let cursor = after;
+    for (const candidate of payload.commands) {
+      if (!isRecord(candidate)) continue;
+      if (
+        typeof candidate.sequence !== 'number' ||
+        typeof candidate.commandId !== 'string' ||
+        (candidate.type !== 'event.activated' && candidate.type !== 'event.reset') ||
+        typeof candidate.eventId !== 'string' ||
+        typeof candidate.eventName !== 'string' ||
+        typeof candidate.createdAt !== 'number'
+      )
+        continue;
+      const command: GlobalEventCommand = {
+        sequence: candidate.sequence,
+        commandId: candidate.commandId,
+        type: candidate.type,
+        eventId: candidate.eventId,
+        eventName: candidate.eventName,
+        reason: typeof candidate.reason === 'string' ? candidate.reason : null,
+        bootstrapSnapshotId:
+          typeof candidate.bootstrapSnapshotId === 'string' ? candidate.bootstrapSnapshotId : null,
+        snapshotSourceDeviceId:
+          typeof candidate.snapshotSourceDeviceId === 'string'
+            ? candidate.snapshotSourceDeviceId
+            : null,
+        createdAt: candidate.createdAt,
+      };
+      const appliedKey = `global.event-command:${command.commandId}`;
+      const alreadyApplied = database.sqlite
+        .prepare('SELECT 1 FROM sync_state WHERE key = ?')
+        .get(appliedKey) as { readonly value: number } | undefined;
+      if (alreadyApplied !== undefined) {
+        cursor = Math.max(cursor, command.sequence);
+        continue;
+      }
+      let event = database.sqlite
+        .prepare('SELECT id, name FROM events WHERE id = ?')
+        .get(command.eventId) as { readonly id: string; readonly name: string } | undefined;
+      if (event === undefined && command.type === 'event.activated') {
+        database.sqlite
+          .prepare(
+            `INSERT INTO events (id, name, status, starts_at, ends_at, created_at, updated_at)
+             VALUES (?, ?, 'open', ?, NULL, ?, ?)`,
+          )
+          .run(
+            command.eventId,
+            command.eventName,
+            command.createdAt,
+            command.createdAt,
+            command.createdAt,
+          );
+        event = { id: command.eventId, name: command.eventName };
+      }
+      if (event !== undefined && command.type === 'event.activated') {
+        if (
+          command.bootstrapSnapshotId !== null &&
+          command.snapshotSourceDeviceId !== null &&
+          command.snapshotSourceDeviceId !== deviceId &&
+          this.#databaseRuntime !== null &&
+          !this.#hasAppliedBootstrap(database, command.commandId)
+        ) {
+          this.#pendingBootstrap = { command };
+          return;
+        }
+        setActiveEvent(database, event.id);
+        database.sqlite
+          .prepare('DELETE FROM sync_state WHERE key = ?')
+          .run(`replica.reconciled:${event.id}`);
+        this.#ensureEventStreams(database, event.id, deviceId, pairingKey);
+        this.#onDataChanged();
+      } else if (event !== undefined) {
+        resetEventData(database, {
+          eventId: event.id,
+          confirmationName: event.name,
+          reason: command.reason ?? 'Limpeza global do evento.',
+          system: true,
+        });
+        this.#onDataChanged();
+      }
+      database.sqlite
+        .prepare(
+          `INSERT INTO sync_state (key, value, updated_at) VALUES (?, 'applied', ?)
+           ON CONFLICT(key) DO UPDATE SET updated_at = excluded.updated_at`,
+        )
+        .run(appliedKey, Date.now());
+      cursor = Math.max(cursor, command.sequence);
+    }
+    if (cursor !== after) {
+      database.sqlite
+        .prepare(
+          `INSERT INTO sync_state (key, value, updated_at) VALUES (?, ?, ?)
+           ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+        )
+        .run(cursorKey, String(cursor), Date.now());
+    }
+    const pending = this.#pendingReset(payload.pendingReset);
+    if (pending?.targetDeviceIds.includes(deviceId) === true) {
+      await this.#prepareResetBackup(database, pairingKey, deviceId, pending);
+    }
+  }
+
+  #pendingReset(value: unknown): PendingGlobalReset | null {
+    if (!isRecord(value) || !Array.isArray(value.targetDeviceIds)) return null;
+    if (
+      typeof value.requestId !== 'string' ||
+      typeof value.eventId !== 'string' ||
+      typeof value.eventName !== 'string' ||
+      typeof value.reason !== 'string' ||
+      !value.targetDeviceIds.every((item) => typeof item === 'string')
+    )
+      return null;
+    return {
+      requestId: value.requestId,
+      eventId: value.eventId,
+      eventName: value.eventName,
+      reason: value.reason,
+      targetDeviceIds: value.targetDeviceIds,
+    };
+  }
+
+  async #prepareResetBackup(
+    database: DatabaseContext,
+    pairingKey: string,
+    deviceId: string,
+    reset: PendingGlobalReset,
+  ): Promise<void> {
+    const completionKey = `global.reset-backup:${reset.requestId}`;
+    const complete = database.sqlite
+      .prepare('SELECT 1 FROM sync_state WHERE key = ?')
+      .get(completionKey);
+    if (complete !== undefined) return;
+    if (this.#resetBackupAgent === null) {
+      this.#reportConflict({
+        commandId: reset.requestId,
+        eventId: reset.eventId,
+        deviceId,
+        action: 'event.reset-backup',
+        entityId: reset.eventId,
+        reason: 'Este PC não conseguiu preparar o backup obrigatório.',
+      });
+      return;
+    }
+    const backup = await this.#resetBackupAgent();
+    if (backup.integrity !== 'valid')
+      throw new Error('O backup pré-limpeza não passou na verificação.');
+    const contents = await readFile(backup.filePath);
+    const response = await fetch(
+      `${this.#endpoint}/v1/monitor/reset-backup/${encodeURIComponent(reset.requestId)}`,
+      {
+        method: 'POST',
+        headers: await this.#cloudHeaders(pairingKey, {
+          'Content-Type': 'application/octet-stream',
+          'X-GTRZ-Device-Id': deviceId,
+          'X-GTRZ-Backup-Sha256': createHash('sha256').update(contents).digest('hex'),
+          'X-GTRZ-Backup-Size': String(contents.byteLength),
+          'Content-Length': String(contents.byteLength),
+        }),
+        body: new Uint8Array(contents),
+        signal: AbortSignal.timeout(30_000),
+      },
+    );
+    if (!response.ok) throw new Error('A nuvem não confirmou o envio do backup obrigatório.');
+    database.sqlite
+      .prepare(
+        `INSERT INTO sync_state (key, value, updated_at) VALUES (?, ?, ?)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+      )
+      .run(completionKey, backup.fileName, Date.now());
+    this.#onDataChanged();
   }
 
   #reportConflict(conflict: {
@@ -551,7 +1311,7 @@ export class CloudSyncService {
     try {
       await fetch(`${this.#endpoint}/v1/monitor/conflict`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-GTRZ-Key': pairingKey },
+        headers: await this.#cloudHeaders(pairingKey, { 'Content-Type': 'application/json' }),
         body: JSON.stringify({ ...conflict, createdAt: Date.now() }),
         signal: AbortSignal.timeout(CONNECTION_TIMEOUT_MS),
       });
@@ -561,6 +1321,24 @@ export class CloudSyncService {
   }
 
   async #readPairingKey(): Promise<string | null> {
+    try {
+      const rawCredential: unknown = JSON.parse(
+        await readFile(this.#deviceCredentialPath, 'utf8'),
+      );
+      if (
+        isRecord(rawCredential) &&
+        typeof rawCredential.token === 'string' &&
+        rawCredential.token.trim().length >= 32
+      ) {
+        return rawCredential.token;
+      }
+    } catch {
+      // A device credential is optional during the transition from the legacy key.
+    }
+    return this.#readLegacyPairingKey();
+  }
+
+  async #readLegacyPairingKey(): Promise<string | null> {
     try {
       const contents = await readFile(this.#pairingKeyPath, 'utf8');
       const key = contents
@@ -574,6 +1352,17 @@ export class CloudSyncService {
     }
   }
 
+  async #cloudHeaders(
+    credential: string,
+    headers: Record<string, string> = {},
+  ): Promise<Record<string, string>> {
+    return {
+      ...headers,
+      'X-GTRZ-Key': credential,
+      'X-GTRZ-Device-Id': await this.#readOrCreateDeviceId(),
+    };
+  }
+
   async #publishCashierCatalog(
     database: DatabaseContext,
     activeEventId: string | null,
@@ -582,8 +1371,10 @@ export class CloudSyncService {
     if (activeEventId === null) return;
     const products = database.sqlite
       .prepare(
-        `SELECT p.id AS product_id, p.name, p.kind, p.sale_price_cents, COALESCE(es.quantity, 0) AS quantity
+        `SELECT p.id AS product_id, p.name, p.kind, p.combo_only, p.sale_price_cents,
+                c.name AS category_name, COALESCE(es.quantity, 0) AS quantity
          FROM products p
+         INNER JOIN product_categories c ON c.id = p.category_id
          LEFT JOIN event_stock es ON es.product_id = p.id AND es.event_id = ?
          WHERE p.active = 1 ORDER BY p.name COLLATE NOCASE`,
       )
@@ -591,16 +1382,50 @@ export class CloudSyncService {
       readonly product_id: string;
       readonly name: string;
       readonly kind: string;
+      readonly combo_only: number;
       readonly sale_price_cents: number;
+      readonly category_name: string;
       readonly quantity: number;
     }[];
-    const catalog = products.map((product) => ({
-      productId: product.product_id,
-      label: product.name,
-      kind: product.kind,
-      unitPriceCents: product.sale_price_cents,
-      quantity: product.quantity,
-    }));
+    const catalog = [
+      ...products.map((product) => {
+        const presentation = getProductPresentation(database, product.product_id);
+        return {
+          productId: product.product_id,
+          label: product.name,
+          kind: product.kind,
+          itemKind: 'product',
+          visible: product.combo_only !== 1,
+          categoryLabel: product.category_name,
+          imageDataUrl: presentation.imageDataUrl,
+          fallbackIcon: presentation.fallbackIcon,
+          components: [],
+          unitPriceCents: product.sale_price_cents,
+          quantity: product.quantity,
+        };
+      }),
+      ...listCombos(database)
+        .filter((combo) => combo.active)
+        .map((combo) => ({
+          productId: combo.id,
+          label: combo.name,
+          kind: combo.kind,
+          itemKind: 'combo',
+          visible: true,
+          categoryLabel: combo.kind === 'food' ? 'Comidas' : 'Combos',
+          imageDataUrl: null,
+          fallbackIcon: 'package',
+          components: combo.components.map((component) => ({
+            productId: component.productId,
+            quantity: component.quantity,
+            choiceGroup: component.choiceGroup,
+            choiceLabel: component.choiceLabel,
+            sortOrder: component.sortOrder,
+          })),
+          unitPriceCents: combo.salePriceCents,
+          quantity: combo.availableUnits,
+        })),
+    ];
     const fingerprint = JSON.stringify(catalog);
     const stateKey = `cashier.catalog:${activeEventId}`;
     const current = database.sqlite
@@ -612,7 +1437,7 @@ export class CloudSyncService {
       `${this.#endpoint}/v1/events/${encodeURIComponent(activeEventId)}/cashier/catalog`,
       {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-GTRZ-Key': pairingKey },
+        headers: await this.#cloudHeaders(pairingKey, { 'Content-Type': 'application/json' }),
         body: JSON.stringify({ products: catalog }),
         signal: AbortSignal.timeout(CONNECTION_TIMEOUT_MS),
       },
@@ -627,6 +1452,207 @@ export class CloudSyncService {
          ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
       )
       .run(stateKey, fingerprint, Date.now());
+  }
+
+  async #publishMobileContext(
+    database: DatabaseContext,
+    activeEventId: string | null,
+    pairingKey: string,
+  ): Promise<void> {
+    if (activeEventId === null) return;
+    const ticketLots = database.sqlite
+      .prepare(
+        `SELECT tl.id, tl.name, tl.price_cents, tl.capacity, tl.active,
+                COALESCE(SUM(CASE WHEN ts.status = 'active' THEN ts.quantity ELSE 0 END), 0) AS used_quantity,
+                COALESCE(SUM(CASE WHEN ts.status = 'active' AND ts.source = 'courtesy' THEN ts.quantity ELSE 0 END), 0) AS courtesy_quantity
+         FROM ticket_lots tl
+         LEFT JOIN ticket_sales ts ON ts.lot_id = tl.id
+         WHERE tl.event_id = ?
+         GROUP BY tl.id
+         ORDER BY tl.created_at ASC`,
+      )
+      .all(activeEventId) as readonly {
+      readonly id: string;
+      readonly name: string;
+      readonly price_cents: number;
+      readonly capacity: number;
+      readonly active: number;
+      readonly used_quantity: number;
+      readonly courtesy_quantity: number;
+    }[];
+    const servicePoints = database.sqlite
+      .prepare(
+        `SELECT id, label, type, active FROM service_points
+         WHERE event_id = ? ORDER BY label COLLATE NOCASE`,
+      )
+      .all(activeEventId) as readonly {
+      readonly id: string;
+      readonly label: string;
+      readonly type: 'counter' | 'table';
+      readonly active: number;
+    }[];
+    const vouchers = database.sqlite
+      .prepare(
+        `SELECT v.id, v.code, v.label, v.remaining_balance_cents, v.status, v.updated_at,
+                binding.value AS service_point_id
+         FROM vouchers v
+         LEFT JOIN app_meta binding ON binding.key = 'voucher.service-point:' || v.id
+         WHERE v.event_id = ?`,
+      )
+      .all(activeEventId) as readonly {
+      readonly id: string;
+      readonly code: string;
+      readonly label: string;
+      readonly remaining_balance_cents: number;
+      readonly status: 'active' | 'exhausted' | 'cancelled';
+      readonly updated_at: number;
+      readonly service_point_id: string | null;
+    }[];
+    const context = {
+      eventId: activeEventId,
+      ticketLots: ticketLots.map((lot) => ({
+        id: lot.id,
+        name: lot.name,
+        priceCents: lot.price_cents,
+        active: lot.active === 1,
+        soldQuantity: lot.used_quantity - lot.courtesy_quantity,
+        courtesyQuantity: lot.courtesy_quantity,
+        availableQuantity: Math.max(0, lot.capacity - lot.used_quantity),
+      })),
+      servicePoints: servicePoints.map((point) => ({
+        id: point.id,
+        label: point.label,
+        type: point.type,
+        active: point.active === 1,
+      })),
+      voucherCodes: vouchers.map((voucher) => voucher.code),
+      vouchers: vouchers.map((voucher) => ({
+        id: voucher.id,
+        code: voucher.code,
+        label: voucher.label,
+        remainingBalanceCents: voucher.remaining_balance_cents,
+        status: voucher.status,
+        servicePointId: voucher.service_point_id,
+        updatedAt: voucher.updated_at,
+      })),
+    };
+    const fingerprint = JSON.stringify(context);
+    const stateKey = `mobile.context:${activeEventId}`;
+    const current = database.sqlite
+      .prepare('SELECT value FROM sync_state WHERE key = ?')
+      .get(stateKey) as { readonly value: string } | undefined;
+    if (current?.value === fingerprint) return;
+    const response = await fetch(
+      `${this.#endpoint}/v1/events/${encodeURIComponent(activeEventId)}/cashier/context`,
+      {
+        method: 'POST',
+        headers: await this.#cloudHeaders(pairingKey, { 'Content-Type': 'application/json' }),
+        body: JSON.stringify(context),
+        signal: AbortSignal.timeout(CONNECTION_TIMEOUT_MS),
+      },
+    );
+    if (!response.ok)
+      throw new Error(`Não foi possível publicar o contexto móvel (${String(response.status)}).`);
+    database.sqlite
+      .prepare(
+        `INSERT INTO sync_state (key, value, updated_at) VALUES (?, ?, ?)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+      )
+      .run(stateKey, fingerprint, Date.now());
+  }
+
+  async #processPrintQueue(
+    database: DatabaseContext,
+    activeEventId: string | null,
+    deviceId: string,
+    pairingKey: string,
+  ): Promise<void> {
+    if (this.#printQueueInFlight !== null) return this.#printQueueInFlight;
+    const processing = this.#drainPrintQueue(database, activeEventId, deviceId, pairingKey);
+    this.#printQueueInFlight = processing;
+    try {
+      await processing;
+    } finally {
+      if (this.#printQueueInFlight === processing) this.#printQueueInFlight = null;
+    }
+  }
+
+  async #drainPrintQueue(
+    database: DatabaseContext,
+    activeEventId: string | null,
+    deviceId: string,
+    pairingKey: string,
+  ): Promise<void> {
+    if (activeEventId === null) return;
+    const settings = getPrintingSettings(database);
+    const printerName = settings.deviceName ?? '__windows_default__';
+    const baseUrl = `${this.#endpoint}/v1/events/${encodeURIComponent(activeEventId)}/print`;
+    const register = await fetch(`${baseUrl}/printers`, {
+      method: 'POST',
+      headers: await this.#cloudHeaders(pairingKey, { 'Content-Type': 'application/json' }),
+      body: JSON.stringify({
+        deviceId,
+        deviceLabel: settings.machineName,
+        printerName,
+        paperWidthMm: settings.paperWidthMm,
+        enabled: settings.automaticPrinting,
+      }),
+      signal: AbortSignal.timeout(CONNECTION_TIMEOUT_MS),
+    });
+    if (!register.ok) return;
+    if (!settings.automaticPrinting || this.#printAgent === null) return;
+
+    for (;;) {
+      const claim = await fetch(`${baseUrl}/claim`, {
+        method: 'POST',
+        headers: await this.#cloudHeaders(pairingKey, { 'Content-Type': 'application/json' }),
+        body: JSON.stringify({ deviceId }),
+        signal: AbortSignal.timeout(CONNECTION_TIMEOUT_MS),
+      });
+      if (!claim.ok) return;
+      const payload: unknown = await claim.json();
+      if (!isRecord(payload) || !isRecord(payload.job)) return;
+      const rawJob = payload.job;
+      if (
+        typeof rawJob.jobId !== 'string' ||
+        typeof rawJob.claimToken !== 'string' ||
+        typeof rawJob.printerLabel !== 'string' ||
+        !isRecord(rawJob.document)
+      ) {
+        return;
+      }
+      let result: PrintAgentResult;
+      let completion: 'printed' | 'failed' | 'uncertain' = 'printed';
+      try {
+        result = await this.#printAgent({
+          jobId: rawJob.jobId,
+          claimToken: rawJob.claimToken,
+          printerLabel: rawJob.printerLabel,
+          document: rawJob.document as unknown as CloudPrintReceipt,
+        });
+        if (!result.success) completion = 'failed';
+      } catch (error: unknown) {
+        completion = 'uncertain';
+        result = {
+          success: false,
+          message:
+            error instanceof Error ? error.message : 'O agente de impressão parou sem confirmação.',
+        };
+      }
+      const complete = await fetch(`${baseUrl}/complete`, {
+        method: 'POST',
+        headers: await this.#cloudHeaders(pairingKey, { 'Content-Type': 'application/json' }),
+        body: JSON.stringify({
+          jobId: rawJob.jobId,
+          claimToken: rawJob.claimToken,
+          deviceId,
+          result: completion,
+          error: result.success ? undefined : result.message,
+        }),
+        signal: AbortSignal.timeout(CONNECTION_TIMEOUT_MS),
+      });
+      if (!complete.ok) return;
+    }
   }
 
   #enqueueNewAudits(database: DatabaseContext, deviceId: string): void {
@@ -668,6 +1694,15 @@ export class CloudSyncService {
     database.sqlite.transaction(() => {
       for (const audit of audits) {
         if (!SYNCHRONIZED_ACTIONS.has(audit.action)) continue;
+        const eventName =
+          audit.event_id === null
+            ? null
+            : ((
+                database.sqlite
+                  .prepare('SELECT name FROM events WHERE id = ?')
+                  .get(audit.event_id) as { readonly name: string } | undefined
+              )?.name ?? null);
+        const rawDetails: unknown = JSON.parse(audit.details_json);
         const payload = {
           commandId: `${deviceId}:${String(audit.id)}`,
           deviceId,
@@ -676,13 +1711,21 @@ export class CloudSyncService {
           action: audit.action,
           entityType: audit.entity_type,
           entityId: audit.entity_id,
-          details: JSON.parse(audit.details_json) as unknown,
+          details: isRecord(rawDetails)
+            ? {
+                ...rawDetails,
+                originMachineName: this.#getDeviceLabel(),
+                ...(eventName === null ? {} : { eventName }),
+              }
+            : rawDetails,
           createdAt: audit.created_at,
         };
         enqueue.run(
           audit.id,
           payload.commandId,
-          audit.event_id ?? CATALOG_EVENT_ID,
+          CATALOG_ACTIONS.has(audit.action)
+            ? CATALOG_EVENT_ID
+            : (audit.event_id ?? CATALOG_EVENT_ID),
           JSON.stringify(payload),
           Date.now(),
           Date.now(),
@@ -692,66 +1735,234 @@ export class CloudSyncService {
     })();
   }
 
-  #ensureStream(
+  #ensureEventStreams(
     database: DatabaseContext,
     activeEventId: string | null,
     deviceId: string,
     pairingKey: string,
   ): void {
-    if (activeEventId === null) return;
+    const wanted = new Set([CATALOG_EVENT_ID]);
+    if (activeEventId !== null) wanted.add(activeEventId);
+    for (const eventId of wanted) {
+      this.#ensureEventStream(database, eventId, deviceId, pairingKey, activeEventId);
+    }
+    for (const [eventId, stream] of this.#eventStreams) {
+      if (!wanted.has(eventId)) {
+        stream.close();
+        this.#eventStreams.delete(eventId);
+      }
+    }
+  }
 
+  #ensureEventStream(
+    database: DatabaseContext,
+    eventId: string,
+    deviceId: string,
+    pairingKey: string,
+    activeEventId: string | null,
+  ): void {
+    if (this.#eventReconnectTimers.has(eventId)) return;
+    const existing = this.#eventStreams.get(eventId);
     if (
-      this.#stream !== null &&
-      this.#streamEventId === activeEventId &&
-      (this.#stream.readyState === WebSocket.OPEN ||
-        this.#stream.readyState === WebSocket.CONNECTING)
+      existing !== undefined &&
+      (existing.readyState === WebSocket.OPEN || existing.readyState === WebSocket.CONNECTING)
     ) {
       return;
     }
 
-    if (this.#stream !== null) {
-      this.#stream.close();
-    }
-
-    const cursor = this.#getInboxCursor(database, activeEventId);
-    const streamUrl = `${this.#endpoint.replace(/^https:/u, 'wss:').replace(/^http:/u, 'ws:')}/v1/events/${encodeURIComponent(activeEventId)}/stream?after=${String(cursor)}`;
+    const cursor = this.#getInboxCursor(database, eventId);
+    const streamUrl = `${this.#endpoint.replace(/^https:/u, 'wss:').replace(/^http:/u, 'ws:')}/v1/events/${encodeURIComponent(eventId)}/stream?after=${String(cursor)}`;
     const stream = new WebSocket(streamUrl, {
-      headers: { 'X-GTRZ-Key': pairingKey, 'X-GTRZ-Device-Id': deviceId },
+      headers: {
+        'X-GTRZ-Key': pairingKey,
+        'X-GTRZ-Device-Id': deviceId,
+        'X-GTRZ-Device-Label': this.#getDeviceLabel(),
+      },
       handshakeTimeout: CONNECTION_TIMEOUT_MS,
     });
-    this.#stream = stream;
-    this.#streamEventId = activeEventId;
+    this.#eventStreams.set(eventId, stream);
 
     stream.on('open', () => {
-      stream.send(JSON.stringify({ type: 'sync', after: cursor }));
+      this.#eventReconnectDelays.set(eventId, 1_000);
+      if (eventId === activeEventId) {
+        void this.#processPrintQueue(database, eventId, deviceId, pairingKey).catch(
+          () => undefined,
+        );
+      }
     });
     stream.on('message', (message) => {
-      try {
-        const envelope: unknown = JSON.parse(websocketMessageText(message));
-        const event = isRecord(envelope) && envelope.type === 'event' ? envelope.event : null;
-        if (isRemoteJournalEvent(event)) {
-          const cursor = this.#getInboxCursor(database, activeEventId);
-          if (event.sequence <= cursor) return;
-          if (event.sequence === cursor + 1) {
-            this.#storeRemoteJournalEvents(database, activeEventId, [event]);
-            this.#applyInbox(database, deviceId);
-            return;
-          }
-        }
-      } catch {
-        // A reconnect snapshot remains the recovery path for malformed frames.
+      const result = this.#applyStreamMessage(database, eventId, deviceId, message);
+      if (!result.accepted) {
+        stream.close();
+        return;
       }
-      void this.#pullRemoteJournal(database, pairingKey, activeEventId, deviceId).catch(
-        () => undefined,
-      );
+      if (!result.caughtUp && stream.readyState === WebSocket.OPEN) {
+        try {
+          stream.send(JSON.stringify({ type: 'sync', after: result.cursor }));
+        } catch {
+          stream.close();
+        }
+      }
+      if (result.printQueued && eventId === getSessionState(database).activeEvent?.id) {
+        void this.#processPrintQueue(database, eventId, deviceId, pairingKey).catch(
+          () => undefined,
+        );
+      }
     });
     stream.on('error', () => undefined);
     stream.on('close', () => {
-      if (this.#stream === stream) {
-        this.#stream = null;
-        this.#streamEventId = null;
+      if (this.#eventStreams.get(eventId) === stream) {
+        this.#eventStreams.delete(eventId);
+        if (!this.#replicationRunning) return;
+        this.#scheduleEventReconnect(database, eventId, deviceId, pairingKey);
       }
     });
+  }
+
+  #applyStreamMessage(
+    database: DatabaseContext,
+    eventId: string,
+    deviceId: string,
+    message: RawData,
+  ): StreamMessageResult {
+    try {
+      const envelope: unknown = JSON.parse(websocketMessageText(message));
+      if (!isRecord(envelope)) return this.#rejectedStreamMessage(database, eventId);
+      const printQueued = envelope.type === 'event' && envelope.printQueued === true;
+      const events =
+        envelope.type === 'event'
+          ? [envelope.event]
+          : envelope.type === 'sync' && Array.isArray(envelope.events)
+            ? envelope.events
+            : null;
+      if (events === null) {
+        return {
+          accepted: true,
+          printQueued: false,
+          caughtUp: true,
+          cursor: this.#getInboxCursor(database, eventId),
+        };
+      }
+      return { ...this.#applyJournalEnvelope(database, eventId, deviceId, envelope, events), printQueued };
+    } catch {
+      return this.#rejectedStreamMessage(database, eventId);
+    }
+  }
+
+  #rejectedStreamMessage(database: DatabaseContext, eventId: string): StreamMessageResult {
+    return {
+      accepted: false,
+      printQueued: false,
+      caughtUp: false,
+      cursor: this.#getInboxCursor(database, eventId),
+    };
+  }
+
+  #applyJournalEnvelope(
+    database: DatabaseContext,
+    eventId: string,
+    deviceId: string,
+    envelope: Record<string, unknown>,
+    events: readonly unknown[],
+  ): Omit<StreamMessageResult, 'printQueued'> {
+    const journalEvents = events.filter(isRemoteJournalEvent);
+    if (journalEvents.length !== events.length) return this.#rejectedStreamMessage(database, eventId);
+
+    const cursor = this.#getInboxCursor(database, eventId);
+    const newEvents = journalEvents.filter((event) => event.sequence > cursor);
+    const currentSequence = integerField(envelope, 'currentSequence');
+    if (newEvents.length === 0) {
+      return {
+        accepted: currentSequence === null || currentSequence <= cursor,
+        caughtUp: currentSequence === null || currentSequence <= cursor,
+        cursor,
+      };
+    }
+    if (newEvents[0]?.sequence !== cursor + 1) return this.#rejectedStreamMessage(database, eventId);
+    for (let index = 1; index < newEvents.length; index += 1) {
+      const previous = newEvents[index - 1];
+      const current = newEvents[index];
+      if (previous === undefined || current?.sequence !== previous.sequence + 1) {
+        return this.#rejectedStreamMessage(database, eventId);
+      }
+    }
+    this.#storeRemoteJournalEvents(database, eventId, newEvents);
+    this.#applyInbox(database, deviceId);
+    const nextCursor = this.#getInboxCursor(database, eventId);
+    return {
+      accepted: true,
+      caughtUp: currentSequence === null || nextCursor >= currentSequence,
+      cursor: nextCursor,
+    };
+  }
+
+  async #reconcileEventJournal(
+    database: DatabaseContext,
+    eventId: string,
+    deviceId: string,
+    pairingKey: string,
+  ): Promise<void> {
+    // Limit one pass so a damaged or unexpectedly large log cannot monopolize the
+    // desktop process. The next regular replication pass resumes at the durable cursor.
+    for (let batch = 0; batch < 25; batch += 1) {
+      const cursor = this.#getInboxCursor(database, eventId);
+      const response = await fetch(
+        `${this.#endpoint}/v1/events/${encodeURIComponent(eventId)}/snapshot?after=${String(cursor)}`,
+        {
+          headers: await this.#cloudHeaders(pairingKey),
+          signal: AbortSignal.timeout(CONNECTION_TIMEOUT_MS),
+        },
+      );
+      if (!response.ok) {
+        throw new Error(`A central não concluiu a recuperação do diário (${String(response.status)}).`);
+      }
+      const payload: unknown = await response.json();
+      if (!isRecord(payload) || !Array.isArray(payload.events)) {
+        throw new Error('A central enviou um diário de sincronização inválido.');
+      }
+      const result = this.#applyJournalEnvelope(
+        database,
+        eventId,
+        deviceId,
+        payload,
+        payload.events,
+      );
+      if (!result.accepted) {
+        throw new Error('O diário remoto possui uma lacuna de sequência.');
+      }
+      if (result.caughtUp) {
+        database.sqlite
+          .prepare(
+            `INSERT INTO sync_state (key, value, updated_at) VALUES (?, ?, ?)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+          )
+          .run(`replica.reconciled:${eventId}`, String(result.cursor), Date.now());
+        return;
+      }
+      if (result.cursor <= cursor) {
+        throw new Error('A central não avançou o cursor de sincronização.');
+      }
+    }
+    throw new Error('A recuperação local ainda possui muitos registros pendentes.');
+  }
+
+  #scheduleEventReconnect(
+    database: DatabaseContext,
+    eventId: string,
+    deviceId: string,
+    pairingKey: string,
+  ): void {
+    if (!this.#replicationRunning) return;
+    if (this.#eventReconnectTimers.has(eventId)) return;
+    const delay = this.#eventReconnectDelays.get(eventId) ?? 1_000;
+    this.#eventReconnectDelays.set(eventId, Math.min(delay * 2, STREAM_RECONNECT_MAX_MS));
+    const timer = setTimeout(() => {
+      this.#eventReconnectTimers.delete(eventId);
+      const activeEventId = getSessionState(database).activeEvent?.id ?? null;
+      if (eventId !== CATALOG_EVENT_ID && eventId !== activeEventId) return;
+      this.#ensureEventStream(database, eventId, deviceId, pairingKey, activeEventId);
+    }, delay);
+    this.#eventReconnectTimers.set(eventId, timer);
   }
 
   #getInboxCursor(database: DatabaseContext, eventId: string): number {
@@ -760,6 +1971,14 @@ export class CloudSyncService {
       .get(`inbox.sequence:${eventId}`) as { readonly value: string } | undefined;
     const cursor = cursorRow === undefined ? 0 : Number(cursorRow.value);
     return Number.isSafeInteger(cursor) && cursor >= 0 ? cursor : 0;
+  }
+
+  #needsInitialJournalRecovery(database: DatabaseContext, eventId: string): boolean {
+    return (
+      database.sqlite
+        .prepare('SELECT 1 FROM sync_state WHERE key = ?')
+        .get(`replica.reconciled:${eventId}`) === undefined
+    );
   }
 
   #storeRemoteJournalEvents(
@@ -791,44 +2010,6 @@ export class CloudSyncService {
     })();
   }
 
-  async #pullRemoteJournal(
-    database: DatabaseContext,
-    pairingKey: string,
-    activeEventId: string | null,
-    deviceId: string,
-  ): Promise<void> {
-    const syncedEvents = database.sqlite
-      .prepare(
-        `SELECT DISTINCT event_id FROM sync_outbox
-         WHERE status = 'accepted' ORDER BY event_id ASC`,
-      )
-      .all() as { readonly event_id: string }[];
-    const eventIds = new Set(syncedEvents.map((event) => event.event_id));
-    eventIds.add(CATALOG_EVENT_ID);
-    if (activeEventId !== null) eventIds.add(activeEventId);
-
-    for (const eventId of eventIds) {
-      const after = this.#getInboxCursor(database, eventId);
-      const response = await fetch(
-        `${this.#endpoint}/v1/events/${encodeURIComponent(eventId)}/snapshot?after=${String(after)}`,
-        {
-          headers: { 'X-GTRZ-Key': pairingKey },
-          signal: AbortSignal.timeout(CONNECTION_TIMEOUT_MS),
-        },
-      );
-      if (!response.ok) continue;
-
-      const snapshot: unknown = await response.json();
-      if (!isRecord(snapshot) || !Array.isArray(snapshot.events)) continue;
-      const journalEvents = snapshot.events.filter(isRemoteJournalEvent);
-      if (journalEvents.length === 0) continue;
-
-      this.#storeRemoteJournalEvents(database, eventId, journalEvents);
-    }
-
-    this.#applyInbox(database, deviceId);
-  }
-
   #applyInbox(database: DatabaseContext, deviceId: string): void {
     const pending = database.sqlite
       .prepare(
@@ -843,6 +2024,9 @@ export class CloudSyncService {
       `INSERT OR IGNORE INTO sync_conflicts
        (command_id, event_id, sequence, action, entity_id, reason, payload_json, created_at, resolved_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
+    );
+    const resolveConflict = database.sqlite.prepare(
+      'UPDATE sync_conflicts SET resolved_at = ? WHERE command_id = ? AND resolved_at IS NULL',
     );
 
     for (const row of pending) {
@@ -879,11 +2063,12 @@ export class CloudSyncService {
         database.sqlite.transaction(() => {
           this.#applyRemoteAction(database, row.event_id, payload);
           markProcessed.run(Date.now(), row.event_id, row.sequence);
+          resolveConflict.run(Date.now(), row.command_id);
         })();
         this.#onDataChanged();
       } catch (error: unknown) {
         const reason = error instanceof Error ? error.message.slice(0, 240) : 'Falha desconhecida.';
-        recordConflict.run(
+        const conflict = recordConflict.run(
           row.command_id,
           row.event_id,
           row.sequence,
@@ -893,15 +2078,16 @@ export class CloudSyncService {
           row.payload_json,
           Date.now(),
         );
-        this.#reportConflict({
-          commandId: row.command_id,
-          eventId: row.event_id,
-          deviceId,
-          action: payload.action,
-          entityId: payload.entityId,
-          reason,
-        });
-        markProcessed.run(Date.now(), row.event_id, row.sequence);
+        if (conflict.changes > 0) {
+          this.#reportConflict({
+            commandId: row.command_id,
+            eventId: row.event_id,
+            deviceId,
+            action: payload.action,
+            entityId: payload.entityId,
+            reason,
+          });
+        }
       }
     }
 
@@ -961,17 +2147,85 @@ export class CloudSyncService {
       return;
     }
 
+    if (payload.action === 'event.renamed') {
+      const name = stringField(payload.details, 'after');
+      if (payload.entityId === null || name === null)
+        throw new Error('Renomeação remota de evento incompleta.');
+      database.sqlite
+        .prepare('UPDATE events SET name = ?, updated_at = ? WHERE id = ?')
+        .run(name, payload.createdAt, payload.entityId);
+      return;
+    }
+
+    if (
+      payload.action === 'event.open' ||
+      payload.action === 'event.closed' ||
+      payload.action === 'event.archived'
+    ) {
+      if (payload.entityId === null)
+        throw new Error('Alteração remota de evento sem identificador.');
+      const status = payload.action.slice('event.'.length);
+      database.sqlite
+        .prepare('UPDATE events SET status = ?, ends_at = ?, updated_at = ? WHERE id = ?')
+        .run(
+          status,
+          status === 'closed' ? payload.createdAt : null,
+          payload.createdAt,
+          payload.entityId,
+        );
+      return;
+    }
+
+    if (payload.action === 'event.deleted-permanently') {
+      if (payload.entityId === null)
+        throw new Error('Exclusão remota de evento sem identificador.');
+      const event = database.sqlite
+        .prepare('SELECT id, name FROM events WHERE id = ?')
+        .get(payload.entityId) as { readonly id: string; readonly name: string } | undefined;
+      if (event === undefined) return;
+      resetEventData(database, {
+        eventId: event.id,
+        confirmationName: event.name,
+        reason: stringField(payload.details, 'reason') ?? 'Exclusão remota do evento.',
+        system: true,
+      });
+      database.sqlite.prepare('DELETE FROM events WHERE id = ?').run(event.id);
+      return;
+    }
+
     if (payload.action === 'inventory.category-created') {
       const name = stringField(payload.details, 'name');
-      if (payload.entityId === null || name === null) {
+      const engine = stringField(payload.details, 'engine');
+      if (
+        payload.entityId === null ||
+        name === null ||
+        (engine !== 'catalog' && engine !== 'food')
+      ) {
         throw new Error('Dados insuficientes para criar a categoria remota.');
       }
       database.sqlite
         .prepare(
-          `INSERT OR IGNORE INTO product_categories (id, name, active, created_at, updated_at)
-           VALUES (?, ?, 1, ?, ?)`,
+          `INSERT OR IGNORE INTO product_categories (id, name, active, engine, created_at, updated_at)
+           VALUES (?, ?, 1, ?, ?, ?)`,
         )
-        .run(payload.entityId, name, payload.createdAt, payload.createdAt);
+        .run(payload.entityId, name, engine, payload.createdAt, payload.createdAt);
+      return;
+    }
+
+    if (payload.action === 'inventory.category-updated') {
+      const name = stringField(payload.details, 'name');
+      if (payload.entityId === null || name === null)
+        throw new Error('Atualização remota de categoria incompleta.');
+      database.sqlite
+        .prepare('UPDATE product_categories SET name = ?, updated_at = ? WHERE id = ?')
+        .run(name, payload.createdAt, payload.entityId);
+      return;
+    }
+
+    if (payload.action === 'inventory.category-deleted') {
+      if (payload.entityId === null)
+        throw new Error('Exclusão remota de categoria sem identificador.');
+      database.sqlite.prepare('DELETE FROM product_categories WHERE id = ?').run(payload.entityId);
       return;
     }
 
@@ -1012,6 +2266,284 @@ export class CloudSyncService {
           payload.createdAt,
           payload.createdAt,
         );
+      if (typeof payload.details.fallbackIcon === 'string') {
+        database.sqlite
+          .prepare(
+            `INSERT INTO app_meta (key, value, updated_at) VALUES (?, ?, ?)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+          )
+          .run(`product.icon:${payload.entityId}`, payload.details.fallbackIcon, payload.createdAt);
+      }
+      if (typeof payload.details.imageDataUrl === 'string') {
+        database.sqlite
+          .prepare(
+            `INSERT INTO app_meta (key, value, updated_at) VALUES (?, ?, ?)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+          )
+          .run(
+            `product.image:${payload.entityId}`,
+            payload.details.imageDataUrl,
+            payload.createdAt,
+          );
+      }
+      return;
+    }
+
+    if (payload.action === 'inventory.product-updated') {
+      const after = isRecord(payload.details.after) ? payload.details.after : null;
+      if (payload.entityId === null || after === null)
+        throw new Error('Atualização remota de produto incompleta.');
+      const categoryId = stringField(after, 'categoryId');
+      const name = stringField(after, 'name');
+      const kind = stringField(after, 'kind');
+      const costCents = integerField(after, 'costCents');
+      const salePriceCents = integerField(after, 'salePriceCents');
+      const lowStockThreshold = integerField(after, 'lowStockThreshold');
+      const active = after.active;
+      if (
+        categoryId === null ||
+        name === null ||
+        (kind !== 'food' && kind !== 'drink') ||
+        costCents === null ||
+        salePriceCents === null ||
+        lowStockThreshold === null ||
+        typeof active !== 'boolean'
+      )
+        throw new Error('Dados inválidos na atualização remota de produto.');
+      database.sqlite
+        .prepare(
+          `UPDATE products
+           SET category_id = ?, name = ?, kind = ?, cost_cents = ?, sale_price_cents = ?,
+               low_stock_threshold = ?, combo_only = ?, active = ?, updated_at = ?
+           WHERE id = ?`,
+        )
+        .run(
+          categoryId,
+          name,
+          kind,
+          costCents,
+          salePriceCents,
+          lowStockThreshold,
+          after.comboOnly === true ? 1 : 0,
+          active ? 1 : 0,
+          payload.createdAt,
+          payload.entityId,
+        );
+      if (typeof after.fallbackIcon === 'string') {
+        database.sqlite
+          .prepare(
+            `INSERT INTO app_meta (key, value, updated_at) VALUES (?, ?, ?)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+          )
+          .run(`product.icon:${payload.entityId}`, after.fallbackIcon, payload.createdAt);
+      }
+      if (after.imageDataUrl === null) {
+        database.sqlite
+          .prepare('DELETE FROM app_meta WHERE key = ?')
+          .run(`product.image:${payload.entityId}`);
+      } else if (typeof after.imageDataUrl === 'string') {
+        database.sqlite
+          .prepare(
+            `INSERT INTO app_meta (key, value, updated_at) VALUES (?, ?, ?)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+          )
+          .run(`product.image:${payload.entityId}`, after.imageDataUrl, payload.createdAt);
+      }
+      return;
+    }
+
+    if (payload.action === 'combo.deleted') {
+      if (payload.entityId === null) throw new Error('Exclusão remota de combo sem identificador.');
+      database.sqlite
+        .prepare('DELETE FROM food_combo_sale_settlements WHERE combo_id = ?')
+        .run(payload.entityId);
+      database.sqlite.prepare('DELETE FROM food_combo_terms WHERE combo_id = ?').run(payload.entityId);
+      database.sqlite.prepare('DELETE FROM combo_components WHERE combo_id = ?').run(payload.entityId);
+      database.sqlite.prepare('DELETE FROM combos WHERE id = ?').run(payload.entityId);
+      return;
+    }
+
+    if (payload.action === 'combo.created' || payload.action === 'combo.updated') {
+      const details =
+        payload.action === 'combo.created'
+          ? payload.details
+          : isRecord(payload.details.after)
+            ? payload.details.after
+            : null;
+      if (payload.entityId === null || details === null)
+        throw new Error('Dados remotos do combo estão incompletos.');
+      const name = stringField(details, 'name');
+      const kind = stringField(details, 'kind') ?? 'drink';
+      const salePriceCents = integerField(details, 'salePriceCents');
+      const active = payload.action === 'combo.created' ? true : details.active;
+      const components = details.components;
+      if (
+        name === null ||
+        (kind !== 'food' && kind !== 'drink') ||
+        salePriceCents === null ||
+        salePriceCents < 0 ||
+        typeof active !== 'boolean' ||
+        !Array.isArray(components) ||
+        components.length === 0
+      ) {
+        throw new Error('Dados remotos do combo são inválidos.');
+      }
+      const normalized = components.map((component, index) => {
+        if (!isRecord(component)) throw new Error('Componente remoto de combo inválido.');
+        const productId = stringField(component, 'productId');
+        const quantity = integerField(component, 'quantity');
+        const choiceGroup = component.choiceGroup === undefined ? null : component.choiceGroup;
+        const choiceLabel = component.choiceLabel === undefined ? null : component.choiceLabel;
+        const sortOrder = component.sortOrder === undefined ? index : integerField(component, 'sortOrder');
+        if (
+          productId === null ||
+          quantity === null ||
+          quantity <= 0 ||
+          (choiceGroup !== null && typeof choiceGroup !== 'string') ||
+          (choiceLabel !== null && typeof choiceLabel !== 'string') ||
+          (choiceGroup === null) !== (choiceLabel === null)
+          || sortOrder === null || sortOrder < 0
+        ) {
+          throw new Error('Componente remoto de combo inválido.');
+        }
+        const product = database.sqlite
+          .prepare('SELECT id FROM products WHERE id = ?')
+          .get(productId);
+        if (product === undefined)
+          throw new Error('Componente do combo ainda não existe neste computador.');
+        return { productId, quantity, choiceGroup, choiceLabel, sortOrder };
+      });
+      const externalFoodTerms = details.externalFoodTerms;
+      if (
+        externalFoodTerms !== undefined &&
+        (!isRecord(externalFoodTerms) ||
+          kind !== 'food' ||
+          stringField(externalFoodTerms, 'supplierId') === null ||
+          integerField(externalFoodTerms, 'supplierUnitCents') === null ||
+          integerField(externalFoodTerms, 'commissionUnitCents') === null)
+      ) {
+        throw new Error('Condições remotas do combo de comida são inválidas.');
+      }
+      database.sqlite
+        .prepare(
+          `INSERT INTO combos (id, name, kind, sale_price_cents, active, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(id) DO UPDATE SET name = excluded.name, kind = excluded.kind, sale_price_cents = excluded.sale_price_cents,
+             active = excluded.active, updated_at = excluded.updated_at`,
+        )
+        .run(
+          payload.entityId,
+          name,
+          kind,
+          salePriceCents,
+          active ? 1 : 0,
+          payload.createdAt,
+          payload.createdAt,
+        );
+      database.sqlite
+        .prepare('DELETE FROM combo_components WHERE combo_id = ?')
+        .run(payload.entityId);
+      const insert = database.sqlite.prepare(
+        `INSERT INTO combo_components
+         (id, combo_id, product_id, quantity, choice_group, choice_label, sort_order)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      );
+      for (const component of normalized) {
+        insert.run(
+          randomUUID(),
+          payload.entityId,
+          component.productId,
+          component.quantity,
+          component.choiceGroup,
+          component.choiceLabel,
+          component.sortOrder,
+        );
+      }
+      database.sqlite.prepare('DELETE FROM food_combo_terms WHERE combo_id = ?').run(payload.entityId);
+      if (isRecord(externalFoodTerms)) {
+        const supplierId = stringField(externalFoodTerms, 'supplierId');
+        const supplierUnitCents = integerField(externalFoodTerms, 'supplierUnitCents');
+        const commissionUnitCents = integerField(externalFoodTerms, 'commissionUnitCents');
+        database.sqlite
+          .prepare(
+            `INSERT INTO food_combo_terms
+             (combo_id, event_id, supplier_id, supplier_unit_cents, commission_unit_cents, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          )
+          .run(
+            payload.entityId,
+            eventId,
+            supplierId,
+            supplierUnitCents,
+            commissionUnitCents,
+            payload.createdAt,
+            payload.createdAt,
+          );
+      }
+      return;
+    }
+
+    if (payload.action === 'inventory.product-deleted') {
+      if (payload.entityId === null)
+        throw new Error('Exclusão remota de produto sem identificador.');
+      const localOpenOrders = database.sqlite
+        .prepare(
+          `SELECT DISTINCT o.id FROM orders o
+           INNER JOIN order_items oi ON oi.order_id = o.id
+           WHERE o.status = 'open' AND (
+             (oi.item_kind = 'product' AND oi.item_id = ?)
+             OR (oi.item_kind = 'combo' AND oi.item_id IN (
+               SELECT combo_id FROM combo_components WHERE product_id = ?
+             ))
+           )`,
+        )
+        .all(payload.entityId, payload.entityId) as { readonly id: string }[];
+      for (const order of localOpenOrders) {
+        database.sqlite
+          .prepare('DELETE FROM order_voucher_allocations WHERE order_id = ?')
+          .run(order.id);
+        database.sqlite
+          .prepare(
+            "UPDATE orders SET status = 'cancelled', closed_at = ?, updated_at = ? WHERE id = ?",
+          )
+          .run(payload.createdAt, payload.createdAt, order.id);
+      }
+      database.sqlite
+        .prepare(
+          'UPDATE combos SET active = 0, updated_at = ? WHERE id IN (SELECT combo_id FROM combo_components WHERE product_id = ?)',
+        )
+        .run(payload.createdAt, payload.entityId);
+      database.sqlite
+        .prepare('DELETE FROM combo_components WHERE product_id = ?')
+        .run(payload.entityId);
+      database.sqlite
+        .prepare('DELETE FROM stock_transfers WHERE product_id = ?')
+        .run(payload.entityId);
+      database.sqlite
+        .prepare(
+          'DELETE FROM stock_purchase_lot_voids WHERE movement_id IN (SELECT movement_id FROM stock_purchase_lots WHERE product_id = ?)',
+        )
+        .run(payload.entityId);
+      database.sqlite
+        .prepare('DELETE FROM stock_purchase_lots WHERE product_id = ?')
+        .run(payload.entityId);
+      database.sqlite
+        .prepare('DELETE FROM food_sale_settlements WHERE product_id = ?')
+        .run(payload.entityId);
+      database.sqlite
+        .prepare('DELETE FROM food_product_terms WHERE product_id = ?')
+        .run(payload.entityId);
+      database.sqlite
+        .prepare('DELETE FROM order_item_component_allocations WHERE product_id = ?')
+        .run(payload.entityId);
+      database.sqlite
+        .prepare('DELETE FROM stock_movements WHERE product_id = ?')
+        .run(payload.entityId);
+      database.sqlite.prepare('DELETE FROM event_stock WHERE product_id = ?').run(payload.entityId);
+      database.sqlite
+        .prepare('DELETE FROM app_meta WHERE key IN (?, ?)')
+        .run(`product.image:${payload.entityId}`, `product.icon:${payload.entityId}`);
+      database.sqlite.prepare('DELETE FROM products WHERE id = ?').run(payload.entityId);
       return;
     }
 
@@ -1043,18 +2575,47 @@ export class CloudSyncService {
       return;
     }
 
+    if (payload.action === 'food.supplier-updated') {
+      const name = stringField(payload.details, 'name');
+      if (payload.entityId === null || name === null)
+        throw new Error('Atualização remota de fornecedor incompleta.');
+      database.sqlite
+        .prepare('UPDATE food_suppliers SET name = ?, updated_at = ? WHERE id = ? AND event_id = ?')
+        .run(name, payload.createdAt, payload.entityId, eventId);
+      return;
+    }
+
+    if (payload.action === 'food.supplier-archived') {
+      if (payload.entityId === null)
+        throw new Error('Arquivamento remoto de fornecedor sem identificador.');
+      database.sqlite
+        .prepare(
+          'UPDATE food_suppliers SET active = 0, updated_at = ? WHERE id = ? AND event_id = ?',
+        )
+        .run(payload.createdAt, payload.entityId, eventId);
+      return;
+    }
+
+    if (payload.action === 'food.supplier-deleted') {
+      if (payload.entityId === null)
+        throw new Error('Exclusão remota de fornecedor sem identificador.');
+      database.sqlite
+        .prepare('DELETE FROM food_suppliers WHERE id = ? AND event_id = ?')
+        .run(payload.entityId, eventId);
+      return;
+    }
+
     if (payload.action === 'food.external-item-created') {
       const supplierId = stringField(payload.details, 'supplierId');
       const supplierUnitCents = integerField(payload.details, 'supplierUnitCents');
       const commissionUnitCents = integerField(payload.details, 'commissionUnitCents');
-      if (
-        payload.entityId === null ||
-        supplierId === null ||
-        supplierUnitCents === null ||
-        commissionUnitCents === null
-      ) {
+      const comboOnly = payload.details.comboOnly === true;
+      if (payload.entityId === null) {
         throw new Error('Item externo de comida remoto inválido.');
       }
+      if (comboOnly) return;
+      if (supplierId === null || supplierUnitCents === null || commissionUnitCents === null)
+        throw new Error('Item externo de comida remoto inválido.');
       database.sqlite
         .prepare(
           `INSERT OR IGNORE INTO food_product_terms
@@ -1142,6 +2703,62 @@ export class CloudSyncService {
       return;
     }
 
+    if (payload.action === 'inventory.stock-rejected') {
+      const productId = stringField(payload.details, 'productId');
+      const quantity = integerField(payload.details, 'quantity');
+      const originalDelta = integerField(payload.details, 'delta');
+      const reason = stringField(payload.details, 'reason');
+      if (
+        payload.entityId === null ||
+        productId === null ||
+        quantity === null ||
+        quantity <= 0 ||
+        originalDelta === null ||
+        originalDelta >= 0 ||
+        Math.abs(originalDelta) !== quantity
+      ) {
+        throw new Error('A rejeição central do estoque é inválida.');
+      }
+      const alreadyApplied = database.sqlite
+        .prepare('SELECT id FROM stock_movements WHERE id = ?')
+        .get(payload.entityId);
+      if (alreadyApplied !== undefined) return;
+      const productExists = database.sqlite
+        .prepare('SELECT id FROM products WHERE id = ?')
+        .get(productId);
+      if (productExists === undefined) {
+        throw new Error('O produto rejeitado pela central não existe neste computador.');
+      }
+      const current = database.sqlite
+        .prepare('SELECT quantity FROM event_stock WHERE event_id = ? AND product_id = ?')
+        .get(eventId, productId) as { readonly quantity: number } | undefined;
+      const restoredQuantity = (current?.quantity ?? 0) + quantity;
+      database.sqlite
+        .prepare(
+          `INSERT INTO event_stock (event_id, product_id, quantity, updated_at)
+           VALUES (?, ?, ?, ?)
+           ON CONFLICT(event_id, product_id) DO UPDATE SET
+             quantity = excluded.quantity, updated_at = excluded.updated_at`,
+        )
+        .run(eventId, productId, restoredQuantity, payload.createdAt);
+      database.sqlite
+        .prepare(
+          `INSERT INTO stock_movements
+           (id, event_id, product_id, type, quantity, delta, note, created_at)
+           VALUES (?, ?, ?, 'correction-positive', ?, ?, ?, ?)`,
+        )
+        .run(
+          payload.entityId,
+          eventId,
+          productId,
+          quantity,
+          quantity,
+          reason ?? 'Movimento rejeitado pela central de sincronização.',
+          payload.createdAt,
+        );
+      return;
+    }
+
     if (payload.action === 'inventory.purchase-lot-corrected') {
       const totalCostCents = integerField(payload.details, 'totalCostCents');
       if (payload.entityId === null || totalCostCents === null || totalCostCents <= 0) {
@@ -1217,6 +2834,67 @@ export class CloudSyncService {
       return;
     }
 
+    if (payload.action === 'operations.service-point-renamed') {
+      const label = stringField(payload.details, 'label');
+      if (payload.entityId === null || label === null)
+        throw new Error('Renomeação remota de mesa incompleta.');
+      database.sqlite
+        .prepare(
+          'UPDATE service_points SET label = ?, updated_at = ? WHERE id = ? AND event_id = ?',
+        )
+        .run(label, payload.createdAt, payload.entityId, eventId);
+      database.sqlite
+        .prepare(
+          `UPDATE orders SET service_point_label = ?, updated_at = ?
+           WHERE service_point_id = ? AND status = 'open'`,
+        )
+        .run(label, payload.createdAt, payload.entityId);
+      return;
+    }
+
+    if (payload.action === 'operations.service-point-pinned') {
+      if (payload.entityId === null || typeof payload.details.pinned !== 'boolean')
+        throw new Error('Fixação remota de mesa incompleta.');
+      const key = `service-point.pinned:${payload.entityId}`;
+      if (payload.details.pinned) {
+        database.sqlite
+          .prepare(
+            `INSERT INTO app_meta (key, value, updated_at) VALUES (?, '1', ?)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+          )
+          .run(key, payload.createdAt);
+      } else {
+        database.sqlite.prepare('DELETE FROM app_meta WHERE key = ?').run(key);
+      }
+      return;
+    }
+
+    if (payload.action === 'operations.service-point-deleted') {
+      if (payload.entityId === null) throw new Error('Exclusão remota de mesa sem identificador.');
+      database.sqlite
+        .prepare(
+          `DELETE FROM order_voucher_allocations
+           WHERE order_id IN (
+             SELECT id FROM orders WHERE service_point_id = ? AND status = 'open'
+           )`,
+        )
+        .run(payload.entityId);
+      database.sqlite
+        .prepare(
+          "UPDATE orders SET status = 'cancelled', closed_at = ?, updated_at = ? WHERE service_point_id = ? AND status = 'open'",
+        )
+        .run(payload.createdAt, payload.createdAt, payload.entityId);
+      database.sqlite
+        .prepare(
+          'UPDATE service_points SET active = 0, updated_at = ? WHERE id = ? AND event_id = ?',
+        )
+        .run(payload.createdAt, payload.entityId, eventId);
+      database.sqlite
+        .prepare('DELETE FROM app_meta WHERE key = ?')
+        .run(`service-point.pinned:${payload.entityId}`);
+      return;
+    }
+
     if (payload.action === 'operations.order-paid') {
       this.#applyRemotePaidOrder(database, eventId, payload);
       return;
@@ -1259,17 +2937,28 @@ export class CloudSyncService {
       return;
     }
 
+    if (payload.action.startsWith('voucher.')) {
+      this.#applyRemoteVoucher(database, eventId, payload);
+      return;
+    }
+
     throw new Error(`Ação remota ainda não possui aplicador: ${payload.action}.`);
   }
 
   #applyRemotePaidOrder(database: DatabaseContext, eventId: string, payload: JournalPayload): void {
     const order = isRecord(payload.details.order) ? payload.details.order : null;
-    const items = Array.isArray(payload.details.items) ? payload.details.items : null;
-    const payments = Array.isArray(payload.details.payments) ? payload.details.payments : null;
-    const movements = Array.isArray(payload.details.stockMovements)
+    const items: readonly unknown[] | null = Array.isArray(payload.details.items)
+      ? payload.details.items
+      : null;
+    const payments: readonly unknown[] | null = Array.isArray(payload.details.payments)
+      ? payload.details.payments
+      : null;
+    const movements: readonly unknown[] | null = Array.isArray(payload.details.stockMovements)
       ? payload.details.stockMovements
       : null;
-    const vouchers = Array.isArray(payload.details.vouchers) ? payload.details.vouchers : null;
+    const vouchers: readonly unknown[] | null = Array.isArray(payload.details.vouchers)
+      ? payload.details.vouchers
+      : null;
     const subtotalCents = integerField(payload.details, 'subtotalCents');
     const discountCents = integerField(payload.details, 'discountCents');
     const totalCents = integerField(payload.details, 'totalCents');
@@ -1285,12 +2974,11 @@ export class CloudSyncService {
     ) {
       throw new Error('A venda remota não contém sua transação completa.');
     }
-    if (vouchers.length > 0) {
-      throw new Error('Venda remota com voucher aguarda aplicador transacional de voucher.');
-    }
     const orderId = stringField(order, 'id');
     const servicePointId = stringField(order, 'servicePointId');
     const servicePointLabel = stringField(order, 'servicePointLabel');
+    const rawServicePointType = stringField(order, 'servicePointType');
+    const servicePointType = rawServicePointType === 'table' ? 'table' : 'counter';
     const openedAt = integerField(order, 'openedAt');
     if (
       orderId === null ||
@@ -1299,6 +2987,25 @@ export class CloudSyncService {
       openedAt === null
     ) {
       throw new Error('A venda remota não identifica a comanda.');
+    }
+    const voucherUses = vouchers.map((raw) => {
+      if (!isRecord(raw)) throw new Error('Uso remoto de voucher inválido.');
+      const code = stringField(raw, 'code');
+      const amountCents = integerField(raw, 'amountCents');
+      if (code === null || amountCents === null || amountCents <= 0)
+        throw new Error('Uso remoto de voucher incompleto.');
+      return { code, amountCents };
+    });
+    const paymentCents = payments.reduce<number>(
+      (total, raw) => total + (isRecord(raw) ? (integerField(raw, 'amountCents') ?? 0) : 0),
+      0,
+    );
+    const voucherCents = voucherUses.reduce<number>(
+      (total, voucher) => total + voucher.amountCents,
+      0,
+    );
+    if (paymentCents + voucherCents !== totalCents) {
+      throw new Error('Os pagamentos e vouchers remotos não somam o total da venda.');
     }
     if (database.sqlite.prepare('SELECT id FROM orders WHERE id = ?').get(orderId) !== undefined)
       return;
@@ -1310,22 +3017,29 @@ export class CloudSyncService {
       database.sqlite.prepare('SELECT id FROM service_points WHERE id = ?').get(servicePointId) ===
       undefined
     ) {
-      const localCounter = database.sqlite
+      const matchingPoint = database.sqlite
         .prepare(
           `SELECT id FROM service_points
-           WHERE event_id = ? AND type = 'counter' AND active = 1
+           WHERE event_id = ? AND label = ? COLLATE NOCASE AND type = ? AND active = 1
            ORDER BY created_at LIMIT 1`,
         )
-        .get(eventId) as { readonly id: string } | undefined;
-      if (localCounter !== undefined) {
-        localServicePointId = localCounter.id;
+        .get(eventId, servicePointLabel, servicePointType) as { readonly id: string } | undefined;
+      if (matchingPoint !== undefined) {
+        localServicePointId = matchingPoint.id;
       } else {
         database.sqlite
           .prepare(
             `INSERT INTO service_points (id, event_id, label, type, active, created_at, updated_at)
-             VALUES (?, ?, ?, 'counter', 1, ?, ?)`,
+             VALUES (?, ?, ?, ?, 1, ?, ?)`,
           )
-          .run(servicePointId, eventId, servicePointLabel, openedAt, payload.createdAt);
+          .run(
+            servicePointId,
+            eventId,
+            servicePointLabel,
+            servicePointType,
+            openedAt,
+            payload.createdAt,
+          );
       }
     }
     const parsedMovements = movements.map((raw) => {
@@ -1374,11 +3088,18 @@ export class CloudSyncService {
         payload.createdAt,
         payload.createdAt,
       );
+    redeemVouchers(database, eventId, orderId, voucherUses, payload.createdAt);
     const insertItem = database.sqlite.prepare(
       `INSERT INTO order_items
-       (id, order_id, item_kind, item_id, item_name, quantity, unit_price_cents, total_cents, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       (id, order_id, item_kind, item_id, item_name, configuration_key, quantity, unit_price_cents, total_cents, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
+    const insertComponentAllocation = database.sqlite.prepare(
+      `INSERT INTO order_item_component_allocations
+       (id, order_item_id, product_id, choice_group, choice_label, quantity, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    );
+    const remoteComboItems: { readonly comboId: string; readonly quantity: number }[] = [];
     for (const raw of items) {
       if (!isRecord(raw)) throw new Error('Item de venda remoto inválido.');
       const id = stringField(raw, 'id');
@@ -1398,17 +3119,72 @@ export class CloudSyncService {
         (itemKind !== 'product' && itemKind !== 'combo')
       )
         throw new Error('Item de venda remoto incompleto.');
+      const configurationKey =
+        itemKind === 'combo' && Array.isArray(raw.componentAllocations)
+          ? JSON.stringify(
+              raw.componentAllocations
+                .filter(isRecord)
+                .map((allocation) => ({
+                  choiceGroup: allocation.choiceGroup,
+                  productId: allocation.productId,
+                  quantity: allocation.quantity,
+                }))
+                .sort((left, right) =>
+                  `${String(left.choiceGroup)}:${String(left.productId)}`.localeCompare(
+                    `${String(right.choiceGroup)}:${String(right.productId)}`,
+                  ),
+                ),
+            )
+          : '';
       insertItem.run(
         id,
         orderId,
         itemKind,
         itemId,
         itemName,
+        configurationKey,
         quantity,
         unitPriceCents,
         itemTotal,
         payload.createdAt,
       );
+      if (itemKind === 'combo') remoteComboItems.push({ comboId: itemId, quantity });
+      if (Array.isArray(raw.componentAllocations)) {
+        for (const rawAllocation of raw.componentAllocations) {
+          if (!isRecord(rawAllocation)) throw new Error('Componente remoto inválido.');
+          const productId = stringField(rawAllocation, 'productId');
+          const choiceGroup =
+            rawAllocation.choiceGroup === null ? null : stringField(rawAllocation, 'choiceGroup');
+          const choiceLabel =
+            rawAllocation.choiceLabel === null || rawAllocation.choiceLabel === undefined
+              ? null
+              : stringField(rawAllocation, 'choiceLabel');
+          const allocationQuantity = integerField(rawAllocation, 'quantity');
+          if (
+            productId === null ||
+            allocationQuantity === null ||
+            allocationQuantity <= 0 ||
+            (choiceGroup === null) !== (choiceLabel === null)
+          ) {
+            throw new Error('Componente remoto incompleto.');
+          }
+          if (
+            database.sqlite.prepare('SELECT id FROM products WHERE id = ?').get(productId) ===
+            undefined
+          ) {
+            throw new Error('O componente remoto ainda não existe neste computador.');
+          }
+          insertComponentAllocation.run(
+            randomUUID(),
+            id,
+            productId,
+            choiceGroup,
+            choiceLabel,
+            allocationQuantity,
+            payload.createdAt,
+          );
+        }
+      }
     }
     const insertPayment = database.sqlite.prepare(
       `INSERT INTO payments (id, order_id, method, amount_cents, received_cents, change_cents, fee_rate_basis_points, fee_cents, created_at)
@@ -1505,6 +3281,34 @@ export class CloudSyncService {
         orderId,
         movement.productId,
         movement.quantity,
+        supplierCents + commissionCents,
+        supplierCents,
+        commissionCents,
+        payload.createdAt,
+      );
+    }
+    const comboTerm = database.sqlite.prepare(
+      `SELECT supplier_unit_cents, commission_unit_cents
+       FROM food_combo_terms WHERE event_id = ? AND combo_id = ?`,
+    );
+    const insertComboSettlement = database.sqlite.prepare(
+      `INSERT OR IGNORE INTO food_combo_sale_settlements
+       (id, event_id, order_id, combo_id, quantity, received_cents, supplier_cents, commission_cents, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    );
+    for (const item of remoteComboItems) {
+      const term = comboTerm.get(eventId, item.comboId) as
+        | { readonly supplier_unit_cents: number; readonly commission_unit_cents: number }
+        | undefined;
+      if (term === undefined) continue;
+      const supplierCents = term.supplier_unit_cents * item.quantity;
+      const commissionCents = term.commission_unit_cents * item.quantity;
+      insertComboSettlement.run(
+        randomUUID(),
+        eventId,
+        orderId,
+        item.comboId,
+        item.quantity,
         supplierCents + commissionCents,
         supplierCents,
         commissionCents,
@@ -1650,7 +3454,206 @@ export class CloudSyncService {
         .run(payload.createdAt, payload.createdAt, payload.entityId);
       return;
     }
+    if (payload.action === 'expense.deleted') {
+      database.sqlite
+        .prepare('DELETE FROM expense_payments WHERE expense_id = ?')
+        .run(payload.entityId);
+      database.sqlite.prepare('DELETE FROM expenses WHERE id = ?').run(payload.entityId);
+      return;
+    }
     throw new Error(`Ação de despesa sem aplicador: ${payload.action}.`);
+  }
+
+  #applyRemoteVoucher(database: DatabaseContext, eventId: string, payload: JournalPayload): void {
+    if (payload.entityId === null) throw new Error('O voucher remoto não possui identificador.');
+    if (database.sqlite.prepare('SELECT id FROM events WHERE id = ?').get(eventId) === undefined) {
+      throw new Error('O evento do voucher ainda não existe neste computador.');
+    }
+    if (payload.action === 'voucher.created') {
+      const code = stringField(payload.details, 'code');
+      const label = stringField(payload.details, 'label');
+      const initialBalanceCents = integerField(payload.details, 'initialBalanceCents');
+      const servicePointId = stringField(payload.details, 'servicePointId');
+      if (
+        code === null ||
+        label === null ||
+        initialBalanceCents === null ||
+        initialBalanceCents <= 0
+      ) {
+        throw new Error('Dados insuficientes para criar o voucher remoto.');
+      }
+      const exists = database.sqlite
+        .prepare('SELECT id FROM vouchers WHERE id = ?')
+        .get(payload.entityId);
+      if (exists === undefined) {
+        database.sqlite
+          .prepare(
+            `INSERT INTO vouchers
+             (id, event_id, code, label, initial_balance_cents, remaining_balance_cents, status, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?)`,
+          )
+          .run(
+            payload.entityId,
+            eventId,
+            code,
+            label,
+            initialBalanceCents,
+            initialBalanceCents,
+            payload.createdAt,
+            payload.createdAt,
+          );
+        database.sqlite
+          .prepare(
+            `INSERT INTO voucher_transactions
+             (id, event_id, voucher_id, voucher_code, order_id, type, amount_cents, balance_before_cents, balance_after_cents, note, created_at)
+             VALUES (?, ?, ?, ?, NULL, 'issue', ?, 0, ?, ?, ?)`,
+          )
+          .run(
+            randomUUID(),
+            eventId,
+            payload.entityId,
+            code,
+            initialBalanceCents,
+            initialBalanceCents,
+            label,
+            payload.createdAt,
+          );
+      }
+      if (servicePointId !== null) {
+        database.sqlite
+          .prepare(
+            `INSERT INTO app_meta (key, value, updated_at) VALUES (?, ?, ?)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+          )
+          .run(`voucher.service-point:${payload.entityId}`, servicePointId, payload.createdAt);
+      }
+      return;
+    }
+    if (payload.action === 'voucher.service-point-bound') {
+      const servicePointId = stringField(payload.details, 'servicePointId');
+      if (servicePointId === null) throw new Error('Vínculo remoto de voucher incompleto.');
+      database.sqlite
+        .prepare(
+          `INSERT INTO app_meta (key, value, updated_at) VALUES (?, ?, ?)
+           ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+        )
+        .run(`voucher.service-point:${payload.entityId}`, servicePointId, payload.createdAt);
+      return;
+    }
+    if (payload.action === 'voucher.updated') {
+      const code = stringField(payload.details, 'code');
+      const label = stringField(payload.details, 'label');
+      const servicePointId = stringField(payload.details, 'servicePointId');
+      if (code === null || label === null || servicePointId === null)
+        throw new Error('Atualização remota de voucher incompleta.');
+      database.sqlite
+        .prepare(
+          'UPDATE vouchers SET code = ?, label = ?, updated_at = ? WHERE id = ? AND event_id = ?',
+        )
+        .run(code, label, payload.createdAt, payload.entityId, eventId);
+      database.sqlite
+        .prepare(
+          `INSERT INTO app_meta (key, value, updated_at) VALUES (?, ?, ?)
+           ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+        )
+        .run(`voucher.service-point:${payload.entityId}`, servicePointId, payload.createdAt);
+      return;
+    }
+    if (payload.action === 'voucher.balance-added') {
+      const amount = integerField(payload.details, 'amountCents');
+      if (amount === null || amount <= 0) throw new Error('Recarga remota de voucher inválida.');
+      database.sqlite
+        .prepare(
+          `UPDATE vouchers
+           SET initial_balance_cents = initial_balance_cents + ?,
+               remaining_balance_cents = remaining_balance_cents + ?,
+               status = CASE WHEN status = 'cancelled' THEN 'cancelled' ELSE 'active' END,
+               updated_at = ?
+           WHERE id = ? AND event_id = ?`,
+        )
+        .run(amount, amount, payload.createdAt, payload.entityId, eventId);
+      return;
+    }
+    if (payload.action === 'voucher.value-updated') {
+      const initialBalanceCents = integerField(payload.details, 'initialBalanceCents');
+      const remainingBalanceCents = integerField(payload.details, 'remainingBalanceCents');
+      const status = stringField(payload.details, 'status');
+      if (
+        initialBalanceCents === null ||
+        initialBalanceCents <= 0 ||
+        remainingBalanceCents === null ||
+        remainingBalanceCents < 0 ||
+        (status !== 'active' && status !== 'exhausted' && status !== 'cancelled')
+      ) {
+        throw new Error('Correção remota de valor de voucher inválida.');
+      }
+      database.sqlite
+        .prepare(
+          `UPDATE vouchers
+           SET initial_balance_cents = ?, remaining_balance_cents = ?, status = ?, updated_at = ?
+           WHERE id = ? AND event_id = ?`,
+        )
+        .run(
+          initialBalanceCents,
+          remainingBalanceCents,
+          status,
+          payload.createdAt,
+          payload.entityId,
+          eventId,
+        );
+      return;
+    }
+    if (payload.action === 'voucher.cancelled' || payload.action === 'voucher.active') {
+      database.sqlite
+        .prepare('UPDATE vouchers SET status = ?, updated_at = ? WHERE id = ? AND event_id = ?')
+        .run(
+          payload.action === 'voucher.active' ? 'active' : 'cancelled',
+          payload.createdAt,
+          payload.entityId,
+          eventId,
+        );
+      return;
+    }
+    if (payload.action === 'voucher.deleted') {
+      database.sqlite
+        .prepare('DELETE FROM order_voucher_allocations WHERE voucher_id = ?')
+        .run(payload.entityId);
+      database.sqlite
+        .prepare('DELETE FROM voucher_transactions WHERE voucher_id = ?')
+        .run(payload.entityId);
+      database.sqlite
+        .prepare('DELETE FROM app_meta WHERE key IN (?, ?)')
+        .run(`voucher.service-point:${payload.entityId}`, `voucher.deleted-at:${payload.entityId}`);
+      database.sqlite
+        .prepare('DELETE FROM vouchers WHERE id = ? AND event_id = ?')
+        .run(payload.entityId, eventId);
+      return;
+    }
+    if (payload.action === 'voucher.deleted-with-reversal') {
+      database.sqlite
+        .prepare('DELETE FROM order_voucher_allocations WHERE voucher_id = ?')
+        .run(payload.entityId);
+      database.sqlite
+        .prepare(
+          "UPDATE vouchers SET status = 'cancelled', updated_at = ? WHERE id = ? AND event_id = ?",
+        )
+        .run(payload.createdAt, payload.entityId, eventId);
+      database.sqlite
+        .prepare('DELETE FROM app_meta WHERE key = ?')
+        .run(`voucher.service-point:${payload.entityId}`);
+      database.sqlite
+        .prepare(
+          `INSERT INTO app_meta (key, value, updated_at) VALUES (?, ?, ?)
+           ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+        )
+        .run(
+          `voucher.deleted-at:${payload.entityId}`,
+          String(payload.createdAt),
+          payload.createdAt,
+        );
+      return;
+    }
+    throw new Error(`Ação de voucher sem aplicador: ${payload.action}.`);
   }
 
   #applyRemoteCapital(database: DatabaseContext, eventId: string, payload: JournalPayload): void {
@@ -1737,10 +3740,10 @@ export class CloudSyncService {
       .prepare(
         "SELECT product_id, SUM(quantity) AS quantity FROM stock_movements WHERE event_id = ? AND type = 'sale' AND note = ? GROUP BY product_id",
       )
-      .all(eventId, `Venda da comanda ${payload.entityId}`) as Array<{
+      .all(eventId, `Venda da comanda ${payload.entityId}`) as {
       product_id: string;
       quantity: number;
-    }>;
+    }[];
     for (const row of rows) {
       database.sqlite
         .prepare(
@@ -1762,6 +3765,7 @@ export class CloudSyncService {
           payload.createdAt,
         );
     }
+    refundOrderVouchers(database, eventId, payload.entityId, payload.createdAt);
     const refunds = Array.isArray(payload.details.refunds) ? payload.details.refunds : [];
     for (const raw of refunds) {
       if (!isRecord(raw)) continue;
@@ -2009,6 +4013,27 @@ export class CloudSyncService {
       database.sqlite
         .prepare("UPDATE ticket_codes SET status = 'cancelled' WHERE sale_id = ?")
         .run(payload.entityId);
+      return;
+    }
+    if (payload.action === 'ticket.sale-deleted') {
+      database.sqlite.prepare('DELETE FROM ticket_codes WHERE sale_id = ?').run(payload.entityId);
+      database.sqlite
+        .prepare('DELETE FROM ticket_sales WHERE id = ? AND event_id = ?')
+        .run(payload.entityId, eventId);
+      return;
+    }
+    if (payload.action === 'ticket.lot-deleted') {
+      database.sqlite
+        .prepare(
+          'DELETE FROM ticket_codes WHERE sale_id IN (SELECT id FROM ticket_sales WHERE lot_id = ? AND event_id = ?)',
+        )
+        .run(payload.entityId, eventId);
+      database.sqlite
+        .prepare('DELETE FROM ticket_sales WHERE lot_id = ? AND event_id = ?')
+        .run(payload.entityId, eventId);
+      database.sqlite
+        .prepare('DELETE FROM ticket_lots WHERE id = ? AND event_id = ?')
+        .run(payload.entityId, eventId);
       return;
     }
     throw new Error(`Ação de ingresso sem aplicador: ${payload.action}.`);

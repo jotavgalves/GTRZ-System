@@ -428,7 +428,7 @@ export function createInventoryProduct(
         categoryId: input.categoryId,
         costCents: input.costCents,
         fallbackIcon: input.fallbackIcon ?? 'package',
-        hasImage: input.imageDataUrl !== undefined && input.imageDataUrl !== null,
+        imageDataUrl: input.imageDataUrl ?? null,
         kind: input.kind,
         lowStockThreshold: input.lowStockThreshold,
         comboOnly: input.comboOnly === true,
@@ -452,6 +452,9 @@ export function updateInventoryProduct(
   const name = input.name.trim();
   requireUniqueName(database, 'products', name, input.productId);
   const presentation = getProductPresentation(database, input.productId);
+  const imageDataUrl =
+    input.imageDataUrl === undefined ? presentation.imageDataUrl : input.imageDataUrl;
+  const fallbackIcon = input.fallbackIcon ?? presentation.fallbackIcon;
   const now = Date.now();
   database.sqlite.transaction(() => {
     database.sqlite
@@ -474,9 +477,8 @@ export function updateInventoryProduct(
         input.productId,
       );
     setProductPresentation(database, input.productId, {
-      imageDataUrl:
-        input.imageDataUrl === undefined ? presentation.imageDataUrl : input.imageDataUrl,
-      fallbackIcon: input.fallbackIcon ?? presentation.fallbackIcon,
+      imageDataUrl,
+      fallbackIcon,
     });
     appendAudit(database, {
       action: 'inventory.product-updated',
@@ -492,7 +494,18 @@ export function updateInventoryProduct(
           name: current.name,
           salePriceCents: current.sale_price_cents,
         },
-        after: { ...input, imageDataUrl: input.imageDataUrl === null ? null : undefined, name },
+        after: {
+          active: input.active,
+          categoryId: input.categoryId,
+          comboOnly: input.comboOnly === true,
+          costCents: input.costCents,
+          fallbackIcon,
+          imageDataUrl,
+          kind: input.kind,
+          lowStockThreshold: input.lowStockThreshold,
+          name,
+          salePriceCents: input.salePriceCents,
+        },
       },
     });
   })();
@@ -601,7 +614,7 @@ export function listStockPurchaseLots(
        WHERE lot.event_id = ? AND lot.product_id = ?
        ORDER BY lot.created_at DESC`,
     )
-    .all(eventId, productId) as Array<{
+    .all(eventId, productId) as {
     readonly movement_id: string;
     readonly product_id: string;
     readonly quantity: number;
@@ -609,7 +622,7 @@ export function listStockPurchaseLots(
     readonly created_at: number;
     readonly voided_movement_id: string | null;
     readonly has_later_decrease: number;
-  }>;
+  }[];
   return rows.map((lot) => ({
     movementId: lot.movement_id,
     productId: lot.product_id,
@@ -646,7 +659,7 @@ export function correctStockPurchaseLot(
         readonly created_at: number;
       }
     | undefined;
-  if (lot === undefined || lot.event_id !== eventId) {
+  if (lot?.event_id !== eventId) {
     throw new Error('O lote não pertence ao evento ativo.');
   }
   const reason = input.reason.trim();
@@ -714,8 +727,7 @@ export function voidStockPurchaseLot(
         readonly has_later_decrease: number;
       }
     | undefined;
-  if (lot === undefined || lot.event_id !== eventId)
-    throw new Error('O lote não pertence ao evento ativo.');
+  if (lot?.event_id !== eventId) throw new Error('O lote não pertence ao evento ativo.');
   if (lot.voided_movement_id !== null) throw new Error('Esta entrada já foi desfeita.');
   if (lot.has_later_decrease !== 0) {
     throw new Error(

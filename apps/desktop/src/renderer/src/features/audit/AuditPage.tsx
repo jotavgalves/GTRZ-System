@@ -30,6 +30,9 @@ export function AuditPage(): React.JSX.Element {
   const [action, setAction] = useState('all');
   const [from, setFrom] = useState('');
   const [to, setTo] = useState('');
+  if (loading && state === null) {
+    return <div className="route-state">Carregando auditoria…</div>;
+  }
   const records = useMemo(() => state?.records ?? [], [state?.records]);
   const actions = useMemo(() => sortAuditActions(state?.actions ?? []), [state?.actions]);
   const productionRecords = records.filter((record) => record.profile === 'production').length;
@@ -291,7 +294,6 @@ export function AuditPage(): React.JSX.Element {
       </article>
 
       {error === null ? null : <p className="form-error">{error}</p>}
-      {loading && state === null ? <div className="route-state">Carregando auditoria…</div> : null}
       {state === null ? null : <AuditRecordList records={records} />}
     </section>
   );

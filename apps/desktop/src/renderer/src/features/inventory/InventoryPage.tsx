@@ -72,6 +72,14 @@ export function InventoryPage(): React.JSX.Element {
     0,
   );
 
+  if (loading && state === null) {
+    return (
+      <section className="feature-page">
+        <div className="route-state">Preparando estoque…</div>
+      </section>
+    );
+  }
+
   return (
     <section className="feature-page">
       <header className="feature-header">

@@ -67,7 +67,11 @@ function normalizeOptionalText(value?: string): string | null {
 }
 
 function paidCents(database: DatabaseContext, expenseId: string): number {
-  const row = database.sqlite.prepare('SELECT COALESCE(SUM(amount_cents), 0) AS value FROM expense_payments WHERE expense_id = ?').get(expenseId) as { value: number };
+  const row = database.sqlite
+    .prepare(
+      'SELECT COALESCE(SUM(amount_cents), 0) AS value FROM expense_payments WHERE expense_id = ?',
+    )
+    .get(expenseId) as { value: number };
   return row.value;
 }
 
@@ -213,23 +217,77 @@ export function updateExpensePaymentStatus(
   }
 
   const actual = derivedStatus(expense.amount_cents, paidCents(database, expense.id));
-  if (actual !== input.paymentStatus) throw new Error('A situação é calculada pelos pagamentos registrados. Registre um pagamento real para alterá-la.');
+  if (actual !== input.paymentStatus)
+    throw new Error(
+      'A situação é calculada pelos pagamentos registrados. Registre um pagamento real para alterá-la.',
+    );
   return mapExpense(database, expense);
 }
 
-export function recordExpensePayment(database: DatabaseContext, input: { readonly expenseId: string; readonly method: DatabasePaymentMethod; readonly amountCents: number; readonly note?: string }): DatabaseExpense {
-  requireProduction(database); const eventId = requireActiveEvent(database); const expense = requireExpense(database, input.expenseId);
-  if (expense.event_id !== eventId || expense.status === 'cancelled') throw new Error('A despesa informada não está disponível para pagamento.');
-  if (!Number.isInteger(input.amountCents) || input.amountCents <= 0) throw new Error('O pagamento deve ser positivo.');
-  const current = paidCents(database, expense.id); if (current + input.amountCents > expense.amount_cents) throw new Error('O pagamento não pode superar o valor pendente da despesa.');
-  const register = input.method === 'cash' ? database.sqlite.prepare("SELECT id FROM cash_registers WHERE event_id = ? AND status = 'open'").get(eventId) as { id: string } | undefined : undefined;
-  if (input.method === 'cash' && register === undefined) throw new Error('Abra o caixa antes de registrar uma despesa em dinheiro.');
-  const id=randomUUID(), now=Date.now(), normalizedNote=normalizeOptionalText(input.note);
+export function recordExpensePayment(
+  database: DatabaseContext,
+  input: {
+    readonly expenseId: string;
+    readonly method: DatabasePaymentMethod;
+    readonly amountCents: number;
+    readonly note?: string;
+  },
+): DatabaseExpense {
+  requireProduction(database);
+  const eventId = requireActiveEvent(database);
+  const expense = requireExpense(database, input.expenseId);
+  if (expense.event_id !== eventId || expense.status === 'cancelled')
+    throw new Error('A despesa informada não está disponível para pagamento.');
+  if (!Number.isInteger(input.amountCents) || input.amountCents <= 0)
+    throw new Error('O pagamento deve ser positivo.');
+  const current = paidCents(database, expense.id);
+  if (current + input.amountCents > expense.amount_cents)
+    throw new Error('O pagamento não pode superar o valor pendente da despesa.');
+  const register =
+    input.method === 'cash'
+      ? (database.sqlite
+          .prepare("SELECT id FROM cash_registers WHERE event_id = ? AND status = 'open'")
+          .get(eventId) as { id: string } | undefined)
+      : undefined;
+  if (input.method === 'cash' && register === undefined)
+    throw new Error('Abra o caixa antes de registrar uma despesa em dinheiro.');
+  const id = randomUUID(),
+    now = Date.now(),
+    normalizedNote = normalizeOptionalText(input.note);
   database.sqlite.transaction(() => {
-    database.sqlite.prepare('INSERT INTO expense_payments (id, expense_id, event_id, method, amount_cents, cash_register_id, note, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(id,expense.id,eventId,input.method,input.amountCents,register?.id ?? null,normalizedNote,now);
-    const after=derivedStatus(expense.amount_cents,current + input.amountCents);
-    database.sqlite.prepare('UPDATE expenses SET payment_status = ?, updated_at = ? WHERE id = ?').run(after,now,expense.id);
-    appendAudit(database,{action:'expense.payment-recorded',entityType:'expense-payment',entityId:id,eventId,details:{expenseId:expense.id,description:expense.description,method:input.method,amountCents:input.amountCents,note:normalizedNote,cashRegisterId:register?.id ?? null,paymentStatus:after}});
+    database.sqlite
+      .prepare(
+        'INSERT INTO expense_payments (id, expense_id, event_id, method, amount_cents, cash_register_id, note, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+      )
+      .run(
+        id,
+        expense.id,
+        eventId,
+        input.method,
+        input.amountCents,
+        register?.id ?? null,
+        normalizedNote,
+        now,
+      );
+    const after = derivedStatus(expense.amount_cents, current + input.amountCents);
+    database.sqlite
+      .prepare('UPDATE expenses SET payment_status = ?, updated_at = ? WHERE id = ?')
+      .run(after, now, expense.id);
+    appendAudit(database, {
+      action: 'expense.payment-recorded',
+      entityType: 'expense-payment',
+      entityId: id,
+      eventId,
+      details: {
+        expenseId: expense.id,
+        description: expense.description,
+        method: input.method,
+        amountCents: input.amountCents,
+        note: normalizedNote,
+        cashRegisterId: register?.id ?? null,
+        paymentStatus: after,
+      },
+    });
   })();
   return mapExpense(database, requireExpense(database, expense.id));
 }
@@ -260,6 +318,13 @@ export function updateExpense(
 
   if (!Number.isInteger(input.amountCents) || input.amountCents <= 0) {
     throw new Error('O valor da despesa deve ser positivo.');
+  }
+
+  const alreadyPaidCents = paidCents(database, expense.id);
+  if (input.amountCents < alreadyPaidCents) {
+    throw new Error(
+      'O valor da despesa não pode ser menor que os pagamentos reais já registrados.',
+    );
   }
 
   const category = input.category.trim();
@@ -330,6 +395,12 @@ export function cancelExpense(
     throw new Error('Esta despesa já foi cancelada.');
   }
 
+  if (paidCents(database, expense.id) > 0) {
+    throw new Error(
+      'Não é possível cancelar uma despesa com pagamento registrado. Registre o estorno financeiro antes de cancelá-la.',
+    );
+  }
+
   const reason = input.reason.trim();
   const now = Date.now();
   database.sqlite.transaction(() => {
@@ -371,6 +442,12 @@ export function deleteExpense(
   const reason = input.reason.trim();
   if (reason.length < 3) {
     throw new Error('Informe o motivo da exclusão da despesa.');
+  }
+
+  if (paidCents(database, expense.id) > 0) {
+    throw new Error(
+      'Não é possível excluir uma despesa com pagamento registrado. Registre o estorno financeiro antes de excluí-la.',
+    );
   }
 
   database.sqlite.transaction(() => {

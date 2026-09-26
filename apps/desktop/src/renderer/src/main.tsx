@@ -15,6 +15,6 @@ if (rootElement === null) {
 
 createRoot(rootElement).render(
   <SessionProvider>
-    <RouterProvider router={router} />
+    <RouterProvider router={router} useTransitions={false} />
   </SessionProvider>,
 );

@@ -1,4 +1,4 @@
-import { createHashRouter, Navigate } from 'react-router';
+import { createHashRouter } from 'react-router';
 
 import { AuditPage } from '../features/audit';
 import { BackupsPage } from '../features/backups';
@@ -16,6 +16,14 @@ import { VouchersPage } from '../features/vouchers';
 import { RequireProduction } from '../shared/session/RequireProduction';
 import { ErrorPage } from './ErrorPage';
 import { AppShell } from './layouts/AppShell';
+
+function UnknownRoute(): React.JSX.Element {
+  return (
+    <section className="route-state route-state--error" role="status">
+      Esta área não existe. Escolha um módulo no menu lateral.
+    </section>
+  );
+}
 
 export const router = createHashRouter([
   {
@@ -41,7 +49,7 @@ export const router = createHashRouter([
       },
       { path: 'estoque', element: <InventoryPage /> },
       { path: 'mesas', element: <TablesPage /> },
-      { path: '*', element: <Navigate replace to="/" /> },
+      { path: '*', element: <UnknownRoute /> },
     ],
   },
 ]);
