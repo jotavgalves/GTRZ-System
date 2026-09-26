@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { writeFile } from 'node:fs/promises';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { WebSocket } from 'ws';
 import {
@@ -125,6 +126,7 @@ const actions = (): string[] =>
 
 beforeEach((): void => {
   sockets().length = 0;
+  vi.mocked(writeFile).mockClear();
   globalCommands = [];
   db = openDatabase(':memory:');
   ensureControlDefaults(db);
@@ -157,6 +159,58 @@ afterEach((): void => {
 });
 
 describe('cloud replication invariants', () => {
+  it('uses the legacy administrator key only to mint a one-time desktop enrollment code', async () => {
+    request.mockImplementation((url: string): Response => {
+      if (url.endsWith('/v1/desktop/enrollment')) {
+        return new Response(JSON.stringify({ enrollmentCode: 'gtrz-enroll-code', expiresAt: 123 }), {
+          status: 200,
+        });
+      }
+      return new Response(JSON.stringify({ currentSequence: 0, stock: [], events: [] }), {
+        status: 200,
+      });
+    });
+
+    await expect(service.createDesktopEnrollment()).resolves.toEqual({
+      enrollmentCode: 'gtrz-enroll-code',
+      expiresAt: 123,
+    });
+    expect(request).toHaveBeenCalledWith(
+      'https://audit.invalid/v1/desktop/enrollment',
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          'X-GTRZ-Key': 'isolated-audit-key',
+          'X-GTRZ-Device-Id': 'audit-pc',
+        }),
+      }),
+    );
+  });
+
+  it('exchanges a temporary code without sending the administrator key and stores only a device token', async () => {
+    request.mockImplementation((url: string): Response => {
+      if (url.endsWith('/v1/desktop/enrollment/exchange')) {
+        return new Response(JSON.stringify({ token: `gtrz-device-${'a'.repeat(64)}` }), {
+          status: 200,
+        });
+      }
+      return new Response(JSON.stringify({ currentSequence: 0, stock: [], events: [] }), {
+        status: 200,
+      });
+    });
+
+    await service.exchangeDesktopEnrollment(`gtrz-enroll-${'b'.repeat(40)}`);
+
+    expect(request).toHaveBeenCalledWith(
+      'https://audit.invalid/v1/desktop/enrollment/exchange',
+      expect.objectContaining({ headers: { 'Content-Type': 'application/json' } }),
+    );
+    expect(writeFile).toHaveBeenCalledWith(
+      'gtrz-cloud-device-credential.json',
+      expect.stringContaining('gtrz-device-'),
+      expect.objectContaining({ mode: 0o600 }),
+    );
+  });
+
   it('creates the globally active event on a fresh PC instead of discarding its activation', async () => {
     await service.flushOutbox(db, null);
     globalCommands = [
@@ -459,7 +513,12 @@ describe('cloud replication invariants', () => {
     expect(replaceWith).toHaveBeenCalledTimes(1);
     expect(request).toHaveBeenCalledWith(
       expect.stringContaining('/replica-snapshot/snapshot-1'),
-      expect.objectContaining({ headers: { 'X-GTRZ-Key': 'isolated-audit-key' } }),
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          'X-GTRZ-Key': 'isolated-audit-key',
+          'X-GTRZ-Device-Id': 'audit-pc',
+        }),
+      }),
     );
     expect(getSessionState(db).activeEvent?.id).toBe('remote-event');
     expect(

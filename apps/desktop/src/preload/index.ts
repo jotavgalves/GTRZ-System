@@ -7,6 +7,8 @@ import {
   changeProductionPasswordInputSchema,
   cloudSyncStatusSchema,
   cloudMonitorSchema,
+  desktopEnrollmentSchema,
+  exchangeDesktopEnrollmentInputSchema,
   createMobileOperatorInputSchema,
   deleteMobileOperatorInputSchema,
   endMobileOperatorSessionsInputSchema,
@@ -39,6 +41,8 @@ import {
   type ChangeProductionPasswordInput,
   type CloudSyncStatus,
   type CloudMonitor,
+  type DesktopEnrollment,
+  type ExchangeDesktopEnrollmentInput,
   type CreateMobileOperatorInput,
   type DeleteMobileOperatorInput,
   type EndMobileOperatorSessionsInput,
@@ -180,6 +184,21 @@ const api: GtrzDesktopApi = {
     async getCloudMonitor(): Promise<CloudMonitor> {
       const payload: unknown = await ipcRenderer.invoke(IPC_CHANNELS.settingsGetCloudMonitor);
       return cloudMonitorSchema.parse(payload);
+    },
+    async createDesktopEnrollment(): Promise<DesktopEnrollment> {
+      const payload: unknown = await ipcRenderer.invoke(
+        IPC_CHANNELS.settingsCreateDesktopEnrollment,
+      );
+      return desktopEnrollmentSchema.parse(payload);
+    },
+    async exchangeDesktopEnrollment(
+      input: ExchangeDesktopEnrollmentInput,
+    ): Promise<OperationResult> {
+      const payload: unknown = await ipcRenderer.invoke(
+        IPC_CHANNELS.settingsExchangeDesktopEnrollment,
+        exchangeDesktopEnrollmentInputSchema.parse(input),
+      );
+      return operationResultSchema.parse(payload);
     },
     async setGlobalEvent(input: SetGlobalEventInput): Promise<SessionState> {
       const payload: unknown = await ipcRenderer.invoke(

@@ -18,6 +18,9 @@ tmp-release-check/
 !.env.example
 .dev.vars
 .wrangler/
+# Per-computer cloud credentials and legacy pairing keys are local secrets.
+**/gtrz-cloud-device-credential.json
+**/*chave de pareamento*.txt
 *.tsbuildinfo
 .DS_Store
 Thumbs.db

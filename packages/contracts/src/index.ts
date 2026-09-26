@@ -42,6 +42,8 @@ export const IPC_CHANNELS = {
   settingsUpdatePaymentTerminal: 'settings:update-payment-terminal',
   settingsGetCloudSyncStatus: 'settings:get-cloud-sync-status',
   settingsGetCloudMonitor: 'settings:get-cloud-monitor',
+  settingsCreateDesktopEnrollment: 'settings:create-desktop-enrollment',
+  settingsExchangeDesktopEnrollment: 'settings:exchange-desktop-enrollment',
   settingsSetGlobalEvent: 'settings:set-global-event',
   settingsResetGlobalEvent: 'settings:reset-global-event',
   settingsListMobileOperators: 'settings:list-mobile-operators',
@@ -245,6 +247,15 @@ export const cloudSyncStatusSchema = z.object({
   message: z.string().min(1).max(240),
 });
 
+export const desktopEnrollmentSchema = z.object({
+  enrollmentCode: z.string().min(20).max(160),
+  expiresAt: z.number().int().positive(),
+});
+
+export const exchangeDesktopEnrollmentInputSchema = z.object({
+  enrollmentCode: z.string().trim().min(20).max(160),
+});
+
 export const mobilePermissionsSchema = z.object({
   sales: z.boolean(),
   inventory: z.boolean(),
@@ -414,6 +425,8 @@ export type UpdatePaymentTerminalSettingsInput = z.infer<
 >;
 export type OperationResult = z.infer<typeof operationResultSchema>;
 export type CloudSyncStatus = z.infer<typeof cloudSyncStatusSchema>;
+export type DesktopEnrollment = z.infer<typeof desktopEnrollmentSchema>;
+export type ExchangeDesktopEnrollmentInput = z.infer<typeof exchangeDesktopEnrollmentInputSchema>;
 export type MobilePermissions = z.infer<typeof mobilePermissionsSchema>;
 export type MobileOperator = z.infer<typeof mobileOperatorSchema>;
 export type CreateMobileOperatorInput = z.infer<typeof createMobileOperatorInputSchema>;
@@ -458,6 +471,8 @@ export interface GtrzDesktopApi {
     ): Promise<PaymentTerminalSettings>;
     getCloudSyncStatus(): Promise<CloudSyncStatus>;
     getCloudMonitor(): Promise<CloudMonitor>;
+    createDesktopEnrollment(): Promise<DesktopEnrollment>;
+    exchangeDesktopEnrollment(input: ExchangeDesktopEnrollmentInput): Promise<OperationResult>;
     setGlobalEvent(input: SetGlobalEventInput): Promise<SessionState>;
     resetGlobalEvent(input: ResetGlobalEventInput): Promise<OperationResult>;
     listMobileOperators(): Promise<readonly MobileOperator[]>;

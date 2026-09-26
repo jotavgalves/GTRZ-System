@@ -3,6 +3,8 @@ import {
   ArrowDownToLine,
   ArrowUpFromLine,
   Cloud,
+  Copy,
+  KeyRound,
   Laptop,
   RefreshCw,
   Server,
@@ -184,6 +186,12 @@ export function CloudMonitorPage(): React.JSX.Element {
   const [monitor, setMonitor] = useState<CloudMonitor | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [enrollmentCode, setEnrollmentCode] = useState<string | null>(null);
+  const [enrollmentExpiresAt, setEnrollmentExpiresAt] = useState<number | null>(null);
+  const [enrollmentInput, setEnrollmentInput] = useState('');
+  const [enrollmentBusy, setEnrollmentBusy] = useState(false);
+  const [enrollmentError, setEnrollmentError] = useState<string | null>(null);
+  const [enrollmentNotice, setEnrollmentNotice] = useState<string | null>(null);
 
   const load = useCallback(async (): Promise<void> => {
     setLoading(true);
@@ -213,6 +221,44 @@ export function CloudMonitorPage(): React.JSX.Element {
 
   const deviceLabels = new Map(monitor?.activeDevices.map((device) => [device.id, device.label]));
 
+  const createEnrollment = async (): Promise<void> => {
+    setEnrollmentBusy(true);
+    setEnrollmentError(null);
+    setEnrollmentNotice(null);
+    try {
+      const enrollment = await window.gtrz.settings.createDesktopEnrollment();
+      setEnrollmentCode(enrollment.enrollmentCode);
+      setEnrollmentExpiresAt(enrollment.expiresAt);
+      await navigator.clipboard.writeText(enrollment.enrollmentCode);
+      setEnrollmentNotice('Código criado e copiado. Ele pode ser usado uma única vez.');
+    } catch (createError: unknown) {
+      setEnrollmentError(
+        createError instanceof Error ? createError.message : 'Não foi possível criar o código.',
+      );
+    } finally {
+      setEnrollmentBusy(false);
+    }
+  };
+
+  const exchangeEnrollment = async (event: React.FormEvent<HTMLFormElement>): Promise<void> => {
+    event.preventDefault();
+    setEnrollmentBusy(true);
+    setEnrollmentError(null);
+    setEnrollmentNotice(null);
+    try {
+      await window.gtrz.settings.exchangeDesktopEnrollment({ enrollmentCode: enrollmentInput });
+      setEnrollmentInput('');
+      setEnrollmentNotice('Este computador foi vinculado. A sincronização começará em instantes.');
+      void load();
+    } catch (exchangeError: unknown) {
+      setEnrollmentError(
+        exchangeError instanceof Error ? exchangeError.message : 'Não foi possível vincular este computador.',
+      );
+    } finally {
+      setEnrollmentBusy(false);
+    }
+  };
+
   return (
     <section className="module-page cloud-monitor-page">
       <header className="module-page__header">
@@ -236,6 +282,59 @@ export function CloudMonitorPage(): React.JSX.Element {
 
       <EnvironmentSelector />
       <CloudEventSelector />
+
+      <section className="panel cloud-enrollment">
+        <div className="panel__heading">
+          <KeyRound size={20} aria-hidden="true" />
+          <div>
+            <h2>Vincular computador</h2>
+            <p>O instalador não contém a chave mestre. Use um código temporário e de uso único.</p>
+          </div>
+        </div>
+        <div className="cloud-enrollment__grid">
+          <div>
+            <strong>Computador administrador</strong>
+            <p>Crie o código neste PC e informe-o no computador que será adicionado.</p>
+            <button
+              className="button button--ghost"
+              disabled={enrollmentBusy}
+              onClick={() => void createEnrollment()}
+              type="button"
+            >
+              <Copy size={16} aria-hidden="true" />
+              Gerar código temporário
+            </button>
+            {enrollmentCode === null ? null : (
+              <div className="cloud-enrollment__code">
+                <code>{enrollmentCode}</code>
+                <small>
+                  {`Expira às ${new Intl.DateTimeFormat('pt-BR', {
+                    hour: '2-digit',
+                    minute: '2-digit',
+                  }).format(enrollmentExpiresAt ?? Date.now())}.`}
+                </small>
+              </div>
+            )}
+          </div>
+          <form onSubmit={(event) => void exchangeEnrollment(event)}>
+            <label className="form-field">
+              <span>Vincular este computador</span>
+              <input
+                autoComplete="off"
+                disabled={enrollmentBusy}
+                onChange={(event) => setEnrollmentInput(event.target.value)}
+                placeholder="Cole o código temporário"
+                value={enrollmentInput}
+              />
+            </label>
+            <button className="button button--primary" disabled={enrollmentBusy} type="submit">
+              Vincular à nuvem
+            </button>
+          </form>
+        </div>
+        {enrollmentError === null ? null : <p className="form-error">{enrollmentError}</p>}
+        {enrollmentNotice === null ? null : <p className="cloud-enrollment__notice">{enrollmentNotice}</p>}
+      </section>
 
       <div className="cloud-monitor-summary">
         <article className="panel cloud-metric">

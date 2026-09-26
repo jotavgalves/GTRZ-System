@@ -306,6 +306,7 @@ function journalPayload(value: unknown): JournalPayload | null {
 export class CloudSyncService {
   readonly #pairingKeyPath: string;
   readonly #deviceIdPath: string;
+  readonly #deviceCredentialPath: string;
   readonly #onDataChanged: () => void;
   readonly #endpoint: string;
   readonly #getDeviceLabel: () => string;
@@ -334,9 +335,11 @@ export class CloudSyncService {
     endpoint = 'https://gtrz-sync.jvgacontato.workers.dev',
     getDeviceLabel: () => string = hostname,
     databaseRuntime: DatabaseRuntime | null = null,
+    deviceCredentialPath = path.join(path.dirname(deviceIdPath), 'gtrz-cloud-device-credential.json'),
   ) {
     this.#pairingKeyPath = pairingKeyPath;
     this.#deviceIdPath = deviceIdPath;
+    this.#deviceCredentialPath = deviceCredentialPath;
     this.#onDataChanged = onDataChanged;
     this.#endpoint = endpoint;
     this.#getDeviceLabel = getDeviceLabel;
@@ -385,6 +388,56 @@ export class CloudSyncService {
 
   setResetBackupAgent(agent: () => Promise<BackupRecord>): void {
     this.#resetBackupAgent = agent;
+  }
+
+  async createDesktopEnrollment(): Promise<{
+    readonly enrollmentCode: string;
+    readonly expiresAt: number;
+  }> {
+    const administratorKey = await this.#readLegacyPairingKey();
+    if (administratorKey === null) {
+      throw new Error('Somente o computador administrador pode gerar um código de vínculo.');
+    }
+    const deviceId = await this.#readOrCreateDeviceId();
+    const response = await fetch(`${this.#endpoint}/v1/desktop/enrollment`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-GTRZ-Key': administratorKey,
+        'X-GTRZ-Device-Id': deviceId,
+      },
+      body: JSON.stringify({}),
+      signal: AbortSignal.timeout(CONNECTION_TIMEOUT_MS),
+    });
+    const payload: unknown = await response.json();
+    if (
+      !response.ok ||
+      !isRecord(payload) ||
+      typeof payload.enrollmentCode !== 'string' ||
+      typeof payload.expiresAt !== 'number'
+    ) {
+      throw new Error('A nuvem não conseguiu criar o código de vínculo.');
+    }
+    return { enrollmentCode: payload.enrollmentCode, expiresAt: payload.expiresAt };
+  }
+
+  async exchangeDesktopEnrollment(enrollmentCode: string): Promise<void> {
+    const deviceId = await this.#readOrCreateDeviceId();
+    const response = await fetch(`${this.#endpoint}/v1/desktop/enrollment/exchange`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enrollmentCode, deviceId, label: this.#getDeviceLabel() }),
+      signal: AbortSignal.timeout(CONNECTION_TIMEOUT_MS),
+    });
+    const payload: unknown = await response.json();
+    if (!response.ok || !isRecord(payload) || typeof payload.token !== 'string') {
+      throw new Error('O código de vínculo é inválido, expirou ou já foi utilizado.');
+    }
+    await writeFile(
+      this.#deviceCredentialPath,
+      JSON.stringify({ deviceId, token: payload.token }),
+      { encoding: 'utf8', mode: 0o600 },
+    );
   }
 
   async flushOutbox(database: DatabaseContext, activeEventId: string | null): Promise<void> {
@@ -441,7 +494,7 @@ export class CloudSyncService {
             `${this.#endpoint}/v1/events/${encodeURIComponent(item.event_id)}/journal`,
             {
               method: 'POST',
-              headers: { 'Content-Type': 'application/json', 'X-GTRZ-Key': pairingKey },
+              headers: await this.#cloudHeaders(pairingKey, { 'Content-Type': 'application/json' }),
               body: item.payload_json,
               signal: AbortSignal.timeout(CONNECTION_TIMEOUT_MS),
             },
@@ -554,7 +607,7 @@ export class CloudSyncService {
     const startedAt = performance.now();
     const heartbeat = await fetch(`${this.#endpoint}/v1/monitor/heartbeat`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-GTRZ-Key': pairingKey },
+      headers: await this.#cloudHeaders(pairingKey, { 'Content-Type': 'application/json' }),
       body: JSON.stringify({
         deviceId,
         label: this.#getDeviceLabel(),
@@ -570,7 +623,7 @@ export class CloudSyncService {
     }
 
     const snapshot = await fetch(`${this.#endpoint}/v1/monitor/snapshot`, {
-      headers: { 'X-GTRZ-Key': pairingKey },
+      headers: await this.#cloudHeaders(pairingKey),
       signal: AbortSignal.timeout(CONNECTION_TIMEOUT_MS),
     });
 
@@ -696,10 +749,7 @@ export class CloudSyncService {
     }
     const response = await fetch(`${this.#endpoint}${path}`, {
       method,
-      headers: {
-        'Content-Type': 'application/json',
-        'X-GTRZ-Key': pairingKey,
-      },
+      headers: await this.#cloudHeaders(pairingKey, { 'Content-Type': 'application/json' }),
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
       signal: AbortSignal.timeout(CONNECTION_TIMEOUT_MS),
     });
@@ -720,7 +770,7 @@ export class CloudSyncService {
       throw new Error('A chave da nuvem não foi encontrada neste computador.');
     const response = await fetch(`${this.#endpoint}${path}`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-GTRZ-Key': pairingKey },
+      headers: await this.#cloudHeaders(pairingKey, { 'Content-Type': 'application/json' }),
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(CONNECTION_TIMEOUT_MS),
     });
@@ -752,14 +802,13 @@ export class CloudSyncService {
         `${this.#endpoint}/v1/monitor/replica-snapshot/${encodeURIComponent(eventId)}`,
         {
           method: 'POST',
-          headers: {
+          headers: await this.#cloudHeaders(pairingKey, {
             'Content-Type': 'application/vnd.sqlite3',
             'Content-Length': String(contents.byteLength),
-            'X-GTRZ-Key': pairingKey,
             'X-GTRZ-Device-Id': deviceId,
             'X-GTRZ-Snapshot-Sha256': checksum,
             'X-GTRZ-Snapshot-Size': String(contents.byteLength),
-          },
+          }),
           body: new Uint8Array(contents).buffer,
           signal: AbortSignal.timeout(CONNECTION_TIMEOUT_MS * 6),
         },
@@ -803,7 +852,7 @@ export class CloudSyncService {
     const response = await fetch(
       `${this.#endpoint}/v1/monitor/replica-snapshot/${encodeURIComponent(command.bootstrapSnapshotId)}`,
       {
-        headers: { 'X-GTRZ-Key': pairingKey },
+        headers: await this.#cloudHeaders(pairingKey),
         signal: AbortSignal.timeout(CONNECTION_TIMEOUT_MS * 6),
       },
     );
@@ -1001,7 +1050,7 @@ export class CloudSyncService {
     const response = await fetch(
       `${this.#endpoint}/v1/monitor/global-control?after=${String(after)}`,
       {
-        headers: { 'X-GTRZ-Key': pairingKey },
+        headers: await this.#cloudHeaders(pairingKey),
         signal: AbortSignal.timeout(CONNECTION_TIMEOUT_MS),
       },
     );
@@ -1158,14 +1207,13 @@ export class CloudSyncService {
       `${this.#endpoint}/v1/monitor/reset-backup/${encodeURIComponent(reset.requestId)}`,
       {
         method: 'POST',
-        headers: {
+        headers: await this.#cloudHeaders(pairingKey, {
           'Content-Type': 'application/octet-stream',
-          'X-GTRZ-Key': pairingKey,
           'X-GTRZ-Device-Id': deviceId,
           'X-GTRZ-Backup-Sha256': createHash('sha256').update(contents).digest('hex'),
           'X-GTRZ-Backup-Size': String(contents.byteLength),
           'Content-Length': String(contents.byteLength),
-        },
+        }),
         body: new Uint8Array(contents),
         signal: AbortSignal.timeout(30_000),
       },
@@ -1205,7 +1253,7 @@ export class CloudSyncService {
     try {
       await fetch(`${this.#endpoint}/v1/monitor/conflict`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-GTRZ-Key': pairingKey },
+        headers: await this.#cloudHeaders(pairingKey, { 'Content-Type': 'application/json' }),
         body: JSON.stringify({ ...conflict, createdAt: Date.now() }),
         signal: AbortSignal.timeout(CONNECTION_TIMEOUT_MS),
       });
@@ -1215,6 +1263,24 @@ export class CloudSyncService {
   }
 
   async #readPairingKey(): Promise<string | null> {
+    try {
+      const rawCredential: unknown = JSON.parse(
+        await readFile(this.#deviceCredentialPath, 'utf8'),
+      );
+      if (
+        isRecord(rawCredential) &&
+        typeof rawCredential.token === 'string' &&
+        rawCredential.token.trim().length >= 32
+      ) {
+        return rawCredential.token;
+      }
+    } catch {
+      // A device credential is optional during the transition from the legacy key.
+    }
+    return this.#readLegacyPairingKey();
+  }
+
+  async #readLegacyPairingKey(): Promise<string | null> {
     try {
       const contents = await readFile(this.#pairingKeyPath, 'utf8');
       const key = contents
@@ -1226,6 +1292,17 @@ export class CloudSyncService {
     } catch {
       return null;
     }
+  }
+
+  async #cloudHeaders(
+    credential: string,
+    headers: Record<string, string> = {},
+  ): Promise<Record<string, string>> {
+    return {
+      ...headers,
+      'X-GTRZ-Key': credential,
+      'X-GTRZ-Device-Id': await this.#readOrCreateDeviceId(),
+    };
   }
 
   async #publishCashierCatalog(
@@ -1302,7 +1379,7 @@ export class CloudSyncService {
       `${this.#endpoint}/v1/events/${encodeURIComponent(activeEventId)}/cashier/catalog`,
       {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-GTRZ-Key': pairingKey },
+        headers: await this.#cloudHeaders(pairingKey, { 'Content-Type': 'application/json' }),
         body: JSON.stringify({ products: catalog }),
         signal: AbortSignal.timeout(CONNECTION_TIMEOUT_MS),
       },
@@ -1411,7 +1488,7 @@ export class CloudSyncService {
       `${this.#endpoint}/v1/events/${encodeURIComponent(activeEventId)}/cashier/context`,
       {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-GTRZ-Key': pairingKey },
+        headers: await this.#cloudHeaders(pairingKey, { 'Content-Type': 'application/json' }),
         body: JSON.stringify(context),
         signal: AbortSignal.timeout(CONNECTION_TIMEOUT_MS),
       },
@@ -1454,7 +1531,7 @@ export class CloudSyncService {
     const baseUrl = `${this.#endpoint}/v1/events/${encodeURIComponent(activeEventId)}/print`;
     const register = await fetch(`${baseUrl}/printers`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-GTRZ-Key': pairingKey },
+      headers: await this.#cloudHeaders(pairingKey, { 'Content-Type': 'application/json' }),
       body: JSON.stringify({
         deviceId,
         deviceLabel: settings.machineName,
@@ -1470,7 +1547,7 @@ export class CloudSyncService {
     for (;;) {
       const claim = await fetch(`${baseUrl}/claim`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-GTRZ-Key': pairingKey },
+        headers: await this.#cloudHeaders(pairingKey, { 'Content-Type': 'application/json' }),
         body: JSON.stringify({ deviceId }),
         signal: AbortSignal.timeout(CONNECTION_TIMEOUT_MS),
       });
@@ -1506,7 +1583,7 @@ export class CloudSyncService {
       }
       const complete = await fetch(`${baseUrl}/complete`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-GTRZ-Key': pairingKey },
+        headers: await this.#cloudHeaders(pairingKey, { 'Content-Type': 'application/json' }),
         body: JSON.stringify({
           jobId: rawJob.jobId,
           claimToken: rawJob.claimToken,
@@ -1774,7 +1851,7 @@ export class CloudSyncService {
       const response = await fetch(
         `${this.#endpoint}/v1/events/${encodeURIComponent(eventId)}/snapshot?after=${String(cursor)}`,
         {
-          headers: { 'X-GTRZ-Key': pairingKey },
+          headers: await this.#cloudHeaders(pairingKey),
           signal: AbortSignal.timeout(CONNECTION_TIMEOUT_MS),
         },
       );

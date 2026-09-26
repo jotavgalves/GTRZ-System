@@ -348,6 +348,17 @@ function newSalt(): string {
   return hex(bytes);
 }
 
+async function secretHash(secret: string): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(secret));
+  return hex(new Uint8Array(digest));
+}
+
+function newSecret(prefix: string, bytesLength: number): string {
+  const bytes = new Uint8Array(bytesLength);
+  crypto.getRandomValues(bytes);
+  return `${prefix}${hex(bytes)}`;
+}
+
 export class MonitorRoom extends DurableObject<Env> {
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -490,6 +501,24 @@ export class MonitorRoom extends DurableObject<Env> {
         created_at INTEGER NOT NULL,
         PRIMARY KEY (request_id, device_id)
       );
+      CREATE TABLE IF NOT EXISTS desktop_devices (
+        device_id TEXT PRIMARY KEY,
+        token_hash TEXT NOT NULL UNIQUE,
+        label TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        last_seen_at INTEGER NOT NULL,
+        revoked_at INTEGER
+      );
+      CREATE TABLE IF NOT EXISTS desktop_enrollment_codes (
+        code_hash TEXT PRIMARY KEY,
+        created_by_device_id TEXT NOT NULL,
+        expires_at INTEGER NOT NULL,
+        created_at INTEGER NOT NULL,
+        consumed_at INTEGER,
+        consumed_by_device_id TEXT
+      );
+      CREATE INDEX IF NOT EXISTS desktop_enrollment_codes_expiry_idx
+        ON desktop_enrollment_codes (expires_at);
       DELETE FROM flow_log WHERE type = 'connection.heartbeat';
     `);
     const columns = this.ctx.storage.sql.exec('PRAGMA table_info(mobile_operators)').toArray();
@@ -560,6 +589,21 @@ export class MonitorRoom extends DurableObject<Env> {
 
       if (request.method === 'POST' && url.pathname === '/v1/monitor/global-event/reset') {
         return json(this.#requestGlobalReset(await readJson(request)));
+      }
+
+      if (request.method === 'POST' && url.pathname === '/v1/monitor/desktop/enrollment') {
+        return json(await this.#createDesktopEnrollment(await readJson(request)));
+      }
+
+      if (
+        request.method === 'POST' &&
+        url.pathname === '/v1/monitor/desktop/enrollment/exchange'
+      ) {
+        return json(await this.#exchangeDesktopEnrollment(await readJson(request)));
+      }
+
+      if (request.method === 'POST' && url.pathname === '/v1/monitor/desktop/authorize') {
+        return json(await this.#authorizeDesktopDevice(await readJson(request)));
       }
 
       const replicaSnapshotMatch = /^\/v1\/monitor\/replica-snapshot\/([^/]+)$/.exec(url.pathname);
@@ -751,6 +795,112 @@ export class MonitorRoom extends DurableObject<Env> {
     });
 
     return { accepted: true };
+  }
+
+  async #createDesktopEnrollment(payload: JsonRecord): Promise<JsonRecord> {
+    const createdByDeviceId = requiredString(payload.createdByDeviceId, 'createdByDeviceId', 80);
+    const now = Date.now();
+    const expiresAt = now + 15 * 60_000;
+    const enrollmentCode = newSecret('gtrz-enroll-', 20);
+    const codeHash = await secretHash(enrollmentCode);
+
+    this.ctx.storage.transactionSync(() => {
+      this.ctx.storage.sql
+        .exec(
+          `DELETE FROM desktop_enrollment_codes
+           WHERE expires_at < ? OR consumed_at IS NOT NULL`,
+          now,
+        )
+        .toArray();
+      this.ctx.storage.sql
+        .exec(
+          `INSERT INTO desktop_enrollment_codes
+           (code_hash, created_by_device_id, expires_at, created_at, consumed_at, consumed_by_device_id)
+           VALUES (?, ?, ?, ?, NULL, NULL)`,
+          codeHash,
+          createdByDeviceId,
+          expiresAt,
+          now,
+        )
+        .toArray();
+    });
+
+    return { enrollmentCode, expiresAt };
+  }
+
+  async #exchangeDesktopEnrollment(payload: JsonRecord): Promise<JsonRecord> {
+    const enrollmentCode = requiredString(payload.enrollmentCode, 'enrollmentCode', 160);
+    const deviceId = requiredString(payload.deviceId, 'deviceId', 80);
+    const label = requiredString(payload.label, 'label', 80);
+    const codeHash = await secretHash(enrollmentCode);
+    const token = newSecret('gtrz-device-', 32);
+    const tokenHash = await secretHash(token);
+    const now = Date.now();
+
+    this.ctx.storage.transactionSync(() => {
+      const code = this.ctx.storage.sql
+        .exec(
+          `SELECT expires_at, consumed_at FROM desktop_enrollment_codes
+           WHERE code_hash = ?`,
+          codeHash,
+        )
+        .toArray()[0];
+      if (
+        code === undefined ||
+        Number(code.expires_at) < now ||
+        code.consumed_at !== null
+      ) {
+        throw new ApiError(401, 'INVALID_ENROLLMENT', 'O código de vínculo expirou ou já foi usado.');
+      }
+      this.ctx.storage.sql
+        .exec(
+          `UPDATE desktop_enrollment_codes
+           SET consumed_at = ?, consumed_by_device_id = ?
+           WHERE code_hash = ? AND consumed_at IS NULL`,
+          now,
+          deviceId,
+          codeHash,
+        )
+        .toArray();
+      this.ctx.storage.sql
+        .exec(
+          `INSERT INTO desktop_devices
+           (device_id, token_hash, label, created_at, last_seen_at, revoked_at)
+           VALUES (?, ?, ?, ?, ?, NULL)
+           ON CONFLICT(device_id) DO UPDATE SET
+             token_hash = excluded.token_hash,
+             label = excluded.label,
+             last_seen_at = excluded.last_seen_at,
+             revoked_at = NULL`,
+          deviceId,
+          tokenHash,
+          label,
+          now,
+          now,
+        )
+        .toArray();
+    });
+
+    return { deviceId, token };
+  }
+
+  async #authorizeDesktopDevice(payload: JsonRecord): Promise<JsonRecord> {
+    const deviceId = requiredString(payload.deviceId, 'deviceId', 80);
+    const token = requiredString(payload.token, 'token', 160);
+    const tokenHash = await secretHash(token);
+    const device = this.ctx.storage.sql
+      .exec(
+        `SELECT device_id FROM desktop_devices
+         WHERE device_id = ? AND token_hash = ? AND revoked_at IS NULL`,
+        deviceId,
+        tokenHash,
+      )
+      .toArray()[0];
+    if (device === undefined) return { authorized: false };
+    this.ctx.storage.sql
+      .exec('UPDATE desktop_devices SET last_seen_at = ? WHERE device_id = ?', Date.now(), deviceId)
+      .toArray();
+    return { authorized: true };
   }
 
   #snapshot(): JsonRecord {
@@ -4726,9 +4876,27 @@ export class EventRoom extends DurableObject<Env> {
   }
 }
 
-function authorized(request: Request, env: Env): boolean {
+function masterAuthorized(request: Request, env: Env): boolean {
   const key = env.GTRZ_SYNC_KEY;
   return key !== undefined && request.headers.get('X-GTRZ-Key') === key;
+}
+
+async function authorized(request: Request, env: Env): Promise<boolean> {
+  if (masterAuthorized(request, env)) return true;
+  const token = request.headers.get('X-GTRZ-Key');
+  const deviceId = request.headers.get('X-GTRZ-Device-Id');
+  if (token === null || deviceId === null) return false;
+  const monitor = env.MONITOR_ROOM.get(env.MONITOR_ROOM.idFromName('gtrz-monitor'));
+  const response = await monitor.fetch(
+    new Request('https://monitor.internal/v1/monitor/desktop/authorize', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token, deviceId }),
+    }),
+  );
+  if (!response.ok) return false;
+  const payload: unknown = await response.json();
+  return isRecord(payload) && payload.authorized === true;
 }
 
 interface CashierAuthorization {
@@ -4902,8 +5070,40 @@ export default {
       return cashierIcon();
     }
 
+    // A new desktop may exchange a short-lived, one-time enrollment code without
+    // possessing the long-lived administrator key. The code itself is stored hashed
+    // and is atomically consumed inside MonitorRoom.
+    if (request.method === 'POST' && url.pathname === '/v1/desktop/enrollment/exchange') {
+      const monitor = env.MONITOR_ROOM.get(env.MONITOR_ROOM.idFromName('gtrz-monitor'));
+      return monitor.fetch(
+        new Request('https://monitor.internal/v1/monitor/desktop/enrollment/exchange', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(await readJson(request)),
+        }),
+      );
+    }
+
+    // Only the original administrator key can mint desktop enrollment codes. A
+    // desktop credential can sync operational data but cannot invite more devices.
+    if (request.method === 'POST' && url.pathname === '/v1/desktop/enrollment') {
+      if (!masterAuthorized(request, env)) {
+        return json({ error: { code: 'UNAUTHORIZED', message: 'Chave de acesso inválida.' } }, 401);
+      }
+      const payload = await readJson(request);
+      const deviceId = requiredString(request.headers.get('X-GTRZ-Device-Id'), 'X-GTRZ-Device-Id', 80);
+      const monitor = env.MONITOR_ROOM.get(env.MONITOR_ROOM.idFromName('gtrz-monitor'));
+      return monitor.fetch(
+        new Request('https://monitor.internal/v1/monitor/desktop/enrollment', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ...payload, createdByDeviceId: deviceId }),
+        }),
+      );
+    }
+
     if (request.method === 'GET' && url.pathname === '/v1/verify') {
-      if (!authorized(request, env)) {
+      if (!(await authorized(request, env))) {
         return json({ error: { code: 'UNAUTHORIZED', message: 'Chave de acesso inválida.' } }, 401);
       }
 
@@ -4914,7 +5114,7 @@ export default {
     }
 
     if (request.method === 'POST' && url.pathname === '/v1/cashier/enroll') {
-      if (!authorized(request, env)) {
+      if (!(await authorized(request, env))) {
         return json({ error: { code: 'UNAUTHORIZED', message: 'Chave de acesso inválida.' } }, 401);
       }
       const input = await readJson(request);
@@ -4937,7 +5137,7 @@ export default {
     }
 
     if (request.method === 'GET' && url.pathname === '/v1/monitor/cashiers') {
-      if (!authorized(request, env)) {
+      if (!(await authorized(request, env))) {
         return json({ error: { code: 'UNAUTHORIZED', message: 'Chave de acesso inválida.' } }, 401);
       }
       const monitor = env.MONITOR_ROOM.get(env.MONITOR_ROOM.idFromName('gtrz-monitor'));
@@ -4945,7 +5145,7 @@ export default {
     }
 
     if (request.method === 'POST' && url.pathname === '/v1/cashier/revoke') {
-      if (!authorized(request, env)) {
+      if (!(await authorized(request, env))) {
         return json({ error: { code: 'UNAUTHORIZED', message: 'Chave de acesso inválida.' } }, 401);
       }
       const monitor = env.MONITOR_ROOM.get(env.MONITOR_ROOM.idFromName('gtrz-monitor'));
@@ -4975,7 +5175,7 @@ export default {
     }
 
     if (/^\/v1\/mobile\/operators(?:\/[^/]+(?:\/sessions)?)?$/.test(url.pathname)) {
-      if (!authorized(request, env)) {
+      if (!(await authorized(request, env))) {
         return json({ error: { code: 'UNAUTHORIZED', message: 'Chave de acesso inválida.' } }, 401);
       }
       const monitor = env.MONITOR_ROOM.get(env.MONITOR_ROOM.idFromName('gtrz-monitor'));
@@ -5116,7 +5316,7 @@ export default {
     }
 
     if (request.method === 'GET' && url.pathname === '/v1/monitor/archive') {
-      if (!authorized(request, env)) {
+      if (!(await authorized(request, env))) {
         return json({ error: { code: 'UNAUTHORIZED', message: 'Chave de acesso inválida.' } }, 401);
       }
 
@@ -5135,7 +5335,7 @@ export default {
     }
 
     if (monitorRequest(url)) {
-      if (!authorized(request, env)) {
+      if (!(await authorized(request, env))) {
         return json({ error: { code: 'UNAUTHORIZED', message: 'Chave de acesso inválida.' } }, 401);
       }
 
@@ -5147,7 +5347,7 @@ export default {
       return json({ error: { code: 'NOT_FOUND', message: 'Rota não encontrada.' } }, 404);
     }
 
-    if (!authorized(request, env)) {
+    if (!(await authorized(request, env))) {
       return json({ error: { code: 'UNAUTHORIZED', message: 'Chave de acesso inválida.' } }, 401);
     }
 

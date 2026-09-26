@@ -88,6 +88,7 @@ if (!hasSingleInstanceLock) {
         cloudSyncEndpoint(runtimeEnvironment),
         () => getPrintingSettings(requireDatabaseRuntime().get()).machineName,
         databaseRuntime,
+        path.join(userDataPath, 'gtrz-cloud-device-credential.json'),
       );
 
       const printService = registerIpcHandlers({

@@ -7,6 +7,8 @@ import {
   changeProductionPasswordInputSchema,
   cloudSyncStatusSchema,
   cloudMonitorSchema,
+  desktopEnrollmentSchema,
+  exchangeDesktopEnrollmentInputSchema,
   createEventInputSchema,
   createMobileOperatorInputSchema,
   deleteMobileOperatorInputSchema,
@@ -89,6 +91,8 @@ const CONTROL_CHANNELS = [
   IPC_CHANNELS.settingsUpdatePaymentTerminal,
   IPC_CHANNELS.settingsGetCloudSyncStatus,
   IPC_CHANNELS.settingsGetCloudMonitor,
+  IPC_CHANNELS.settingsCreateDesktopEnrollment,
+  IPC_CHANNELS.settingsExchangeDesktopEnrollment,
   IPC_CHANNELS.settingsSetGlobalEvent,
   IPC_CHANNELS.settingsResetGlobalEvent,
   IPC_CHANNELS.settingsListMobileOperators,
@@ -213,6 +217,20 @@ export function registerIpcHandlers(options: RegisterIpcOptions): ThermalPrintSe
       localQueue: options.cloudSyncService.getQueueState(database),
       localConflicts: options.cloudSyncService.getConflicts(database),
     });
+  });
+
+  ipcMain.handle(IPC_CHANNELS.settingsCreateDesktopEnrollment, async () => {
+    if (getSessionState(options.getDatabase()).profile !== 'production') {
+      throw new Error('Entre no perfil Produção para adicionar outro computador.');
+    }
+    return desktopEnrollmentSchema.parse(await options.cloudSyncService.createDesktopEnrollment());
+  });
+
+  ipcMain.handle(IPC_CHANNELS.settingsExchangeDesktopEnrollment, async (_event, payload: unknown) => {
+    await options.cloudSyncService.exchangeDesktopEnrollment(
+      exchangeDesktopEnrollmentInputSchema.parse(payload).enrollmentCode,
+    );
+    return operationResultSchema.parse({ success: true });
   });
 
   ipcMain.handle(IPC_CHANNELS.settingsSetGlobalEvent, async (_event, payload: unknown) => {
