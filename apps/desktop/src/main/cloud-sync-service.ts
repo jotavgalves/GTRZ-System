@@ -35,7 +35,7 @@ import type { DatabaseRuntime } from './database-runtime';
 const CONNECTION_TIMEOUT_MS = 5_000;
 const OUTBOX_INTERVAL_MS = 3_000;
 const STREAM_RECONNECT_MAX_MS = 60_000;
-const CONTROL_HEARTBEAT_INTERVAL_MS = 15_000;
+const CONTROL_HEARTBEAT_INTERVAL_MS = 300_000;
 
 interface AuditRow {
   readonly id: number;
@@ -321,6 +321,8 @@ export class CloudSyncService {
   #controlReconnectTimer: NodeJS.Timeout | null = null;
   #controlHeartbeatTimer: NodeJS.Timeout | null = null;
   #controlReconnectDelayMs = 1_000;
+  #cloudRetryDelayMs = 3_000;
+  #cloudRetryNotBefore = 0;
   #printQueueInFlight: Promise<void> | null = null;
   #replicationRunning = true;
   #flushInFlight = false;
@@ -500,6 +502,7 @@ export class CloudSyncService {
 
   async flushOutbox(database: DatabaseContext, activeEventId: string | null): Promise<void> {
     if (this.#flushInFlight) return;
+    if (Date.now() < this.#cloudRetryNotBefore) return;
     this.#flushInFlight = true;
     try {
       const deviceId = await this.#readOrCreateDeviceId();
@@ -507,10 +510,15 @@ export class CloudSyncService {
 
       if (pairingKey === null) return;
 
-      // WebSockets reduce the delay of a live update, but recovery must not depend on a
-      // socket frame. A newly paired PC starts with no cursor and must first reconcile
-      // the globally selected event through the durable journal.
-      await this.#pullGlobalControl(database, pairingKey, deviceId);
+      // Recovery uses HTTP only before the control socket exists. Once connected,
+      // global event changes are pushed by that socket instead of being polled.
+      if (this.#controlStream === null && this.#controlReconnectTimer === null) {
+        const recovered = await this.#pullGlobalControl(database, pairingKey, deviceId);
+        if (!recovered) {
+          this.#recordCloudFailure();
+          return;
+        }
+      }
       const workingDatabase = await this.#applyPendingBootstrap(database, pairingKey, deviceId);
       this.#enqueueNewAudits(workingDatabase, deviceId);
 
@@ -562,6 +570,8 @@ export class CloudSyncService {
             throw new Error(`A central respondeu ${String(response.status)}.`);
           }
 
+          this.#recordCloudSuccess();
+
           workingDatabase.sqlite
             .prepare(
               `UPDATE sync_outbox
@@ -579,9 +589,14 @@ export class CloudSyncService {
              WHERE audit_id = ?`,
             )
             .run(message, Date.now(), item.audit_id);
+          this.#recordCloudFailure();
           return;
         }
       }
+    } catch {
+      // Keep every business operation in SQLite and progressively slow retries when
+      // the remote side is unavailable or has reached a free-tier limit.
+      this.#recordCloudFailure();
     } finally {
       this.#flushInFlight = false;
     }
@@ -1043,10 +1058,24 @@ export class CloudSyncService {
       this.#controlReconnectDelayMs = 1_000;
       this.#startControlHeartbeat(stream, database);
     });
-    stream.on('message', () => {
-      // The control frame is a push signal. The snapshot is requested only on
-      // connection/recovery or when the global control actually changes.
-      void this.#pullGlobalControl(database, pairingKey, deviceId).catch(() => undefined);
+    stream.on('message', (message) => {
+      // The control Durable Object already includes the current global command
+      // snapshot in this frame. Applying it directly avoids a duplicate HTTP read.
+      let payload: unknown;
+      try {
+        payload = JSON.parse(websocketMessageText(message));
+      } catch {
+        this.#recordCloudFailure();
+        return;
+      }
+      // A complete push frame contains commands. Fall back to the cursor-based
+      // recovery endpoint only for a malformed or legacy/incomplete frame.
+      const completePayload = isRecord(payload) && Array.isArray(payload.commands) ? payload : undefined;
+      void this.#pullGlobalControl(database, pairingKey, deviceId, completePayload)
+        .then((recovered) => {
+          if (!recovered) this.#recordCloudFailure();
+        })
+        .catch(() => this.#recordCloudFailure());
     });
     stream.on('error', () => undefined);
     stream.on('close', () => {
@@ -1099,22 +1128,26 @@ export class CloudSyncService {
     database: DatabaseContext,
     pairingKey: string,
     deviceId: string,
-  ): Promise<void> {
+    pushedPayload?: unknown,
+  ): Promise<boolean> {
     const cursorKey = 'global.event-control.cursor';
     const cursorRow = database.sqlite
       .prepare('SELECT value FROM sync_state WHERE key = ?')
       .get(cursorKey) as { readonly value: string } | undefined;
     const after = Number.parseInt(cursorRow?.value ?? '0', 10) || 0;
-    const response = await fetch(
-      `${this.#endpoint}/v1/monitor/global-control?after=${String(after)}`,
-      {
-        headers: await this.#cloudHeaders(pairingKey),
-        signal: AbortSignal.timeout(CONNECTION_TIMEOUT_MS),
-      },
-    );
-    if (!response.ok) return;
-    const payload: unknown = await response.json();
-    if (!isRecord(payload) || !Array.isArray(payload.commands)) return;
+    let payload = pushedPayload;
+    if (payload === undefined) {
+      const response = await fetch(
+        `${this.#endpoint}/v1/monitor/global-control?after=${String(after)}`,
+        {
+          headers: await this.#cloudHeaders(pairingKey),
+          signal: AbortSignal.timeout(CONNECTION_TIMEOUT_MS),
+        },
+      );
+      if (!response.ok) return false;
+      payload = await response.json();
+    }
+    if (!isRecord(payload) || !Array.isArray(payload.commands)) return false;
     let cursor = after;
     for (const candidate of payload.commands) {
       if (!isRecord(candidate)) continue;
@@ -1177,7 +1210,8 @@ export class CloudSyncService {
           !this.#hasAppliedBootstrap(database, command.commandId)
         ) {
           this.#pendingBootstrap = { command };
-          return;
+          this.#recordCloudSuccess();
+          return true;
         }
         setActiveEvent(database, event.id);
         database.sqlite
@@ -1214,6 +1248,19 @@ export class CloudSyncService {
     if (pending?.targetDeviceIds.includes(deviceId) === true) {
       await this.#prepareResetBackup(database, pairingKey, deviceId, pending);
     }
+    this.#recordCloudSuccess();
+    return true;
+  }
+
+  #recordCloudSuccess(): void {
+    this.#cloudRetryDelayMs = 3_000;
+    this.#cloudRetryNotBefore = 0;
+  }
+
+  #recordCloudFailure(): void {
+    const delay = this.#cloudRetryDelayMs;
+    this.#cloudRetryNotBefore = Date.now() + delay;
+    this.#cloudRetryDelayMs = Math.min(delay * 2, STREAM_RECONNECT_MAX_MS);
   }
 
   #pendingReset(value: unknown): PendingGlobalReset | null {

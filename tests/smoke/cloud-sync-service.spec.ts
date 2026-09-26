@@ -159,6 +159,38 @@ afterEach((): void => {
 });
 
 describe('cloud replication invariants', () => {
+  it('does not poll global control on every local outbox interval once a control stream exists', async () => {
+    await service.flushOutbox(db, null);
+    const initialReads = request.mock.calls.filter(([url]) => String(url).includes('/global-control'));
+
+    await service.flushOutbox(db, null);
+
+    expect(request.mock.calls.filter(([url]) => String(url).includes('/global-control'))).toHaveLength(
+      initialReads.length,
+    );
+  });
+
+  it('applies a complete control WebSocket frame without an extra control read', async () => {
+    await service.flushOutbox(db, null);
+    const control = requireSocket('/monitor/');
+    control.open();
+    const readsBefore = request.mock.calls.filter(([url]) => String(url).includes('/global-control')).length;
+
+    control.message({
+      type: 'global.sync',
+      activeEventId: null,
+      activeEventName: null,
+      revision: 0,
+      commands: [],
+      pendingReset: null,
+    });
+    await settle();
+
+    expect(request.mock.calls.filter(([url]) => String(url).includes('/global-control'))).toHaveLength(
+      readsBefore,
+    );
+  });
+
   it('uses the legacy administrator key only to mint a one-time desktop enrollment code', async () => {
     request.mockImplementation((url: string): Response => {
       if (url.endsWith('/v1/desktop/enrollment')) {
@@ -415,6 +447,7 @@ describe('cloud replication invariants', () => {
   });
 
   it('retries a locally committed operation with the same idempotency key after a network failure', async () => {
+    vi.useFakeTimers();
     const sentCommands: string[] = [];
     let centralAvailable = false;
     request.mockImplementation((url: string, init?: RequestInit): Response => {
@@ -442,6 +475,7 @@ describe('cloud replication invariants', () => {
     expect(sentCommands).toHaveLength(1);
 
     centralAvailable = true;
+    await vi.advanceTimersByTimeAsync(3_000);
     await service.flushOutbox(db, event.id);
 
     expect(

@@ -474,7 +474,7 @@ export function CloudMonitorPage(): React.JSX.Element {
             <Laptop size={20} aria-hidden="true" />
             <div>
               <h2>Máquinas conectadas</h2>
-              <p>Uma máquina desaparece da lista após 45 segundos sem sinal.</p>
+              <p>Uma máquina desaparece da lista após dez minutos sem sinal.</p>
             </div>
           </div>
           <div className="cloud-device-list">

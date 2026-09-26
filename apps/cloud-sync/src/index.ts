@@ -950,7 +950,10 @@ export class MonitorRoom extends DurableObject<Env> {
 
   #snapshot(): JsonRecord {
     const now = Date.now();
-    const activeSince = now - 45_000;
+    // Presence is carried by the persistent control WebSocket. Persisting a
+    // heartbeat every few seconds only burns SQL rows, so keep a generous window
+    // around the five-minute desktop heartbeat.
+    const activeSince = now - 600_000;
     const activeDevices = this.ctx.storage.sql
       .exec(
         `SELECT device_id, label, active_event_id, last_seen_at, latency_ms
@@ -4926,11 +4929,28 @@ function masterAuthorized(request: Request, env: Env): boolean {
   return key !== undefined && request.headers.get('X-GTRZ-Key') === key;
 }
 
+const DESKTOP_AUTH_CACHE_TTL_MS = 60_000;
+const desktopAuthorizationCache = new Map<string, number>();
+
+function desktopAuthorizationCacheKey(deviceId: string, token: string): string {
+  return `${deviceId}:${token}`;
+}
+
+function clearDesktopAuthorizationCache(deviceId: string): void {
+  for (const key of desktopAuthorizationCache.keys()) {
+    if (key.startsWith(`${deviceId}:`)) desktopAuthorizationCache.delete(key);
+  }
+}
+
 async function authorized(request: Request, env: Env): Promise<boolean> {
   if (masterAuthorized(request, env)) return true;
   const token = request.headers.get('X-GTRZ-Key');
   const deviceId = request.headers.get('X-GTRZ-Device-Id');
   if (token === null || deviceId === null) return false;
+  const cacheKey = desktopAuthorizationCacheKey(deviceId, token);
+  const cachedUntil = desktopAuthorizationCache.get(cacheKey);
+  if (cachedUntil !== undefined && cachedUntil > Date.now()) return true;
+  if (cachedUntil !== undefined) desktopAuthorizationCache.delete(cacheKey);
   const monitor = env.MONITOR_ROOM.get(env.MONITOR_ROOM.idFromName('gtrz-monitor'));
   const response = await monitor.fetch(
     new Request('https://monitor.internal/v1/monitor/desktop/authorize', {
@@ -4941,7 +4961,9 @@ async function authorized(request: Request, env: Env): Promise<boolean> {
   );
   if (!response.ok) return false;
   const payload: unknown = await response.json();
-  return isRecord(payload) && payload.authorized === true;
+  const accepted = isRecord(payload) && payload.authorized === true;
+  if (accepted) desktopAuthorizationCache.set(cacheKey, Date.now() + DESKTOP_AUTH_CACHE_TTL_MS);
+  return accepted;
 }
 
 interface CashierAuthorization {
@@ -5159,14 +5181,18 @@ export default {
       if (!masterAuthorized(request, env)) {
         return json({ error: { code: 'UNAUTHORIZED', message: 'Chave de acesso inválida.' } }, 401);
       }
+      const input = await readJson(request);
+      const deviceId = requiredString(input.deviceId, 'deviceId', 80);
       const monitor = env.MONITOR_ROOM.get(env.MONITOR_ROOM.idFromName('gtrz-monitor'));
-      return monitor.fetch(
+      const response = await monitor.fetch(
         new Request('https://monitor.internal/v1/monitor/desktop/devices/revoke', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(await readJson(request)),
+          body: JSON.stringify({ deviceId }),
         }),
       );
+      if (response.ok) clearDesktopAuthorizationCache(deviceId);
+      return response;
     }
 
     if (request.method === 'GET' && url.pathname === '/v1/verify') {
