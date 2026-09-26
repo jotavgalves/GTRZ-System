@@ -400,6 +400,13 @@ export class MonitorRoom extends DurableObject<Env> {
       );
       CREATE INDEX IF NOT EXISTS conflict_log_created_idx
         ON conflict_log (created_at DESC);
+      CREATE TABLE IF NOT EXISTS monitor_metrics (
+        metrics_id INTEGER PRIMARY KEY CHECK (metrics_id = 1),
+        accepted_commands INTEGER NOT NULL DEFAULT 0,
+        journal_attempts INTEGER NOT NULL DEFAULT 0,
+        replayed_attempts INTEGER NOT NULL DEFAULT 0
+      );
+      INSERT OR IGNORE INTO monitor_metrics (metrics_id) VALUES (1);
       CREATE TABLE IF NOT EXISTS cashier_devices (
         device_id TEXT PRIMARY KEY,
         token TEXT NOT NULL UNIQUE,
@@ -743,7 +750,7 @@ export class MonitorRoom extends DurableObject<Env> {
         .toArray();
     });
 
-    return this.#snapshot();
+    return { accepted: true };
   }
 
   #snapshot(): JsonRecord {
@@ -752,7 +759,7 @@ export class MonitorRoom extends DurableObject<Env> {
     const activeDevices = this.ctx.storage.sql
       .exec(
         `SELECT device_id, label, active_event_id, last_seen_at, latency_ms
-         FROM devices WHERE last_seen_at >= ? ORDER BY last_seen_at DESC`,
+         FROM devices WHERE last_seen_at >= ? ORDER BY last_seen_at DESC LIMIT 20`,
         activeSince,
       )
       .toArray()
@@ -766,7 +773,7 @@ export class MonitorRoom extends DurableObject<Env> {
     const activeCashiers = this.ctx.storage.sql
       .exec(
         `SELECT device_id, label, event_id, last_seen_at FROM cashier_devices
-         WHERE revoked_at IS NULL AND last_seen_at >= ? ORDER BY last_seen_at DESC`,
+         WHERE revoked_at IS NULL AND last_seen_at >= ? ORDER BY last_seen_at DESC LIMIT 20`,
         activeSince,
       )
       .toArray()
@@ -794,7 +801,7 @@ export class MonitorRoom extends DurableObject<Env> {
     const recentCommands = this.ctx.storage.sql
       .exec(
         `SELECT command_id, event_id, device_id, action, audit_id, payload_json, created_at
-         FROM command_log ORDER BY created_at DESC LIMIT 80`,
+         FROM command_log ORDER BY rowid DESC LIMIT 20`,
       )
       .toArray()
       .map((row) => ({
@@ -810,7 +817,7 @@ export class MonitorRoom extends DurableObject<Env> {
     const recentTransport = this.ctx.storage.sql
       .exec(
         `SELECT sequence, command_id, event_id, device_id, direction, transport, action, created_at
-         FROM transport_log ORDER BY sequence DESC LIMIT 100`,
+         FROM transport_log ORDER BY sequence DESC LIMIT 20`,
       )
       .toArray()
       .map((row) => ({
@@ -826,13 +833,8 @@ export class MonitorRoom extends DurableObject<Env> {
 
     const idempotency = this.ctx.storage.sql
       .exec(
-        `SELECT
-           (SELECT COUNT(*) FROM command_log) AS accepted_commands,
-           (SELECT COUNT(*) FROM transport_log WHERE direction = 'up' AND transport = 'journal')
-             AS journal_attempts,
-           (SELECT COUNT(*) FROM transport_log
-             WHERE direction = 'up' AND transport = 'journal' AND action LIKE '%.replay')
-             AS replayed_attempts`,
+        `SELECT accepted_commands, journal_attempts, replayed_attempts
+         FROM monitor_metrics WHERE metrics_id = 1`,
       )
       .one() as {
       readonly accepted_commands: number;
@@ -842,7 +844,7 @@ export class MonitorRoom extends DurableObject<Env> {
     const recentConflicts = this.ctx.storage.sql
       .exec(
         `SELECT sequence, command_id, event_id, device_id, action, entity_id, reason, created_at
-         FROM conflict_log ORDER BY sequence DESC LIMIT 80`,
+         FROM conflict_log ORDER BY sequence DESC LIMIT 20`,
       )
       .toArray()
       .map((row) => ({
@@ -879,21 +881,29 @@ export class MonitorRoom extends DurableObject<Env> {
     const auditId = positiveInteger(payload.auditId, 'auditId');
     const commandPayload = isRecord(payload.payload) ? payload.payload : {};
     const createdAt = nonNegativeInteger(payload.createdAt, 'createdAt');
-    this.ctx.storage.sql
-      .exec(
-        `INSERT OR IGNORE INTO command_log
-         (command_id, event_id, device_id, action, audit_id, payload_json, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
-        commandId,
-        eventId,
-        deviceId,
-        action,
-        auditId,
-        JSON.stringify(commandPayload),
-        createdAt,
-      )
-      .toArray();
-    return this.#snapshot();
+    const existing = this.ctx.storage.sql
+      .exec('SELECT 1 FROM command_log WHERE command_id = ?', commandId)
+      .toArray()[0];
+    if (existing === undefined) {
+      this.ctx.storage.sql
+        .exec(
+          `INSERT INTO command_log
+           (command_id, event_id, device_id, action, audit_id, payload_json, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          commandId,
+          eventId,
+          deviceId,
+          action,
+          auditId,
+          JSON.stringify(commandPayload),
+          createdAt,
+        )
+        .toArray();
+      this.ctx.storage.sql
+        .exec('UPDATE monitor_metrics SET accepted_commands = accepted_commands + 1 WHERE metrics_id = 1')
+        .toArray();
+    }
+    return { accepted: true };
   }
 
   #recordTransport(payload: JsonRecord): JsonRecord {
@@ -924,7 +934,18 @@ export class MonitorRoom extends DurableObject<Env> {
         Date.now(),
       )
       .toArray();
-    return this.#snapshot();
+    if (direction === 'up' && transport === 'journal') {
+      this.ctx.storage.sql
+        .exec(
+          `UPDATE monitor_metrics
+           SET journal_attempts = journal_attempts + 1,
+               replayed_attempts = replayed_attempts + ?
+           WHERE metrics_id = 1`,
+          action.endsWith('.replay') ? 1 : 0,
+        )
+        .toArray();
+    }
+    return { accepted: true };
   }
 
   #recordConflict(payload: JsonRecord): JsonRecord {
@@ -950,7 +971,7 @@ export class MonitorRoom extends DurableObject<Env> {
         createdAt,
       )
       .toArray();
-    return this.#snapshot();
+    return { accepted: true };
   }
 
   #enrollCashier(payload: JsonRecord): JsonRecord {
@@ -4602,21 +4623,13 @@ export class EventRoom extends DurableObject<Env> {
   }
 
   #snapshot(after: number): JsonRecord {
-    const stock = this.ctx.storage.sql
-      .exec(
-        'SELECT product_id, label, quantity, updated_at FROM stock ORDER BY label COLLATE NOCASE',
-      )
-      .toArray()
-      .map((row) => ({
-        productId: storedString(row.product_id, 'product_id'),
-        label: storedString(row.label, 'label'),
-        quantity: Number(row.quantity),
-        updatedAt: Number(row.updated_at),
-      }));
+    // Desktop replication applies the journal, not this projection. Keeping a full stock
+    // list in every WebSocket handshake exhausts the Durable Object free-tier read budget.
+    const stock: readonly JsonRecord[] = [];
     const events = this.ctx.storage.sql
       .exec(
         `SELECT sequence, command_id, type, payload_json, created_at
-         FROM event_log WHERE sequence > ? ORDER BY sequence ASC LIMIT 2_000`,
+         FROM event_log WHERE sequence > ? ORDER BY sequence ASC LIMIT 40`,
         after,
       )
       .toArray()
