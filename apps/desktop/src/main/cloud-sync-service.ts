@@ -550,6 +550,9 @@ export class CloudSyncService {
       }
       await this.#publishCashierCatalog(workingDatabase, effectiveActiveEventId, pairingKey);
       await this.#publishMobileContext(workingDatabase, effectiveActiveEventId, pairingKey);
+      if (canonicalCloud) {
+        await this.#processPrintQueue(workingDatabase, effectiveActiveEventId, deviceId, pairingKey);
+      }
       this.#applyInbox(workingDatabase, deviceId);
 
       const pending = workingDatabase.sqlite
@@ -1274,8 +1277,9 @@ export class CloudSyncService {
         method: 'POST',
         headers: await this.#cloudHeaders(pairingKey, {
           'Content-Type': 'application/octet-stream',
-          'X-GTRZ-Device-Id': deviceId,
-          'X-GTRZ-Backup-Sha256': createHash('sha256').update(contents).digest('hex'),
+           'X-GTRZ-Device-Id': deviceId,
+            'X-GTRZ-Backup-Name': backup.fileName,
+            'X-GTRZ-Backup-Sha256': createHash('sha256').update(contents).digest('hex'),
           'X-GTRZ-Backup-Size': String(contents.byteLength),
           'Content-Length': String(contents.byteLength),
         }),
@@ -1440,12 +1444,20 @@ export class CloudSyncService {
       .get(stateKey) as { readonly value: string } | undefined;
     if (current?.value === fingerprint) return;
 
+    const canonicalCloud = this.#endpoint.includes('.supabase.co/functions/');
+    const expectedVersion = canonicalCloud
+      ? await this.#readCanonicalEventVersion(activeEventId, pairingKey)
+      : null;
     const response = await fetch(
       `${this.#endpoint}/v1/events/${encodeURIComponent(activeEventId)}/cashier/catalog`,
       {
         method: 'POST',
         headers: await this.#cloudHeaders(pairingKey, { 'Content-Type': 'application/json' }),
-        body: JSON.stringify({ products: catalog }),
+        body: JSON.stringify(
+          canonicalCloud
+            ? { projection: { products: catalog }, expectedVersion }
+            : { products: catalog },
+        ),
         signal: AbortSignal.timeout(CONNECTION_TIMEOUT_MS),
       },
     );
@@ -1549,12 +1561,16 @@ export class CloudSyncService {
       .prepare('SELECT value FROM sync_state WHERE key = ?')
       .get(stateKey) as { readonly value: string } | undefined;
     if (current?.value === fingerprint) return;
+    const canonicalCloud = this.#endpoint.includes('.supabase.co/functions/');
+    const expectedVersion = canonicalCloud
+      ? await this.#readCanonicalEventVersion(activeEventId, pairingKey)
+      : null;
     const response = await fetch(
       `${this.#endpoint}/v1/events/${encodeURIComponent(activeEventId)}/cashier/context`,
       {
         method: 'POST',
         headers: await this.#cloudHeaders(pairingKey, { 'Content-Type': 'application/json' }),
-        body: JSON.stringify(context),
+        body: JSON.stringify(canonicalCloud ? { projection: context, expectedVersion } : context),
         signal: AbortSignal.timeout(CONNECTION_TIMEOUT_MS),
       },
     );
@@ -1566,6 +1582,24 @@ export class CloudSyncService {
          ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
       )
       .run(stateKey, fingerprint, Date.now());
+  }
+
+  async #readCanonicalEventVersion(eventId: string, pairingKey: string): Promise<number> {
+    const response = await fetch(
+      `${this.#endpoint}/v1/events/${encodeURIComponent(eventId)}/state`,
+      {
+        headers: await this.#cloudHeaders(pairingKey),
+        signal: AbortSignal.timeout(CONNECTION_TIMEOUT_MS),
+      },
+    );
+    if (!response.ok) {
+      throw new Error(`Não foi possível ler a versão canônica do evento (${String(response.status)}).`);
+    }
+    const payload: unknown = await response.json();
+    if (!isRecord(payload) || typeof payload.version !== 'number' || payload.version < 0) {
+      throw new Error('A nuvem respondeu com uma versão de evento inválida.');
+    }
+    return payload.version;
   }
 
   async #processPrintQueue(
