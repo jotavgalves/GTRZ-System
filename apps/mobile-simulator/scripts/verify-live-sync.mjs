@@ -52,6 +52,10 @@ async function activeEventId() {
   return command.eventId;
 }
 
+function wait(milliseconds) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
 async function main() {
   const eventId = await activeEventId();
   const topicReply = await edgeRequest(`/v1/events/${eventId}/realtime-topic`);
@@ -65,19 +69,27 @@ async function main() {
     .flatMap((context) => context.pages())
     .find((candidate) => candidate.url().endsWith('/cashier'));
   if (!page) throw new Error('O GTRZ System Mobile instalado não está aberto na porta de teste.');
+  const mobileRefreshState = () =>
+    page.evaluate(() => ({
+      inFlight: state.realtimeRefreshInFlight,
+      pending: state.realtimeRefreshPending,
+      online: state.online,
+    }));
 
   const protocol = await page.context().newCDPSession(page);
   await protocol.send('Network.enable');
   const milestones = [];
-  const startedAt = Date.now();
+  let startedAt = null;
   protocol.on('Network.webSocketFrameReceived', ({ response }) => {
-    if (response.payloadData.includes('state-changed')) {
+    if (startedAt !== null && response.payloadData.includes('state-changed')) {
       milestones.push({ step: 'sinal-websocket', elapsedMs: Date.now() - startedAt });
     }
   });
   protocol.on('Network.requestWillBeSent', ({ request }) => {
     const match = request.url.match(/\/v1\/mobile\/(session|catalog|context)/);
-    if (match) milestones.push({ step: match[1], elapsedMs: Date.now() - startedAt });
+    if (startedAt !== null && match) {
+      milestones.push({ step: match[1], elapsedMs: Date.now() - startedAt });
+    }
   });
 
   const desktopReplica = createClient(projectUrl, publishableKey, {
@@ -112,6 +124,7 @@ async function main() {
     });
   });
 
+  startedAt = Date.now();
   await edgeRequest('/v1/monitor/realtime-ping', {
     method: 'POST',
     body: JSON.stringify({ eventId }),
@@ -129,7 +142,42 @@ async function main() {
     Date.now() < deadline &&
     !requiredSteps.every((step) => milestones.some((milestone) => milestone.step === step))
   ) {
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    await wait(100);
+  }
+
+  const initialSettleDeadline = Date.now() + 12_000;
+  let initialRefresh = await mobileRefreshState();
+  while (
+    Date.now() < initialSettleDeadline &&
+    (initialRefresh.inFlight || initialRefresh.pending || !initialRefresh.online)
+  ) {
+    await wait(250);
+    initialRefresh = await mobileRefreshState();
+  }
+  if (initialRefresh.inFlight || initialRefresh.pending || !initialRefresh.online) {
+    throw new Error('A primeira atualização móvel não estabilizou antes do teste de rajada.');
+  }
+
+  await edgeRequest('/v1/monitor/realtime-ping', {
+    method: 'POST',
+    body: JSON.stringify({ eventId }),
+  });
+  await wait(500);
+  const duringFirstRefresh = await mobileRefreshState();
+  await edgeRequest('/v1/monitor/realtime-ping', {
+    method: 'POST',
+    body: JSON.stringify({ eventId }),
+  });
+  await wait(500);
+  const afterSecondSignal = await mobileRefreshState();
+  const settleDeadline = Date.now() + 12_000;
+  let settledRefresh = await mobileRefreshState();
+  while (
+    Date.now() < settleDeadline &&
+    (settledRefresh.inFlight || settledRefresh.pending || !settledRefresh.online)
+  ) {
+    await wait(250);
+    settledRefresh = await mobileRefreshState();
   }
 
   await desktopReplica.removeChannel(channel);
@@ -137,17 +185,29 @@ async function main() {
   const missingSteps = requiredSteps.filter(
     (step) => !milestones.some((milestone) => milestone.step === step),
   );
+  const burstCoalesced =
+    duringFirstRefresh.inFlight &&
+    afterSecondSignal.pending &&
+    !settledRefresh.inFlight &&
+    !settledRefresh.pending &&
+    settledRefresh.online;
   console.log(
     JSON.stringify({
       simulator: 'installed',
       eventId,
       desktopReplicaReceived: true,
       milestones,
-      passed: missingSteps.length === 0,
+      burst: {
+        duringFirstRefresh,
+        afterSecondSignal,
+        settledRefresh,
+        coalesced: burstCoalesced,
+      },
+      passed: missingSteps.length === 0 && burstCoalesced,
       missingSteps,
     }),
   );
-  process.exit(missingSteps.length === 0 ? 0 : 1);
+  process.exit(missingSteps.length === 0 && burstCoalesced ? 0 : 1);
 }
 
 main().catch((error) => {
