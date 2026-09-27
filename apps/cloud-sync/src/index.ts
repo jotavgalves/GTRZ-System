@@ -362,7 +362,7 @@ function newSecret(prefix: string, bytesLength: number): string {
   return `${prefix}${hex(bytes)}`;
 }
 
-export class MonitorRoom extends DurableObject<Env> {
+class MonitorRoom extends DurableObject<Env> {
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     this.ctx.storage.sql.exec(`
@@ -1992,7 +1992,11 @@ export class MonitorRoom extends DurableObject<Env> {
   }
 }
 
-export class EventRoom extends DurableObject<Env> {
+// A new empty namespace is bound for the Supabase cutover. The former class is
+// retained only long enough for Cloudflare's next migration to delete its data.
+export class MonitorRoomFresh extends MonitorRoom {}
+
+class EventRoom extends DurableObject<Env> {
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     this.ctx.storage.sql.exec(`
@@ -4958,6 +4962,10 @@ export class EventRoom extends DurableObject<Env> {
     );
   }
 }
+
+// See MonitorRoomFresh above. This keeps the Worker URL stable while the old
+// transactional namespace is permanently retired.
+export class EventRoomFresh extends EventRoom {}
 
 function masterAuthorized(request: Request, env: Env): boolean {
   const key = env.GTRZ_SYNC_KEY;
