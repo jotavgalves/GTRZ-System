@@ -1,0 +1,56 @@
+{
+  "name": "@gtrz/mobile-simulator",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Cliente de teste mobile para o GTRZ System.",
+  "author": "GTRZ Eventos",
+  "main": "out/main/index.js",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "package:win": "npm run build && electron-builder --win nsis --x64"
+  },
+  "build": {
+    "appId": "br.com.gtrz.system.mobile",
+    "productName": "GTRZ System Mobile",
+    "asar": true,
+    "npmRebuild": false,
+    "directories": {
+      "output": "../../release/mobile",
+      "buildResources": "resources"
+    },
+    "files": [
+      "out/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "../desktop/resources/icon.ico",
+        "to": "icon.ico"
+      }
+    ],
+    "win": {
+      "icon": "../desktop/resources/icon.ico",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "artifactName": "GTRZ-System-Mobile-${version}-Setup.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "GTRZ System Mobile",
+      "installerIcon": "../desktop/resources/icon.ico",
+      "uninstallerIcon": "../desktop/resources/icon.ico",
+      "installerHeaderIcon": "../desktop/resources/icon.ico"
+    }
+  }
+}
