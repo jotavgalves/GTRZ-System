@@ -721,6 +721,7 @@ export class CloudSyncService {
         inboxAwaitingApply: 0,
         conflictsOpen: 0,
       },
+      recentCommands: [],
       recentTransport: [],
       recentConflicts: [],
       idempotency: { acceptedCommands: 0, journalAttempts: 0, replayedAttempts: 0 },
