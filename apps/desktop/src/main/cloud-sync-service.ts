@@ -710,8 +710,9 @@ export class CloudSyncService {
     }
 
     const payload: unknown = await snapshot.json();
-    return cloudMonitorSchema.parse({
+    const defaults = {
       endpoint: this.#endpoint,
+      checkedAt: Date.now(),
       localQueue: {
         outboxPending: 0,
         outboxAccepted: 0,
@@ -724,8 +725,43 @@ export class CloudSyncService {
       recentConflicts: [],
       idempotency: { acceptedCommands: 0, journalAttempts: 0, replayedAttempts: 0 },
       localConflicts: [],
-      ...(typeof payload === 'object' && payload !== null ? payload : {}),
-    });
+    };
+
+    if (!this.#endpoint.includes('.supabase.co/functions/')) {
+      return cloudMonitorSchema.parse({
+        ...defaults,
+        ...(isRecord(payload) ? payload : {}),
+      });
+    }
+
+    const remote = isRecord(payload) ? payload : {};
+    const activeDevices = Array.isArray(remote.activeDevices)
+      ? remote.activeDevices.flatMap((device) => {
+          if (!isRecord(device)) return [];
+          const id = stringField(device, 'id') ?? stringField(device, 'deviceId');
+          const label = stringField(device, 'label');
+          if (id === null || label === null) return [];
+          const possibleEventId = stringField(device, 'activeEventId');
+          const activeEventId =
+            possibleEventId !== null &&
+            /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(
+              possibleEventId,
+            )
+              ? possibleEventId
+              : null;
+          return [
+            {
+              id: id.slice(0, 80),
+              label: label.slice(0, 80),
+              activeEventId,
+              lastSeenAt: integerField(device, 'lastSeenAt') ?? defaults.checkedAt,
+              latencyMs:
+                integerField(device, 'latencyMs') ?? (id === deviceId ? this.#lastLatencyMs : 0),
+            },
+          ];
+        })
+      : [];
+    return cloudMonitorSchema.parse({ ...defaults, activeDevices });
   }
 
   async listMobileOperators(): Promise<readonly MobileOperator[]> {
