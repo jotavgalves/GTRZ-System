@@ -96,13 +96,17 @@ async function main() {
     auth: { persistSession: false, autoRefreshToken: false },
   });
   let resolveBroadcast;
+  let desktopBroadcastElapsedMs = null;
   const broadcastReceived = new Promise((resolve) => {
     resolveBroadcast = resolve;
   });
   const channel = desktopReplica
     .channel(topicReply.topic)
     .on('broadcast', { event: 'state-changed' }, ({ payload }) => {
-      if (payload?.eventId === eventId) resolveBroadcast();
+      if (payload?.eventId === eventId) {
+        desktopBroadcastElapsedMs = startedAt === null ? null : Date.now() - startedAt;
+        resolveBroadcast();
+      }
     });
 
   await new Promise((resolve, reject) => {
@@ -196,6 +200,7 @@ async function main() {
       simulator: 'installed',
       eventId,
       desktopReplicaReceived: true,
+      desktopBroadcastElapsedMs,
       milestones,
       burst: {
         duringFirstRefresh,
