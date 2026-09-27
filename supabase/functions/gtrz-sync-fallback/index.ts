@@ -211,6 +211,31 @@ Deno.serve(async (request) => {
     if (error || !asObj(data)) throw error ?? new Error('Estado remoto inválido.');
     return data;
   };
+  const mobileRefresh = async (): Promise<Obj> => {
+    const raw = routeToken(request);
+    if (!raw)
+      throw Object.assign(new Error('A sessão móvel foi encerrada.'), {
+        status: 401,
+        code: 'MOBILE_UNAUTHORIZED',
+      });
+    const { data, error } = await db.rpc('gtrz_read_mobile_refresh', {
+      p_token_hash: await sha(raw),
+      p_now: Date.now(),
+    });
+    if (error || !asObj(data)) throw error ?? new Error('Atualização móvel inválida.');
+    if (data.status === 'unauthorized')
+      throw Object.assign(new Error('A sessão móvel foi encerrada.'), {
+        status: 401,
+        code: 'MOBILE_UNAUTHORIZED',
+      });
+    if (data.status === 'no-active-event')
+      throw Object.assign(new Error('Nenhum evento ativo está disponível.'), {
+        status: 409,
+        code: 'NO_ACTIVE_EVENT',
+      });
+    if (data.status !== 'ok') throw new Error('Atualização móvel inválida.');
+    return data;
+  };
   const currentSession = async (): Promise<Obj> => {
     const raw = routeToken(request);
     if (!raw)
@@ -961,21 +986,16 @@ Deno.serve(async (request) => {
 
     if (!path.startsWith('/v1/mobile/'))
       return bad(404, 'NOT_FOUND', 'Rota canônica não encontrada.');
-    const current = await currentSession(),
-      operator = current.operator as Obj,
-      eventId = string(current.eventId, 'eventId'),
-      allowed = operator.permissions as Record<Permission, boolean>;
     if (path === '/v1/mobile/refresh' && request.method === 'GET') {
-      const remote = await state(eventId),
-        context = asObj(remote.context) ? remote.context : emptyContext;
+      const refreshed = await mobileRefresh(),
+        operator = asObj(refreshed.operator) ? refreshed.operator : null,
+        context = asObj(refreshed.context) ? refreshed.context : emptyContext;
+      if (!operator) throw new Error('Atualização móvel inválida.');
+      const allowed = operator.permissions as Record<Permission, boolean>;
       return ok({
-        operator: {
-          id: operator.operator_id,
-          name: operator.name,
-          permissions: operator.permissions,
-        },
-        eventId,
-        catalog: remote.catalog,
+        operator,
+        eventId: refreshed.eventId,
+        catalog: refreshed.catalog,
         context: {
           ...context,
           ticketLots: allowed.tickets ? context.ticketLots : [],
@@ -985,6 +1005,10 @@ Deno.serve(async (request) => {
         },
       });
     }
+    const current = await currentSession(),
+      operator = current.operator as Obj,
+      eventId = string(current.eventId, 'eventId'),
+      allowed = operator.permissions as Record<Permission, boolean>;
     if (path === '/v1/mobile/realtime-topic' && request.method === 'GET')
       return ok({ topic: await realtimeTopic(eventId) });
     if (path === '/v1/mobile/catalog' && request.method === 'GET')
