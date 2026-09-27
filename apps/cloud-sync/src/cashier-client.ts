@@ -1,7 +1,7 @@
 export const cashierClientScript = String.raw`
 const state={products:[],context:{ticketLots:[],servicePoints:[],voucherCodes:[],vouchers:[]},cart:new Map(),method:'cash',cashReceived:'',servicePointId:null,voucherCode:'',voucherAmount:'',online:false,operator:null,realtimeSocket:null,realtimeRefreshInFlight:false,realtimeRefreshPending:false,generation:0,streamGeneration:0,reconnectTimer:null,sessionRefreshTimer:null,view:'sales',noticeTimer:null,pendingCombo:null,pendingCartKey:null,pendingChoiceQuantities:{},catalogFilter:'all'};
 const $=id=>document.getElementById(id);
-const canonicalEndpoint='https://muhzjnveqrahccoisddo.supabase.co/functions/v1/gtrz-sync-fallback';
+const canonicalEndpoint=new URL('/cashier/api',location.origin).toString().replace(/\/$/,'');
 const canonicalRealtimeEndpoint='wss://muhzjnveqrahccoisddo.supabase.co/realtime/v1/websocket?apikey=sb_publishable_ikPSVbY1junIsMbz5SrFrg_wkobALXv';
 const money=c=>new Intl.NumberFormat('pt-BR',{style:'currency',currency:'BRL'}).format(c/100);
 const uuid=()=>crypto.randomUUID();

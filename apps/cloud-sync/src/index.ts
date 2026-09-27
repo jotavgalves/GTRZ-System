@@ -5228,6 +5228,17 @@ export default {
       return printQueuePage();
     }
 
+    // Keep the mobile's authenticated refresh on the same origin as the PWA.
+    // The canonical Edge Function still authorizes every request; this avoids a
+    // browser CORS preflight between a realtime signal and the confirmed refresh.
+    if (url.pathname.startsWith('/cashier/api/v1/')) {
+      const canonical = new URL(
+        `https://muhzjnveqrahccoisddo.supabase.co/functions/v1/gtrz-sync-fallback${url.pathname.slice('/cashier/api'.length)}`,
+      );
+      canonical.search = url.search;
+      return fetch(new Request(canonical, request));
+    }
+
     if (request.method === 'GET' && url.pathname === '/cashier') {
       return cashierPage({ environment: isTestEnvironment(env) ? 'test' : 'production' });
     }
