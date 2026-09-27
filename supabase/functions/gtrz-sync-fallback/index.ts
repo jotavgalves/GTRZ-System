@@ -655,7 +655,7 @@ Deno.serve(async (request) => {
       denyAdministrator();
       const input = await body(),
         eventId = string(input.eventId, 'eventId');
-      const delivery = await notifyRealtime(
+      await notifyRealtime(
         eventId,
         0,
         false,
@@ -672,7 +672,7 @@ Deno.serve(async (request) => {
         current = await state(eventId),
         catalog = asObj(current.catalog) ? current.catalog : emptyCatalog,
         context = asObj(current.context) ? current.context : emptyContext;
-      await notifyRealtime(
+      const delivery = await notifyRealtime(
         eventId,
         Number(current.version ?? 0),
         false,
