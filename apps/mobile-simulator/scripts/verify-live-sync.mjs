@@ -297,7 +297,7 @@ async function main() {
   await page.evaluate(() => {
     window.__gtrzLiveLastMutationAt = null;
   });
-  await edgeRequest('/v1/monitor/realtime-snapshot-ping', {
+  const snapshotReply = await edgeRequest('/v1/monitor/realtime-snapshot-ping', {
     method: 'POST',
     body: JSON.stringify({ eventId, traceId: snapshotTraceId }),
   });
@@ -306,7 +306,9 @@ async function main() {
     await wait(25);
   }
   if (snapshotSignalReceivedAt === null) {
-    throw new Error('O snapshot confirmado não chegou ao mobile.');
+    throw new Error(
+      `O snapshot confirmado não chegou ao mobile (destinatários: ${snapshotReply.mobileRecipients ?? 0}; falha: ${snapshotReply.failed === true}).`,
+    );
   }
   let snapshotMutationAt = await page.evaluate(() => window.__gtrzLiveLastMutationAt);
   while (Date.now() < snapshotDeadline && typeof snapshotMutationAt !== 'number') {
@@ -388,6 +390,8 @@ async function main() {
         signalElapsedMs: snapshotSignalElapsedMs,
         signalToVisualElapsedMs: snapshotSignalToVisualElapsedMs,
         refreshesAfterSignal: snapshotRefreshes,
+        recipients: snapshotReply.mobileRecipients ?? 0,
+        deliveryFailed: snapshotReply.failed === true,
         immediate:
           snapshotSignalToVisualElapsedMs >= 0 &&
           snapshotSignalToVisualElapsedMs <= 200 &&

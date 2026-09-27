@@ -3,6 +3,7 @@ import { createClient } from 'npm:@supabase/supabase-js@2.93.1';
 type Obj = Record<string, unknown>;
 type Permission = 'sales' | 'inventory' | 'tickets' | 'expenses' | 'vouchers';
 type MobileProjection = { catalog: Obj; context: Obj };
+type RealtimeDelivery = { mobileRecipients: number; failed: boolean };
 const permissionKeys: readonly Permission[] = [
   'sales',
   'inventory',
@@ -305,8 +306,9 @@ Deno.serve(async (request) => {
     notifyMobile = true,
     traceId: string | null = null,
     mobileProjection: MobileProjection | null = null,
-  ): Promise<void> => {
-    if (!pairingKey) return;
+  ): Promise<RealtimeDelivery> => {
+    if (!pairingKey) return { mobileRecipients: 0, failed: true };
+    let mobileRecipients = 0;
     try {
       const notifications: Promise<Response>[] = [];
       if (notifyMobile) {
@@ -334,10 +336,16 @@ Deno.serve(async (request) => {
         if (error) throw error;
         for (const rawSession of sessions ?? []) {
           const session = rawSession as unknown as Obj,
-            operator = asObj(session.mobile_operators) ? session.mobile_operators : null,
+            relation = session.mobile_operators,
+            operator = asObj(relation)
+              ? relation
+              : Array.isArray(relation)
+                ? relation.find(asObj) ?? null
+                : null,
             tokenHash = typeof session.token_hash === 'string' ? session.token_hash : null;
           if (!operator || !tokenHash || operator.active !== true) continue;
           const permissions = operator.permissions as Record<Permission, boolean>;
+          mobileRecipients += 1;
           notifications.push(
             fetch(
               `${endpoint}/realtime/v1/api/broadcast/${encodeURIComponent(await mobileRealtimeTopic(tokenHash))}/events/state-changed`,
@@ -378,9 +386,12 @@ Deno.serve(async (request) => {
       }
       if ((await Promise.all(notifications)).some((response) => !response.ok)) {
         console.warn('Realtime broadcast rejected.');
+        return { mobileRecipients, failed: true };
       }
+      return { mobileRecipients, failed: false };
     } catch {
       // A missed notification is harmless: the desktop fallback pull recovers it.
+      return { mobileRecipients, failed: true };
     }
   };
   const queueReceipt = async (eventId: string, commandId: string, payload: Obj): Promise<void> => {
@@ -644,7 +655,7 @@ Deno.serve(async (request) => {
       denyAdministrator();
       const input = await body(),
         eventId = string(input.eventId, 'eventId');
-      await notifyRealtime(
+      const delivery = await notifyRealtime(
         eventId,
         0,
         false,
@@ -670,7 +681,7 @@ Deno.serve(async (request) => {
         typeof input.traceId === 'string' ? input.traceId : null,
         { catalog, context },
       );
-      return ok({ accepted: true });
+      return ok({ accepted: true, ...delivery });
     }
     if (path === '/v1/monitor/desktop-realtime-ping' && request.method === 'POST') {
       denyAdministrator();
