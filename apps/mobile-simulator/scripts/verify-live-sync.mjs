@@ -98,16 +98,17 @@ async function main() {
   const protocol = await page.context().newCDPSession(page);
   await protocol.send('Network.enable');
   const milestones = [];
-  let startedAt = null;
+  let mobileStartedAt = null;
+  let fastStartedAt = null;
   protocol.on('Network.webSocketFrameReceived', ({ response }) => {
-    if (startedAt !== null && response.payloadData.includes('state-changed')) {
-      milestones.push({ step: 'sinal-websocket', elapsedMs: Date.now() - startedAt });
+    if (mobileStartedAt !== null && response.payloadData.includes('state-changed')) {
+      milestones.push({ step: 'sinal-websocket', elapsedMs: Date.now() - mobileStartedAt });
     }
   });
   protocol.on('Network.requestWillBeSent', ({ request }) => {
-    const match = request.url.match(/\/v1\/mobile\/(session|catalog|context)/);
-    if (startedAt !== null && match) {
-      milestones.push({ step: match[1], elapsedMs: Date.now() - startedAt });
+    const match = request.url.match(/\/v1\/mobile\/(refresh)/);
+    if (mobileStartedAt !== null && match) {
+      milestones.push({ step: match[1], elapsedMs: Date.now() - mobileStartedAt });
     }
   });
 
@@ -123,7 +124,7 @@ async function main() {
     .channel(topicReply.topic)
     .on('broadcast', { event: 'state-changed' }, ({ payload }) => {
       if (payload?.eventId === eventId) {
-        desktopBroadcastElapsedMs = startedAt === null ? null : Date.now() - startedAt;
+        desktopBroadcastElapsedMs = mobileStartedAt === null ? null : Date.now() - mobileStartedAt;
         resolveBroadcast();
       }
     });
@@ -140,7 +141,7 @@ async function main() {
     .channel(desktopTopicReply.topic)
     .on('broadcast', { event: 'journal-entry' }, ({ payload }) => {
       if (payload?.eventId === eventId && payload?.event?.sequence === 0) {
-        desktopFastBroadcastElapsedMs = startedAt === null ? null : Date.now() - startedAt;
+        desktopFastBroadcastElapsedMs = fastStartedAt === null ? null : Date.now() - fastStartedAt;
         resolveFastBroadcast();
       }
     });
@@ -182,11 +183,11 @@ async function main() {
     });
   });
 
-  startedAt = Date.now();
+  mobileStartedAt = Date.now();
   await page.evaluate((started) => {
     window.__gtrzLiveRenderStartedAt = started;
     window.__gtrzLiveRenderElapsedMs = null;
-  }, startedAt);
+  }, mobileStartedAt);
   await edgeRequest('/v1/monitor/realtime-ping', {
     method: 'POST',
     body: JSON.stringify({ eventId }),
@@ -201,7 +202,7 @@ async function main() {
     ),
   ]);
 
-  const requiredSteps = ['sinal-websocket', 'session', 'catalog', 'context'];
+  const requiredSteps = ['sinal-websocket', 'refresh'];
   const deadline = Date.now() + 10_000;
   while (
     Date.now() < deadline &&
@@ -227,7 +228,8 @@ async function main() {
     throw new Error('A atualização em tempo real não gerou uma renderização visível no mobile.');
   }
 
-  startedAt = Date.now();
+  mobileStartedAt = null;
+  fastStartedAt = Date.now();
   await edgeRequest('/v1/monitor/desktop-realtime-ping', {
     method: 'POST',
     body: JSON.stringify({ eventId }),
@@ -241,6 +243,7 @@ async function main() {
       ),
     ),
   ]);
+  fastStartedAt = null;
 
   await edgeRequest('/v1/monitor/realtime-ping', {
     method: 'POST',

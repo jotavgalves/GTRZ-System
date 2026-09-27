@@ -954,6 +954,26 @@ Deno.serve(async (request) => {
       operator = current.operator as Obj,
       eventId = string(current.eventId, 'eventId'),
       allowed = operator.permissions as Record<Permission, boolean>;
+    if (path === '/v1/mobile/refresh' && request.method === 'GET') {
+      const remote = await state(eventId),
+        context = asObj(remote.context) ? remote.context : emptyContext;
+      return ok({
+        operator: {
+          id: operator.operator_id,
+          name: operator.name,
+          permissions: operator.permissions,
+        },
+        eventId,
+        catalog: remote.catalog,
+        context: {
+          ...context,
+          ticketLots: allowed.tickets ? context.ticketLots : [],
+          servicePoints: allowed.sales || allowed.vouchers ? context.servicePoints : [],
+          voucherCodes: allowed.vouchers ? context.voucherCodes : [],
+          vouchers: allowed.sales || allowed.vouchers ? context.vouchers : [],
+        },
+      });
+    }
     if (path === '/v1/mobile/realtime-topic' && request.method === 'GET')
       return ok({ topic: await realtimeTopic(eventId) });
     if (path === '/v1/mobile/catalog' && request.method === 'GET')
