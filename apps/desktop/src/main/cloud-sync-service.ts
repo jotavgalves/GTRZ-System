@@ -729,10 +729,12 @@ export class CloudSyncService {
     };
 
     if (!this.#endpoint.includes('.supabase.co/functions/')) {
-      return cloudMonitorSchema.parse({
+      const monitor = cloudMonitorSchema.parse({
         ...defaults,
         ...(isRecord(payload) ? payload : {}),
       });
+      this.#recordCloudSuccess();
+      return monitor;
     }
 
     const remote = isRecord(payload) ? payload : {};
@@ -762,7 +764,9 @@ export class CloudSyncService {
           ];
         })
       : [];
-    return cloudMonitorSchema.parse({ ...defaults, activeDevices });
+    const monitor = cloudMonitorSchema.parse({ ...defaults, activeDevices });
+    this.#recordCloudSuccess();
+    return monitor;
   }
 
   async listMobileOperators(): Promise<readonly MobileOperator[]> {
@@ -1253,11 +1257,15 @@ export class CloudSyncService {
   }
 
   #recordCloudSuccess(): void {
+    // The canonical HTTP transport has no persistent WebSocket to flip this flag.
+    // A completed authenticated request is the authoritative connectivity signal.
+    this.#cloudConnected = true;
     this.#cloudRetryDelayMs = 3_000;
     this.#cloudRetryNotBefore = 0;
   }
 
   #recordCloudFailure(): void {
+    this.#cloudConnected = false;
     const delay = this.#cloudRetryDelayMs;
     this.#cloudRetryNotBefore = Date.now() + delay;
     this.#cloudRetryDelayMs = Math.min(delay * 2, STREAM_RECONNECT_MAX_MS);
