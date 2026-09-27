@@ -567,6 +567,7 @@ export class CloudSyncService {
       }
 
       this.#retryRecoverablePaidOrders(workingDatabase);
+      this.#backfillRemoteSaleAudits(workingDatabase);
       const fallbackIsDue =
         !canonicalCloud ||
         !this.#canonicalRealtimeReadyEvents.has(CATALOG_EVENT_ID) ||
@@ -2316,6 +2317,51 @@ export class CloudSyncService {
     }
 
     this.#retryRecoverablePaidOrders(database);
+  }
+
+  #backfillRemoteSaleAudits(database: DatabaseContext): void {
+    const rows = database.sqlite
+      .prepare(
+        `SELECT event_id, payload_json
+         FROM sync_inbox
+         WHERE applied_at IS NOT NULL
+           AND payload_json LIKE '%operations.order-paid%'
+         ORDER BY sequence DESC
+         LIMIT 100`,
+      )
+      .all() as { readonly event_id: string; readonly payload_json: string }[];
+    const insert = database.sqlite.prepare(
+      `INSERT INTO audit_log
+       (event_id, profile, action, entity_type, entity_id, details_json, created_at)
+       SELECT ?, 'cashier', 'operations.order-paid', 'order', ?, ?, ?
+       WHERE NOT EXISTS (
+         SELECT 1 FROM audit_log
+         WHERE action = 'operations.order-paid'
+           AND entity_id = ?
+           AND details_json LIKE '%"_cloudReplicated":true%'
+       )`,
+    );
+    let restored = 0;
+    database.sqlite.transaction(() => {
+      for (const row of rows) {
+        const payload = journalPayload(JSON.parse(row.payload_json) as unknown);
+        if (payload?.action !== 'operations.order-paid' || payload.entityId === null) continue;
+        const result = insert.run(
+          row.event_id,
+          payload.entityId,
+          JSON.stringify({
+            ...payload.details,
+            _cloudReplicated: true,
+            source: 'mobile',
+            originDeviceId: payload.deviceId,
+          }),
+          payload.createdAt,
+          payload.entityId,
+        );
+        restored += result.changes;
+      }
+    })();
+    if (restored > 0) this.#onDataChanged();
   }
 
   /**
