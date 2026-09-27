@@ -8,6 +8,9 @@ interface Env {
   readonly MONITOR_ROOM: DurableObjectNamespace<MonitorRoom>;
   readonly SYNC_AUDIT_ARCHIVE: R2Bucket;
   readonly GTRZ_SYNC_KEY?: string;
+  // Only the Supabase Edge Function may use this to fan out an already-persisted
+  // Postgres journal event to connected Cloudflare WebSocket clients.
+  readonly GTRZ_SUPABASE_RELAY_KEY?: string;
   readonly GTRZ_ENVIRONMENT?: 'test';
 }
 
@@ -2253,6 +2256,12 @@ export class EventRoom extends DurableObject<Env> {
 
       if (request.method === 'POST' && url.pathname.endsWith('/journal')) {
         return json(this.#commitJournal(await readJson(request), url.pathname.split('/')[3] ?? ''));
+      }
+
+      if (request.method === 'POST' && url.pathname.endsWith('/relay')) {
+        return json(
+          this.#relayPostgresEvent(await readJson(request), url.pathname.split('/')[3] ?? ''),
+        );
       }
 
       throw new ApiError(404, 'NOT_FOUND', 'Rota não encontrada.');
@@ -4866,6 +4875,32 @@ export class EventRoom extends DurableObject<Env> {
     return { currentSequence: current.sequence, stock, events };
   }
 
+  #relayPostgresEvent(input: unknown, eventId: string): JsonRecord {
+    if (!isRecord(input))
+      throw new ApiError(400, 'INVALID_INPUT', 'Evento de retransmissão inválido.');
+    const sequence = input.sequence;
+    const commandId = input.commandId;
+    const type = input.type;
+    const payload = input.payload;
+    const createdAt = input.createdAt;
+    if (
+      typeof sequence !== 'number' ||
+      !Number.isSafeInteger(sequence) ||
+      typeof commandId !== 'string' ||
+      commandId.length === 0 ||
+      typeof type !== 'string' ||
+      type.length === 0 ||
+      !isRecord(payload) ||
+      typeof createdAt !== 'number' ||
+      !Number.isSafeInteger(createdAt)
+    ) {
+      throw new ApiError(400, 'INVALID_INPUT', 'Evento de retransmissão incompleto.');
+    }
+    const event: StreamEvent = { sequence, commandId, type, payload, createdAt };
+    this.#broadcast(event, eventId);
+    return { accepted: true };
+  }
+
   #broadcast(event: StreamEvent, eventId?: string): void {
     const printQueued = eventId !== undefined && this.#hasQueuedPrintForCommand(event.commandId);
     for (const socket of this.ctx.getWebSockets('event')) {
@@ -4927,6 +4962,11 @@ export class EventRoom extends DurableObject<Env> {
 function masterAuthorized(request: Request, env: Env): boolean {
   const key = env.GTRZ_SYNC_KEY;
   return key !== undefined && request.headers.get('X-GTRZ-Key') === key;
+}
+
+function supabaseRelayAuthorized(request: Request, env: Env): boolean {
+  const key = env.GTRZ_SUPABASE_RELAY_KEY;
+  return key !== undefined && request.headers.get('X-GTRZ-Supabase-Relay-Key') === key;
 }
 
 const DESKTOP_AUTH_CACHE_TTL_MS = 60_000;
@@ -5137,6 +5177,39 @@ export default {
         status: 'ok',
         service: isTestEnvironment(env) ? 'gtrz-sync-test' : 'gtrz-sync',
       });
+    }
+
+    const relayMatch = /^\/v1\/internal\/events\/([^/]+)\/relay$/.exec(url.pathname);
+    if (request.method === 'POST' && relayMatch !== null) {
+      if (env.GTRZ_SUPABASE_RELAY_KEY === undefined) {
+        return json(
+          {
+            error: {
+              code: 'RELAY_NOT_CONFIGURED',
+              message: 'Ponte Postgres ainda não configurada.',
+            },
+          },
+          503,
+        );
+      }
+      if (!supabaseRelayAuthorized(request, env)) {
+        return json({ error: { code: 'UNAUTHORIZED', message: 'Chave interna inválida.' } }, 401);
+      }
+      const eventId = decodeURIComponent(relayMatch[1] ?? '');
+      try {
+        requiredString(eventId, 'eventId', 160);
+      } catch (error: unknown) {
+        const apiError = error as ApiError;
+        return json({ error: { code: apiError.code, message: apiError.message } }, apiError.status);
+      }
+      const room = env.EVENT_ROOM.get(env.EVENT_ROOM.idFromName(`event:${eventId}`));
+      return room.fetch(
+        new Request(`https://event.internal/v1/events/${encodeURIComponent(eventId)}/relay`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: await request.text(),
+        }),
+      );
     }
 
     if (request.method === 'GET' && url.pathname === '/monitor') {

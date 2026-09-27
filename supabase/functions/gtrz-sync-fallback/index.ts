@@ -67,6 +67,28 @@ function supabaseServiceKey(): string | null {
   }
 }
 
+async function relayToCloudflare(eventId: string, result: unknown): Promise<boolean> {
+  const relayUrl = Deno.env.get('GTRZ_CLOUDFLARE_RELAY_URL');
+  const relayKey = Deno.env.get('GTRZ_CLOUDFLARE_RELAY_KEY');
+  if (!relayUrl || !relayKey || !isRecord(result) || !isRecord(result.event)) return false;
+
+  const response = await fetch(
+    `${relayUrl.replace(/\/$/u, '')}/v1/internal/events/${encodeURIComponent(eventId)}/relay`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-GTRZ-Supabase-Relay-Key': relayKey,
+      },
+      body: JSON.stringify(result.event),
+    },
+  );
+  if (!response.ok) {
+    console.error(`Cloudflare relay rejected ${String(response.status)} for ${eventId}.`);
+  }
+  return response.ok;
+}
+
 Deno.serve(async (request) => {
   if (request.method === 'OPTIONS') return new Response(null, { headers: corsHeaders });
   const route = functionRoute(request);
@@ -77,6 +99,18 @@ Deno.serve(async (request) => {
   const expectedKey = Deno.env.get('GTRZ_FALLBACK_KEY');
   if (!expectedKey || !sameSecret(request.headers.get('X-GTRZ-Key') ?? '', expectedKey)) {
     return error(401, 'UNAUTHORIZED', 'Chave de acesso inválida.');
+  }
+  if (request.method === 'GET' && route === '/relay-health') {
+    const relayed = await relayToCloudflare('_gtrz-relay-health', {
+      event: {
+        sequence: 0,
+        commandId: 'relay-health',
+        type: 'relay.health',
+        payload: { action: 'relay.health' },
+        createdAt: Date.now(),
+      },
+    });
+    return json({ status: relayed ? 'ok' : 'unavailable', service: 'gtrz-cloudflare-relay' });
   }
   const url = Deno.env.get('SUPABASE_URL');
   const key = supabaseServiceKey();
@@ -107,6 +141,7 @@ Deno.serve(async (request) => {
         p_created_at: createdAt,
       });
       if (rpcError) throw rpcError;
+      await relayToCloudflare(eventId, data);
       return json(data);
     }
 
