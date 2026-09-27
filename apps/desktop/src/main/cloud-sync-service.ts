@@ -509,18 +509,34 @@ export class CloudSyncService {
 
       if (pairingKey === null) return;
 
-      // Supabase is the authoritative cloud. Polling the compact control journal
-      // keeps every replica convergent without a Durable Object WebSocket.
-      const recovered = await this.#pullGlobalControl(database, pairingKey, deviceId);
-      if (!recovered) {
-        this.#recordCloudFailure();
-        return;
+      // Production uses the compact Postgres journal. The stream branch remains
+      // only for the legacy transport tests and an explicitly supplied legacy URL.
+      const canonicalCloud = this.#endpoint.includes('.supabase.co/functions/');
+      if (canonicalCloud) {
+        const recovered = await this.#pullGlobalControl(database, pairingKey, deviceId);
+        if (!recovered) {
+          this.#recordCloudFailure();
+          return;
+        }
+      } else {
+        if (this.#controlStream === null) {
+          const recovered = await this.#pullGlobalControl(database, pairingKey, deviceId);
+          if (!recovered) {
+            this.#recordCloudFailure();
+            return;
+          }
+        }
+        this.#ensureControlStream(database, deviceId, pairingKey);
       }
       const workingDatabase = await this.#applyPendingBootstrap(database, pairingKey, deviceId);
       this.#enqueueNewAudits(workingDatabase, deviceId);
 
       const effectiveActiveEventId =
         getSessionState(workingDatabase).activeEvent?.id ?? activeEventId;
+
+      if (!canonicalCloud) {
+        this.#ensureEventStreams(workingDatabase, effectiveActiveEventId, deviceId, pairingKey);
+      }
 
       this.#retryRecoverablePaidOrders(workingDatabase);
       await this.#reconcileEventJournal(workingDatabase, CATALOG_EVENT_ID, deviceId, pairingKey);
