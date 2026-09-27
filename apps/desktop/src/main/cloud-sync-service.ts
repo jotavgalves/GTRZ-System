@@ -3,6 +3,12 @@ import { hostname, tmpdir } from 'node:os';
 import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { WebSocket, type RawData } from 'ws';
+import {
+  createClient,
+  REALTIME_SUBSCRIBE_STATES,
+  type RealtimeChannel,
+  type SupabaseClient,
+} from '@supabase/supabase-js';
 
 import {
   mobileOperatorListSchema,
@@ -33,6 +39,9 @@ import type { DatabaseRuntime } from './database-runtime';
 
 const CONNECTION_TIMEOUT_MS = 5_000;
 const OUTBOX_INTERVAL_MS = 3_000;
+const CANONICAL_FALLBACK_RECONCILIATION_INTERVAL_MS = 15_000;
+const CANONICAL_SUPABASE_URL = 'https://muhzjnveqrahccoisddo.supabase.co';
+const CANONICAL_SUPABASE_PUBLISHABLE_KEY = 'sb_publishable_ikPSVbY1junIsMbz5SrFrg_wkobALXv';
 const STREAM_RECONNECT_MAX_MS = 60_000;
 const CONTROL_HEARTBEAT_INTERVAL_MS = 300_000;
 
@@ -316,6 +325,11 @@ export class CloudSyncService {
   readonly #eventStreams = new Map<string, WebSocket>();
   readonly #eventReconnectTimers = new Map<string, NodeJS.Timeout>();
   readonly #eventReconnectDelays = new Map<string, number>();
+  readonly #canonicalRealtimeChannels = new Map<string, RealtimeChannel>();
+  readonly #canonicalRealtimeReadyEvents = new Set<string>();
+  readonly #canonicalReconciliations = new Map<string, Promise<void>>();
+  #canonicalRealtimeClient: SupabaseClient | null = null;
+  #canonicalLastFallbackReconciliationAt = 0;
   #controlStream: WebSocket | null = null;
   #controlReconnectTimer: NodeJS.Timeout | null = null;
   #controlHeartbeatTimer: NodeJS.Timeout | null = null;
@@ -368,6 +382,7 @@ export class CloudSyncService {
     this.#eventReconnectTimers.clear();
     for (const stream of this.#eventStreams.values()) stream.close();
     this.#eventStreams.clear();
+    this.#stopCanonicalRealtime();
     this.#cloudConnected = false;
   }
 
@@ -513,10 +528,16 @@ export class CloudSyncService {
       // only for the legacy transport tests and an explicitly supplied legacy URL.
       const canonicalCloud = this.#endpoint.includes('.supabase.co/functions/');
       if (canonicalCloud) {
-        const recovered = await this.#pullGlobalControl(database, pairingKey, deviceId);
-        if (!recovered) {
-          this.#recordCloudFailure();
-          return;
+        const controlIsDue =
+          this.#canonicalLastFallbackReconciliationAt === 0 ||
+          Date.now() - this.#canonicalLastFallbackReconciliationAt >=
+            CANONICAL_FALLBACK_RECONCILIATION_INTERVAL_MS;
+        if (controlIsDue) {
+          const recovered = await this.#pullGlobalControl(database, pairingKey, deviceId);
+          if (!recovered) {
+            this.#recordCloudFailure();
+            return;
+          }
         }
       } else {
         if (this.#controlStream === null) {
@@ -536,17 +557,34 @@ export class CloudSyncService {
 
       if (!canonicalCloud) {
         this.#ensureEventStreams(workingDatabase, effectiveActiveEventId, deviceId, pairingKey);
-      }
-
-      this.#retryRecoverablePaidOrders(workingDatabase);
-      await this.#reconcileEventJournal(workingDatabase, CATALOG_EVENT_ID, deviceId, pairingKey);
-      if (effectiveActiveEventId !== null) {
-        await this.#reconcileEventJournal(
+      } else {
+        await this.#ensureCanonicalRealtime(
           workingDatabase,
           effectiveActiveEventId,
           deviceId,
           pairingKey,
         );
+      }
+
+      this.#retryRecoverablePaidOrders(workingDatabase);
+      const fallbackIsDue =
+        !canonicalCloud ||
+        !this.#canonicalRealtimeReadyEvents.has(CATALOG_EVENT_ID) ||
+        (effectiveActiveEventId !== null &&
+          !this.#canonicalRealtimeReadyEvents.has(effectiveActiveEventId)) ||
+        Date.now() - this.#canonicalLastFallbackReconciliationAt >=
+          CANONICAL_FALLBACK_RECONCILIATION_INTERVAL_MS;
+      if (fallbackIsDue) {
+        await this.#reconcileEventJournal(workingDatabase, CATALOG_EVENT_ID, deviceId, pairingKey);
+        if (effectiveActiveEventId !== null) {
+          await this.#reconcileEventJournal(
+            workingDatabase,
+            effectiveActiveEventId,
+            deviceId,
+            pairingKey,
+          );
+        }
+        if (canonicalCloud) this.#canonicalLastFallbackReconciliationAt = Date.now();
       }
       await this.#publishCashierCatalog(workingDatabase, effectiveActiveEventId, pairingKey);
       await this.#publishMobileContext(workingDatabase, effectiveActiveEventId, pairingKey);
@@ -1025,6 +1063,7 @@ export class CloudSyncService {
     this.#eventReconnectTimers.clear();
     for (const stream of this.#eventStreams.values()) stream.close();
     this.#eventStreams.clear();
+    this.#stopCanonicalRealtime();
   }
 
   #ensureControlStream(database: DatabaseContext, deviceId: string, pairingKey: string): void {
@@ -1782,6 +1821,10 @@ export class CloudSyncService {
     database.sqlite.transaction(() => {
       for (const audit of audits) {
         if (!SYNCHRONIZED_ACTIONS.has(audit.action)) continue;
+        const rawDetails: unknown = JSON.parse(audit.details_json);
+        // Remote journal entries need to remain visible in the local audit, but
+        // must never re-enter the outbox and echo the same transaction back.
+        if (isRecord(rawDetails) && rawDetails._cloudReplicated === true) continue;
         const eventName =
           audit.event_id === null
             ? null
@@ -1790,7 +1833,6 @@ export class CloudSyncService {
                   .prepare('SELECT name FROM events WHERE id = ?')
                   .get(audit.event_id) as { readonly name: string } | undefined
               )?.name ?? null);
-        const rawDetails: unknown = JSON.parse(audit.details_json);
         const payload = {
           commandId: `${deviceId}:${String(audit.id)}`,
           deviceId,
@@ -1847,6 +1889,101 @@ export class CloudSyncService {
         this.#eventStreams.delete(eventId);
       }
     }
+  }
+
+  async #ensureCanonicalRealtime(
+    database: DatabaseContext,
+    activeEventId: string | null,
+    deviceId: string,
+    pairingKey: string,
+  ): Promise<void> {
+    if (!this.#endpoint.includes('.supabase.co/functions/')) return;
+    if (this.#canonicalRealtimeClient === null) {
+      this.#canonicalRealtimeClient = createClient(
+        CANONICAL_SUPABASE_URL,
+        CANONICAL_SUPABASE_PUBLISHABLE_KEY,
+        { auth: { persistSession: false, autoRefreshToken: false } },
+      );
+    }
+    const wanted = new Set([CATALOG_EVENT_ID]);
+    if (activeEventId !== null) wanted.add(activeEventId);
+
+    for (const eventId of wanted) {
+      if (this.#canonicalRealtimeChannels.has(eventId)) continue;
+      const topic = await this.#readCanonicalRealtimeTopic(eventId, pairingKey);
+      const channel = this.#canonicalRealtimeClient
+        .channel(topic)
+        .on('broadcast', { event: 'state-changed' }, (message: unknown) => {
+          const envelope = isRecord(message) && isRecord(message.payload) ? message.payload : null;
+          if (envelope?.eventId !== eventId) return;
+          void this.#reconcileCanonicalEvent(database, eventId, deviceId, pairingKey);
+        })
+        .subscribe((status) => {
+          if (status === REALTIME_SUBSCRIBE_STATES.SUBSCRIBED) {
+            this.#canonicalRealtimeReadyEvents.add(eventId);
+          } else {
+            this.#canonicalRealtimeReadyEvents.delete(eventId);
+          }
+        });
+      this.#canonicalRealtimeChannels.set(eventId, channel);
+    }
+
+    for (const [eventId, channel] of this.#canonicalRealtimeChannels) {
+      if (wanted.has(eventId)) continue;
+      this.#canonicalRealtimeReadyEvents.delete(eventId);
+      this.#canonicalRealtimeChannels.delete(eventId);
+      void this.#canonicalRealtimeClient.removeChannel(channel);
+    }
+  }
+
+  #stopCanonicalRealtime(): void {
+    this.#canonicalRealtimeReadyEvents.clear();
+    this.#canonicalReconciliations.clear();
+    if (this.#canonicalRealtimeClient !== null) {
+      for (const channel of this.#canonicalRealtimeChannels.values()) {
+        void this.#canonicalRealtimeClient.removeChannel(channel);
+      }
+    }
+    this.#canonicalRealtimeChannels.clear();
+    this.#canonicalRealtimeClient = null;
+    this.#canonicalLastFallbackReconciliationAt = 0;
+  }
+
+  async #readCanonicalRealtimeTopic(eventId: string, pairingKey: string): Promise<string> {
+    const response = await fetch(
+      `${this.#endpoint}/v1/events/${encodeURIComponent(eventId)}/realtime-topic`,
+      {
+        headers: await this.#cloudHeaders(pairingKey),
+        signal: AbortSignal.timeout(CONNECTION_TIMEOUT_MS),
+      },
+    );
+    const payload: unknown = await response.json().catch(() => null);
+    if (!response.ok || !isRecord(payload) || typeof payload.topic !== 'string') {
+      throw new Error('A nuvem não conseguiu abrir o canal de atualização imediata.');
+    }
+    return payload.topic;
+  }
+
+  #reconcileCanonicalEvent(
+    database: DatabaseContext,
+    eventId: string,
+    deviceId: string,
+    pairingKey: string,
+  ): Promise<void> {
+    const running = this.#canonicalReconciliations.get(eventId);
+    if (running !== undefined) return running;
+    const reconciliation = this.#reconcileEventJournal(database, eventId, deviceId, pairingKey)
+      .then(() => {
+        this.#recordCloudSuccess();
+      })
+      .catch(() => {
+        this.#recordCloudFailure();
+      })
+      .finally(() => {
+        this.#canonicalReconciliations.delete(eventId);
+      });
+    this.#canonicalReconciliations.set(eventId, reconciliation);
+    return reconciliation;
   }
 
   #ensureEventStream(
@@ -3402,6 +3539,23 @@ export class CloudSyncService {
         payload.createdAt,
       );
     }
+    database.sqlite
+      .prepare(
+        `INSERT INTO audit_log
+         (event_id, profile, action, entity_type, entity_id, details_json, created_at)
+         VALUES (?, 'cashier', 'operations.order-paid', 'order', ?, ?, ?)`,
+      )
+      .run(
+        eventId,
+        orderId,
+        JSON.stringify({
+          ...payload.details,
+          _cloudReplicated: true,
+          source: 'mobile',
+          originDeviceId: payload.deviceId,
+        }),
+        payload.createdAt,
+      );
   }
 
   #applyRemoteExpense(database: DatabaseContext, eventId: string, payload: JournalPayload): void {

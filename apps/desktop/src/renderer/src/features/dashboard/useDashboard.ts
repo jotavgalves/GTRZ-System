@@ -18,20 +18,25 @@ function getErrorMessage(error: unknown): string {
 
 export function useDashboard(): DashboardViewState {
   const initialState = useRef(getCachedViewState<DashboardState>('dashboard')).current;
+  const reloadGeneration = useRef(0);
   const [state, setState] = useState<DashboardState | null>(() => initialState);
   const [loading, setLoading] = useState(() => initialState === null);
   const [error, setError] = useState<string | null>(null);
 
   const reload = useCallback(async (silent = false): Promise<void> => {
+    const generation = ++reloadGeneration.current;
     if (!silent) setLoading(true);
     setError(null);
 
     try {
-      setState(setCachedViewState('dashboard', await window.gtrz.dashboard.getState()));
+      const nextState = await window.gtrz.dashboard.getState();
+      if (generation !== reloadGeneration.current) return;
+      setState(setCachedViewState('dashboard', nextState));
     } catch (loadError: unknown) {
+      if (generation !== reloadGeneration.current) return;
       setError(getErrorMessage(loadError));
     } finally {
-      if (!silent) setLoading(false);
+      if (!silent && generation === reloadGeneration.current) setLoading(false);
     }
   }, []);
 
