@@ -19,7 +19,6 @@ import {
 } from '@gtrz/contracts';
 import {
   getSessionState,
-  createDatabaseSnapshot,
   listCombos,
   redeemVouchers,
   refundOrderVouchers,
@@ -334,7 +333,7 @@ export class CloudSyncService {
     pairingKeyPath: string,
     deviceIdPath: string,
     onDataChanged: () => void = () => undefined,
-    endpoint = 'https://gtrz-sync.jvgacontato.workers.dev',
+    endpoint = 'https://muhzjnveqrahccoisddo.supabase.co/functions/v1/gtrz-sync-fallback',
     getDeviceLabel: () => string = hostname,
     databaseRuntime: DatabaseRuntime | null = null,
     deviceCredentialPath = path.join(path.dirname(deviceIdPath), 'gtrz-cloud-device-credential.json'),
@@ -510,14 +509,12 @@ export class CloudSyncService {
 
       if (pairingKey === null) return;
 
-      // Recovery uses HTTP only before the control socket exists. Once connected,
-      // global event changes are pushed by that socket instead of being polled.
-      if (this.#controlStream === null && this.#controlReconnectTimer === null) {
-        const recovered = await this.#pullGlobalControl(database, pairingKey, deviceId);
-        if (!recovered) {
-          this.#recordCloudFailure();
-          return;
-        }
+      // Supabase is the authoritative cloud. Polling the compact control journal
+      // keeps every replica convergent without a Durable Object WebSocket.
+      const recovered = await this.#pullGlobalControl(database, pairingKey, deviceId);
+      if (!recovered) {
+        this.#recordCloudFailure();
+        return;
       }
       const workingDatabase = await this.#applyPendingBootstrap(database, pairingKey, deviceId);
       this.#enqueueNewAudits(workingDatabase, deviceId);
@@ -526,15 +523,8 @@ export class CloudSyncService {
         getSessionState(workingDatabase).activeEvent?.id ?? activeEventId;
 
       this.#retryRecoverablePaidOrders(workingDatabase);
-      this.#ensureControlStream(workingDatabase, deviceId, pairingKey);
-      this.#ensureEventStreams(workingDatabase, effectiveActiveEventId, deviceId, pairingKey);
-      if (this.#needsInitialJournalRecovery(workingDatabase, CATALOG_EVENT_ID)) {
-        await this.#reconcileEventJournal(workingDatabase, CATALOG_EVENT_ID, deviceId, pairingKey);
-      }
-      if (
-        effectiveActiveEventId !== null &&
-        this.#needsInitialJournalRecovery(workingDatabase, effectiveActiveEventId)
-      ) {
+      await this.#reconcileEventJournal(workingDatabase, CATALOG_EVENT_ID, deviceId, pairingKey);
+      if (effectiveActiveEventId !== null) {
         await this.#reconcileEventJournal(
           workingDatabase,
           effectiveActiveEventId,
@@ -608,13 +598,9 @@ export class CloudSyncService {
       .get(eventId) as { readonly id: string; readonly name: string } | undefined;
     if (event === undefined)
       throw new Error('O evento selecionado não está disponível neste computador.');
-    const deviceId = await this.#readOrCreateDeviceId();
-    const bootstrapSnapshot = await this.#uploadBootstrapSnapshot(database, event.id, deviceId);
     await this.#globalControlRequest('/v1/monitor/global-event', {
       eventId: event.id,
       eventName: event.name,
-      bootstrapSnapshotId: bootstrapSnapshot.snapshotId,
-      snapshotSourceDeviceId: deviceId,
     });
     setActiveEvent(database, event.id);
     this.#onDataChanged();
@@ -856,55 +842,6 @@ export class CloudSyncService {
     throw new Error(message);
   }
 
-  async #uploadBootstrapSnapshot(
-    database: DatabaseContext,
-    eventId: string,
-    deviceId: string,
-  ): Promise<{ readonly snapshotId: string }> {
-    const pairingKey = await this.#readPairingKey();
-    if (pairingKey === null)
-      throw new Error('A chave da nuvem não foi encontrada neste computador.');
-
-    const temporaryDirectory = await mkdtemp(path.join(tmpdir(), 'gtrz-replica-'));
-    const snapshotPath = path.join(temporaryDirectory, 'database.sqlite');
-    try {
-      await createDatabaseSnapshot(database, snapshotPath);
-      const contents = await readFile(snapshotPath);
-      const checksum = createHash('sha256').update(contents).digest('hex');
-      const response = await fetch(
-        `${this.#endpoint}/v1/monitor/replica-snapshot/${encodeURIComponent(eventId)}`,
-        {
-          method: 'POST',
-          headers: await this.#cloudHeaders(pairingKey, {
-            'Content-Type': 'application/vnd.sqlite3',
-            'Content-Length': String(contents.byteLength),
-            'X-GTRZ-Device-Id': deviceId,
-            'X-GTRZ-Snapshot-Sha256': checksum,
-            'X-GTRZ-Snapshot-Size': String(contents.byteLength),
-          }),
-          body: new Uint8Array(contents).buffer,
-          signal: AbortSignal.timeout(CONNECTION_TIMEOUT_MS * 6),
-        },
-      );
-      const payload: unknown = await response.json().catch(() => null);
-      if (
-        !response.ok ||
-        !isRecord(payload) ||
-        typeof payload.snapshotId !== 'string' ||
-        payload.snapshotId.length === 0
-      ) {
-        const message =
-          isRecord(payload) && isRecord(payload.error) && typeof payload.error.message === 'string'
-            ? payload.error.message
-            : 'A central não conseguiu preparar a cópia inicial do evento.';
-        throw new Error(message);
-      }
-      return { snapshotId: payload.snapshotId };
-    } finally {
-      await rm(temporaryDirectory, { force: true, recursive: true });
-    }
-  }
-
   async #applyPendingBootstrap(
     database: DatabaseContext,
     pairingKey: string,
@@ -1031,6 +968,13 @@ export class CloudSyncService {
   }
 
   #ensureControlStream(database: DatabaseContext, deviceId: string, pairingKey: string): void {
+    if (this.#endpoint.includes('.supabase.co/functions/')) {
+      void database;
+      void deviceId;
+      void pairingKey;
+      this.#cloudConnected = true;
+      return;
+    }
     if (this.#controlReconnectTimer !== null) return;
     if (
       this.#controlStream !== null &&
@@ -1788,6 +1732,13 @@ export class CloudSyncService {
     deviceId: string,
     pairingKey: string,
   ): void {
+    if (this.#endpoint.includes('.supabase.co/functions/')) {
+      void database;
+      void activeEventId;
+      void deviceId;
+      void pairingKey;
+      return;
+    }
     const wanted = new Set([CATALOG_EVENT_ID]);
     if (activeEventId !== null) wanted.add(activeEventId);
     for (const eventId of wanted) {
@@ -2018,14 +1969,6 @@ export class CloudSyncService {
       .get(`inbox.sequence:${eventId}`) as { readonly value: string } | undefined;
     const cursor = cursorRow === undefined ? 0 : Number(cursorRow.value);
     return Number.isSafeInteger(cursor) && cursor >= 0 ? cursor : 0;
-  }
-
-  #needsInitialJournalRecovery(database: DatabaseContext, eventId: string): boolean {
-    return (
-      database.sqlite
-        .prepare('SELECT 1 FROM sync_state WHERE key = ?')
-        .get(`replica.reconciled:${eventId}`) === undefined
-    );
   }
 
   #storeRemoteJournalEvents(
