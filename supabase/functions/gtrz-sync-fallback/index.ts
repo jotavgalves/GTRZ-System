@@ -2,6 +2,7 @@ import { createClient } from 'npm:@supabase/supabase-js@2.93.1';
 
 type Obj = Record<string, unknown>;
 type Permission = 'sales' | 'inventory' | 'tickets' | 'expenses' | 'vouchers';
+type MobileProjection = { catalog: Obj; context: Obj };
 const permissionKeys: readonly Permission[] = [
   'sales',
   'inventory',
@@ -110,6 +111,16 @@ function catalogProducts(catalog: Obj): Obj[] {
 }
 function adjustedCatalog(catalog: Obj, products: Obj[]): Obj {
   return { ...catalog, products };
+}
+
+function mobileContext(context: Obj, allowed: Record<Permission, boolean>): Obj {
+  return {
+    ...context,
+    ticketLots: allowed.tickets ? context.ticketLots : [],
+    servicePoints: allowed.sales || allowed.vouchers ? context.servicePoints : [],
+    voucherCodes: allowed.vouchers ? context.voucherCodes : [],
+    vouchers: allowed.sales || allowed.vouchers ? context.vouchers : [],
+  };
 }
 function recalculateCombos(products: Obj[]): void {
   const ids = new Map(products.map((product) => [product.productId, product]));
@@ -282,6 +293,8 @@ Deno.serve(async (request) => {
   // enrolled desktops for an immediate, sequence-checked local apply.
   const realtimeTopic = async (eventId: string): Promise<string> =>
     `gtrz-sync-${await sha(`${pairingKey}:${eventId}:realtime-v1`)}`;
+  const mobileRealtimeTopic = async (tokenHash: string): Promise<string> =>
+    `gtrz-mobile-${await sha(`${pairingKey}:${tokenHash}:realtime-v2`)}`;
   const desktopRealtimeTopic = async (eventId: string): Promise<string> =>
     `gtrz-desktop-sync-${await sha(`${pairingKey}:${eventId}:desktop-realtime-v1`)}`;
   const notifyRealtime = async (
@@ -291,6 +304,7 @@ Deno.serve(async (request) => {
     event: Obj | null = null,
     notifyMobile = true,
     traceId: string | null = null,
+    mobileProjection: MobileProjection | null = null,
   ): Promise<void> => {
     if (!pairingKey) return;
     try {
@@ -312,6 +326,43 @@ Deno.serve(async (request) => {
             },
           ),
         );
+        const { data: sessions, error } = await store
+          .from('mobile_sessions')
+          .select('token_hash,expires_at,mobile_operators(permissions,active)')
+          .is('revoked_at', null)
+          .gt('expires_at', Date.now());
+        if (error) throw error;
+        for (const rawSession of sessions ?? []) {
+          const session = rawSession as unknown as Obj,
+            operator = asObj(session.mobile_operators) ? session.mobile_operators : null,
+            tokenHash = typeof session.token_hash === 'string' ? session.token_hash : null;
+          if (!operator || !tokenHash || operator.active !== true) continue;
+          const permissions = operator.permissions as Record<Permission, boolean>;
+          notifications.push(
+            fetch(
+              `${endpoint}/realtime/v1/api/broadcast/${encodeURIComponent(await mobileRealtimeTopic(tokenHash))}/events/state-changed`,
+              {
+                method: 'POST',
+                headers: { apikey: serviceKey, 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  eventId,
+                  version,
+                  globalControl,
+                  fastPath: event !== null && !globalControl,
+                  ...(mobileProjection
+                    ? {
+                        snapshot: {
+                          catalog: mobileProjection.catalog,
+                          context: mobileContext(mobileProjection.context, permissions),
+                        },
+                      }
+                    : {}),
+                  ...(traceId ? { traceId } : {}),
+                }),
+              },
+            ),
+          );
+        }
       }
       if (event !== null && !globalControl) {
         notifications.push(
@@ -471,7 +522,7 @@ Deno.serve(async (request) => {
           event = response && asObj(response.event) ? response.event : null;
         await Promise.all([
           queueReceipt(eventId, commandId, payload),
-          notifyRealtime(eventId, version, false, event),
+          notifyRealtime(eventId, version, false, event, true, null, next),
         ]);
         return data;
       }
@@ -600,6 +651,24 @@ Deno.serve(async (request) => {
         null,
         true,
         typeof input.traceId === 'string' ? input.traceId : null,
+      );
+      return ok({ accepted: true });
+    }
+    if (path === '/v1/monitor/realtime-snapshot-ping' && request.method === 'POST') {
+      denyAdministrator();
+      const input = await body(),
+        eventId = string(input.eventId, 'eventId'),
+        current = await state(eventId),
+        catalog = asObj(current.catalog) ? current.catalog : emptyCatalog,
+        context = asObj(current.context) ? current.context : emptyContext;
+      await notifyRealtime(
+        eventId,
+        Number(current.version ?? 0),
+        false,
+        null,
+        true,
+        typeof input.traceId === 'string' ? input.traceId : null,
+        { catalog, context },
       );
       return ok({ accepted: true });
     }
@@ -1009,8 +1078,11 @@ Deno.serve(async (request) => {
       operator = current.operator as Obj,
       eventId = string(current.eventId, 'eventId'),
       allowed = operator.permissions as Record<Permission, boolean>;
-    if (path === '/v1/mobile/realtime-topic' && request.method === 'GET')
-      return ok({ topic: await realtimeTopic(eventId) });
+    if (path === '/v1/mobile/realtime-topic' && request.method === 'GET') {
+      const raw = routeToken(request);
+      if (!raw) throw new Error('A sessão móvel foi encerrada.');
+      return ok({ topic: await mobileRealtimeTopic(await sha(raw)) });
+    }
     if (path === '/v1/mobile/catalog' && request.method === 'GET')
       return ok((await state(eventId)).catalog);
     if (path === '/v1/mobile/context' && request.method === 'GET') {

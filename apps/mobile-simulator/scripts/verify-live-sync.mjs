@@ -77,9 +77,11 @@ async function main() {
     const testWindow = window;
     testWindow.__gtrzLiveRenderStartedAt = null;
     testWindow.__gtrzLiveRenderElapsedMs = null;
+    testWindow.__gtrzLiveLastMutationAt = null;
     const root = document.getElementById('app');
     if (!root) throw new Error('A interface mobile não possui a raiz do aplicativo.');
     new MutationObserver(() => {
+      testWindow.__gtrzLiveLastMutationAt = Date.now();
       if (
         typeof testWindow.__gtrzLiveRenderStartedAt === 'number' &&
         testWindow.__gtrzLiveRenderElapsedMs === null
@@ -109,7 +111,12 @@ async function main() {
   const refreshNetwork = [];
   const refreshRequests = new Map();
   const refreshTraceId = crypto.randomUUID();
+  const snapshotTraceId = crypto.randomUUID();
   let refreshSignalReceivedAt = null;
+  let snapshotStartedAt = null;
+  let snapshotSignalReceivedAt = null;
+  let snapshotSignalElapsedMs = null;
+  let snapshotRefreshes = 0;
   let mobileStartedAt = null;
   let fastStartedAt = null;
   protocol.on('Network.webSocketFrameReceived', ({ response }) => {
@@ -120,6 +127,14 @@ async function main() {
     ) {
       refreshSignalReceivedAt = Date.now();
       milestones.push({ step: 'sinal-websocket', elapsedMs: Date.now() - mobileStartedAt });
+    }
+    if (
+      snapshotStartedAt !== null &&
+      response.payloadData.includes('state-changed') &&
+      response.payloadData.includes(snapshotTraceId)
+    ) {
+      snapshotSignalReceivedAt = Date.now();
+      snapshotSignalElapsedMs = snapshotSignalReceivedAt - snapshotStartedAt;
     }
   });
   protocol.on('Network.requestWillBeSent', ({ request }) => {
@@ -134,6 +149,13 @@ async function main() {
     }
   });
   protocol.on('Network.requestWillBeSent', ({ requestId, request }) => {
+    if (
+      snapshotStartedAt !== null &&
+      request.method === 'GET' &&
+      /\/v1\/mobile\/refresh/.test(request.url)
+    ) {
+      snapshotRefreshes += 1;
+    }
     if (
       mobileStartedAt !== null &&
       refreshSignalReceivedAt !== null &&
@@ -270,6 +292,33 @@ async function main() {
   if (initialRefresh.inFlight || initialRefresh.pending || !initialRefresh.online) {
     throw new Error('A primeira atualização móvel não estabilizou antes do teste de rajada.');
   }
+
+  snapshotStartedAt = Date.now();
+  await page.evaluate(() => {
+    window.__gtrzLiveLastMutationAt = null;
+  });
+  await edgeRequest('/v1/monitor/realtime-snapshot-ping', {
+    method: 'POST',
+    body: JSON.stringify({ eventId, traceId: snapshotTraceId }),
+  });
+  const snapshotDeadline = Date.now() + 10_000;
+  while (Date.now() < snapshotDeadline && snapshotSignalReceivedAt === null) {
+    await wait(25);
+  }
+  if (snapshotSignalReceivedAt === null) {
+    throw new Error('O snapshot confirmado não chegou ao mobile.');
+  }
+  let snapshotMutationAt = await page.evaluate(() => window.__gtrzLiveLastMutationAt);
+  while (Date.now() < snapshotDeadline && typeof snapshotMutationAt !== 'number') {
+    await wait(25);
+    snapshotMutationAt = await page.evaluate(() => window.__gtrzLiveLastMutationAt);
+  }
+  if (typeof snapshotMutationAt !== 'number') {
+    throw new Error('O snapshot confirmado não atualizou a interface mobile.');
+  }
+  await wait(500);
+  const snapshotSignalToVisualElapsedMs = snapshotMutationAt - snapshotSignalReceivedAt;
+  snapshotStartedAt = null;
   const mobileVisualRenderElapsedMs = await page.evaluate(() => window.__gtrzLiveRenderElapsedMs);
   if (typeof mobileVisualRenderElapsedMs !== 'number') {
     throw new Error('A atualização em tempo real não gerou uma renderização visível no mobile.');
@@ -335,6 +384,15 @@ async function main() {
       desktopFastBroadcastElapsedMs,
       mobileVisualRenderElapsedMs,
       refreshNetwork,
+      confirmedSnapshot: {
+        signalElapsedMs: snapshotSignalElapsedMs,
+        signalToVisualElapsedMs: snapshotSignalToVisualElapsedMs,
+        refreshesAfterSignal: snapshotRefreshes,
+        immediate:
+          snapshotSignalToVisualElapsedMs >= 0 &&
+          snapshotSignalToVisualElapsedMs <= 200 &&
+          snapshotRefreshes === 0,
+      },
       milestones,
       burst: {
         duringFirstRefresh,
@@ -342,7 +400,12 @@ async function main() {
         settledRefresh,
         coalesced: burstCoalesced,
       },
-      passed: missingSteps.length === 0 && burstCoalesced,
+      passed:
+        missingSteps.length === 0 &&
+        burstCoalesced &&
+        snapshotSignalToVisualElapsedMs >= 0 &&
+        snapshotSignalToVisualElapsedMs <= 200 &&
+        snapshotRefreshes === 0,
       missingSteps,
     }),
   );
