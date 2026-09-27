@@ -1483,13 +1483,15 @@ export class CloudSyncService {
         })),
     ];
     const fingerprint = JSON.stringify(catalog);
-    const stateKey = `cashier.catalog:${activeEventId}`;
+    // Publication confirmations belong to a transport. A prior legacy publish
+    // must never suppress the first canonical-cloud snapshot for the same event.
+    const canonicalCloud = this.#endpoint.includes('.supabase.co/functions/');
+    const stateKey = `cashier.catalog:${activeEventId}:${canonicalCloud ? 'canonical' : 'legacy'}`;
     const current = database.sqlite
       .prepare('SELECT value FROM sync_state WHERE key = ?')
       .get(stateKey) as { readonly value: string } | undefined;
     if (current?.value === fingerprint) return;
 
-    const canonicalCloud = this.#endpoint.includes('.supabase.co/functions/');
     const expectedVersion = canonicalCloud
       ? await this.#readCanonicalEventVersion(activeEventId, pairingKey)
       : null;
@@ -1601,12 +1603,12 @@ export class CloudSyncService {
       })),
     };
     const fingerprint = JSON.stringify(context);
-    const stateKey = `mobile.context:${activeEventId}`;
+    const canonicalCloud = this.#endpoint.includes('.supabase.co/functions/');
+    const stateKey = `mobile.context:${activeEventId}:${canonicalCloud ? 'canonical' : 'legacy'}`;
     const current = database.sqlite
       .prepare('SELECT value FROM sync_state WHERE key = ?')
       .get(stateKey) as { readonly value: string } | undefined;
     if (current?.value === fingerprint) return;
-    const canonicalCloud = this.#endpoint.includes('.supabase.co/functions/');
     const expectedVersion = canonicalCloud
       ? await this.#readCanonicalEventVersion(activeEventId, pairingKey)
       : null;
