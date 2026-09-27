@@ -95,20 +95,61 @@ async function main() {
       online: state.online,
     }));
 
+  const idleDeadline = Date.now() + 10_000;
+  while (Date.now() < idleDeadline) {
+    const refresh = await mobileRefreshState();
+    if (!refresh.inFlight && !refresh.pending) break;
+    await wait(100);
+  }
+  await wait(1_000);
+
   const protocol = await page.context().newCDPSession(page);
   await protocol.send('Network.enable');
   const milestones = [];
+  const refreshNetwork = [];
+  const refreshRequests = new Map();
+  const refreshTraceId = crypto.randomUUID();
+  let refreshSignalReceivedAt = null;
   let mobileStartedAt = null;
   let fastStartedAt = null;
   protocol.on('Network.webSocketFrameReceived', ({ response }) => {
-    if (mobileStartedAt !== null && response.payloadData.includes('state-changed')) {
+    if (
+      mobileStartedAt !== null &&
+      response.payloadData.includes('state-changed') &&
+      response.payloadData.includes(refreshTraceId)
+    ) {
+      refreshSignalReceivedAt = Date.now();
       milestones.push({ step: 'sinal-websocket', elapsedMs: Date.now() - mobileStartedAt });
     }
   });
   protocol.on('Network.requestWillBeSent', ({ request }) => {
     const match = request.url.match(/\/v1\/mobile\/(refresh)/);
-    if (mobileStartedAt !== null && match) {
+    if (mobileStartedAt !== null && refreshSignalReceivedAt !== null && match) {
       milestones.push({ step: match[1], elapsedMs: Date.now() - mobileStartedAt });
+    }
+  });
+  protocol.on('Network.requestWillBeSent', ({ requestId, request }) => {
+    if (
+      mobileStartedAt !== null &&
+      refreshSignalReceivedAt !== null &&
+      /\/v1\/mobile\/refresh/.test(request.url)
+    ) {
+      refreshRequests.set(requestId, Date.now());
+      refreshNetwork.push({ requestId, startedMs: Date.now() - mobileStartedAt });
+    }
+  });
+  protocol.on('Network.responseReceived', ({ requestId, response }) => {
+    const entry = refreshNetwork.find((candidate) => candidate.requestId === requestId);
+    if (entry && mobileStartedAt !== null) {
+      entry.responseMs = Date.now() - mobileStartedAt;
+      entry.status = response.status;
+    }
+  });
+  protocol.on('Network.loadingFinished', ({ requestId }) => {
+    const entry = refreshNetwork.find((candidate) => candidate.requestId === requestId);
+    if (entry && mobileStartedAt !== null) {
+      entry.finishedMs = Date.now() - mobileStartedAt;
+      entry.durationMs = Date.now() - (refreshRequests.get(requestId) ?? Date.now());
     }
   });
 
@@ -123,7 +164,7 @@ async function main() {
   const channel = desktopReplica
     .channel(topicReply.topic)
     .on('broadcast', { event: 'state-changed' }, ({ payload }) => {
-      if (payload?.eventId === eventId) {
+      if (payload?.eventId === eventId && payload?.traceId === refreshTraceId) {
         desktopBroadcastElapsedMs = mobileStartedAt === null ? null : Date.now() - mobileStartedAt;
         resolveBroadcast();
       }
@@ -190,7 +231,7 @@ async function main() {
   }, mobileStartedAt);
   await edgeRequest('/v1/monitor/realtime-ping', {
     method: 'POST',
-    body: JSON.stringify({ eventId }),
+    body: JSON.stringify({ eventId, traceId: refreshTraceId }),
   });
   await Promise.race([
     broadcastReceived,
@@ -287,6 +328,7 @@ async function main() {
       desktopBroadcastElapsedMs,
       desktopFastBroadcastElapsedMs,
       mobileVisualRenderElapsedMs,
+      refreshNetwork,
       milestones,
       burst: {
         duringFirstRefresh,

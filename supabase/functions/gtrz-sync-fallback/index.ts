@@ -263,6 +263,7 @@ Deno.serve(async (request) => {
     globalControl = false,
     event: Obj | null = null,
     notifyMobile = true,
+    traceId: string | null = null,
   ): Promise<void> => {
     if (!pairingKey) return;
     try {
@@ -279,6 +280,7 @@ Deno.serve(async (request) => {
                 version,
                 globalControl,
                 fastPath: event !== null && !globalControl,
+                ...(traceId ? { traceId } : {}),
               }),
             },
           ),
@@ -564,7 +566,14 @@ Deno.serve(async (request) => {
       denyAdministrator();
       const input = await body(),
         eventId = string(input.eventId, 'eventId');
-      await notifyRealtime(eventId, 0);
+      await notifyRealtime(
+        eventId,
+        0,
+        false,
+        null,
+        true,
+        typeof input.traceId === 'string' ? input.traceId : null,
+      );
       return ok({ accepted: true });
     }
     if (path === '/v1/monitor/desktop-realtime-ping' && request.method === 'POST') {
