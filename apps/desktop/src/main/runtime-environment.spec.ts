@@ -9,7 +9,9 @@ describe('runtime environment', () => {
   });
 
   it('mantém endpoints distintos para cada ambiente', () => {
-    expect(cloudSyncEndpoint('production')).toBe('https://gtrz-sync.jvgacontato.workers.dev');
+    expect(cloudSyncEndpoint('production')).toBe(
+      'https://muhzjnveqrahccoisddo.supabase.co/functions/v1/gtrz-sync-fallback',
+    );
     expect(cloudSyncEndpoint('test')).toBe('https://gtrz-sync-test.jvgacontato.workers.dev');
   });
 });
