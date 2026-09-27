@@ -1917,6 +1917,19 @@ export class CloudSyncService {
         .on('broadcast', { event: 'state-changed' }, (message: unknown) => {
           const envelope = isRecord(message) && isRecord(message.payload) ? message.payload : null;
           if (envelope?.eventId !== eventId) return;
+          if (envelope.globalControl === true) {
+            void this.#pullGlobalControl(database, pairingKey, deviceId)
+              .then((recovered) => {
+                if (!recovered) {
+                  this.#recordCloudFailure();
+                  return;
+                }
+                const nextEventId = getSessionState(database).activeEvent?.id ?? null;
+                void this.#ensureCanonicalRealtime(database, nextEventId, deviceId, pairingKey);
+              })
+              .catch(() => this.#recordCloudFailure());
+            return;
+          }
           void this.#reconcileCanonicalEvent(database, eventId, deviceId, pairingKey);
         })
         .subscribe((status) => {

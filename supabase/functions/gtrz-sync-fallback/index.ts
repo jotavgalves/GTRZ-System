@@ -65,7 +65,11 @@ Deno.serve(async (request) => {
   // and validates the canonical journal before applying any business data.
   const realtimeTopic = async (eventId: string): Promise<string> =>
     `gtrz-sync-${await sha(`${pairingKey}:${eventId}:realtime-v1`)}`;
-  const notifyRealtime = async (eventId: string, version: number): Promise<void> => {
+  const notifyRealtime = async (
+    eventId: string,
+    version: number,
+    globalControl = false,
+  ): Promise<void> => {
     if (!pairingKey) return;
     try {
       await fetch(
@@ -73,7 +77,7 @@ Deno.serve(async (request) => {
         {
           method: 'POST',
           headers: { apikey: serviceKey, 'Content-Type': 'application/json' },
-          body: JSON.stringify({ eventId, version }),
+          body: JSON.stringify({ eventId, version, globalControl }),
         },
       );
     } catch {
@@ -117,7 +121,7 @@ Deno.serve(async (request) => {
     const realtimeTopicRoute = /^\/v1\/events\/([^/]+)\/realtime-topic$/.exec(path);
     if (realtimeTopicRoute && request.method === 'GET') { await authorizeDesktop(); if (!pairingKey) throw Object.assign(new Error('Canal de atualização não configurado.'), { status: 503, code: 'NOT_CONFIGURED' }); return ok({ topic: await realtimeTopic(string(decodeURIComponent(realtimeTopicRoute[1]), 'eventId', 160)) }); }
     if (path === '/v1/monitor/global-control' && request.method === 'GET') { await authorizeDesktop(); const { data, error } = await db.rpc('gtrz_read_global_control', { p_after: Number(new URL(request.url).searchParams.get('after') ?? '0') }); if (error) throw error; return ok(data); }
-    if (path === '/v1/monitor/global-event' && request.method === 'POST') { denyAdministrator(); const input = await body(); const { data, error } = await db.rpc('gtrz_set_global_event', { p_command_id: input.commandId ?? crypto.randomUUID(), p_event_id: string(input.eventId, 'eventId'), p_event_name: string(input.eventName, 'eventName'), p_created_at: input.createdAt ?? Date.now() }); if (error) throw error; return ok(data); }
+    if (path === '/v1/monitor/global-event' && request.method === 'POST') { denyAdministrator(); const input = await body(); const { data, error } = await db.rpc('gtrz_set_global_event', { p_command_id: input.commandId ?? crypto.randomUUID(), p_event_id: string(input.eventId, 'eventId'), p_event_name: string(input.eventName, 'eventName'), p_created_at: input.createdAt ?? Date.now() }); if (error) throw error; await notifyRealtime('_catalog', 0, true); return ok(data); }
     if (path === '/v1/monitor/global-event/reset' && request.method === 'POST') { denyAdministrator(); const input = await body(), now = Date.now(); const { data, error } = await db.rpc('gtrz_request_global_reset', { p_request_id: crypto.randomUUID(), p_event_id: string(input.eventId, 'eventId'), p_event_name: string(input.eventName, 'eventName'), p_reason: string(input.reason, 'reason', 500), p_device_id: string(input.deviceId, 'deviceId'), p_created_at: now }); if (error) throw error; return ok(data, 202); }
     const resetBackupRoute = /^\/v1\/monitor\/reset-backup\/([^/]+)$/.exec(path);
     if (resetBackupRoute && request.method === 'POST') { await authorizeDesktop(); const requestId = string(decodeURIComponent(resetBackupRoute[1]), 'requestId'), deviceId = string(request.headers.get('X-GTRZ-Device-Id') ?? '', 'deviceId'), fileName = string(request.headers.get('X-GTRZ-Backup-Name') ?? 'backup.sqlite', 'backupName', 240), checksum = string(request.headers.get('X-GTRZ-Backup-Sha256') ?? '', 'backupSha256', 64).toLowerCase(), bytes = integer(Number(request.headers.get('X-GTRZ-Backup-Size') ?? ''), 'backupSize'); if (!/^[a-f0-9]{64}$/.test(checksum) || bytes > 104857600) throw new Error('Backup inválido.'); const contents = await request.arrayBuffer(); if (contents.byteLength !== bytes) throw new Error('O tamanho do backup não confere.'); const storagePath = `${requestId}/${deviceId}-${Date.now()}.sqlite`; const { error: uploadError } = await db.storage.from('gtrz-reset-backups').upload(storagePath, contents, { contentType: 'application/vnd.sqlite3', upsert: false }); if (uploadError) throw uploadError; const { data, error } = await db.rpc('gtrz_complete_reset_backup', { p_request_id: requestId, p_device_id: deviceId, p_file_name: fileName, p_storage_path: storagePath, p_sha256: checksum, p_bytes: bytes, p_created_at: Date.now() }); if (error) throw error; return ok(data); }
@@ -132,7 +136,29 @@ Deno.serve(async (request) => {
     const printRoute = /^\/v1\/events\/([^/]+)\/print\/(printers|claim|complete|jobs)$/.exec(path);
     if (printRoute) { const actorDeviceId = await authorizeDesktop(), eventId = string(decodeURIComponent(printRoute[1]), 'eventId'), operation = printRoute[2], now = Date.now(); if (operation === 'jobs' && request.method === 'GET') { const { data, error } = await db.rpc('gtrz_list_print_jobs', { p_event_id: eventId }); if (error) throw error; return ok(data); } const input = await body(), deviceId = string(input.deviceId, 'deviceId'); assertDeviceClaim(actorDeviceId, deviceId); if (operation === 'printers' && request.method === 'POST') { const { data, error } = await db.rpc('gtrz_register_print_printer', { p_event_id: eventId, p_device_id: deviceId, p_device_label: string(input.deviceLabel, 'deviceLabel', 120), p_printer_name: string(input.printerName, 'printerName', 240), p_paper_width_mm: input.paperWidthMm === 58 ? 58 : 80, p_enabled: input.enabled === true, p_seen_at: now }); if (error) throw error; return ok(data); } if (operation === 'claim' && request.method === 'POST') { const { data, error } = await db.rpc('gtrz_claim_print_job', { p_event_id: eventId, p_device_id: deviceId, p_now: now }); if (error) throw error; return ok(data); } if (operation === 'complete' && request.method === 'POST') { const result = string(input.result, 'result', 16), { data, error } = await db.rpc('gtrz_complete_print_job', { p_job_id: string(input.jobId, 'jobId'), p_claim_token: string(input.claimToken, 'claimToken'), p_device_id: deviceId, p_result: result, p_error: typeof input.error === 'string' && input.error.trim() ? input.error.trim().slice(0, 500) : null, p_now: now }); if (error) throw error; return ok(data); } return bad(404, 'NOT_FOUND', 'Rota de impressão não encontrada.'); }
     const eventRoute = /^\/v1\/events\/([^/]+)\/(journal|snapshot|state|cashier\/(catalog|context))$/.exec(path);
-    if (eventRoute) { const actorDeviceId = await authorizeDesktop(), eventId = string(decodeURIComponent(eventRoute[1]), 'eventId'), operation = eventRoute[2]; if (operation === 'state' && request.method === 'GET') return ok(await state(eventId)); if (operation === 'journal' && request.method === 'POST') { const input = await body(); if (actorDeviceId !== null && asObj(input.payload)) assertDeviceClaim(actorDeviceId, string(input.payload.deviceId, 'payload.deviceId', 80)); const { data, error } = await db.rpc('gtrz_append_journal', { p_event_id: eventId, p_command_id: string(input.commandId, 'commandId'), p_type: string(input.type, 'type', 120), p_payload: input.payload, p_created_at: integer(input.createdAt, 'createdAt') }); if (error) throw error; if (asObj(input.payload)) await queueReceipt(eventId, string(input.commandId, 'commandId'), input.payload); return ok(data); } if (operation === 'snapshot' && request.method === 'GET') { const { data, error } = await db.rpc('gtrz_read_journal', { p_event_id: eventId, p_after: Number(new URL(request.url).searchParams.get('after') ?? '0') }); if (error) throw error; return ok(data); } const current = await state(eventId), projection = operation === 'cashier/catalog' ? 'cashier-catalog' : 'mobile-context'; if (request.method === 'GET') return ok(projection === 'cashier-catalog' ? current.catalog : current.context); if (request.method === 'POST') { const input = await body(), payload = asObj(input.projection) ? input.projection : input, expectedVersion = integer(input.expectedVersion, 'expectedVersion'), { data, error } = await db.rpc('gtrz_replace_event_projection_checked', { p_event_id: eventId, p_projection: projection, p_payload: payload, p_expected_version: expectedVersion, p_updated_at: Date.now() }); if (error) throw error; if (asObj(data) && data.status === 'conflict') return bad(409, 'STATE_CONFLICT', 'O estado do evento mudou antes da publicação.'); return ok(data); } }
+    if (eventRoute) {
+      const actorDeviceId = await authorizeDesktop(), eventId = string(decodeURIComponent(eventRoute[1]), 'eventId'), operation = eventRoute[2];
+      if (operation === 'state' && request.method === 'GET') return ok(await state(eventId));
+      if (operation === 'journal' && request.method === 'POST') {
+        const input = await body();
+        if (actorDeviceId !== null && asObj(input.payload)) assertDeviceClaim(actorDeviceId, string(input.payload.deviceId, 'payload.deviceId', 80));
+        const { data, error } = await db.rpc('gtrz_append_journal', { p_event_id: eventId, p_command_id: string(input.commandId, 'commandId'), p_type: string(input.type, 'type', 120), p_payload: input.payload, p_created_at: integer(input.createdAt, 'createdAt') });
+        if (error) throw error;
+        if (asObj(input.payload)) await queueReceipt(eventId, string(input.commandId, 'commandId'), input.payload);
+        await notifyRealtime(eventId, 0);
+        return ok(data);
+      }
+      if (operation === 'snapshot' && request.method === 'GET') { const { data, error } = await db.rpc('gtrz_read_journal', { p_event_id: eventId, p_after: Number(new URL(request.url).searchParams.get('after') ?? '0') }); if (error) throw error; return ok(data); }
+      const current = await state(eventId), projection = operation === 'cashier/catalog' ? 'cashier-catalog' : 'mobile-context';
+      if (request.method === 'GET') return ok(projection === 'cashier-catalog' ? current.catalog : current.context);
+      if (request.method === 'POST') {
+        const input = await body(), payload = asObj(input.projection) ? input.projection : input, expectedVersion = integer(input.expectedVersion, 'expectedVersion'), { data, error } = await db.rpc('gtrz_replace_event_projection_checked', { p_event_id: eventId, p_projection: projection, p_payload: payload, p_expected_version: expectedVersion, p_updated_at: Date.now() });
+        if (error) throw error;
+        if (asObj(data) && data.status === 'conflict') return bad(409, 'STATE_CONFLICT', 'O estado do evento mudou antes da publicação.');
+        await notifyRealtime(eventId, 0);
+        return ok(data);
+      }
+    }
 
     if (!path.startsWith('/v1/mobile/')) return bad(404, 'NOT_FOUND', 'Rota canônica não encontrada.');
     const current = await currentSession(), operator = current.operator as Obj, eventId = string(current.eventId, 'eventId'), allowed = operator.permissions as Record<Permission, boolean>;
