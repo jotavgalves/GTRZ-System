@@ -72,7 +72,7 @@ Deno.serve(async (request) => {
   ): Promise<void> => {
     if (!pairingKey) return;
     try {
-      await fetch(
+      const response = await fetch(
         `${endpoint}/realtime/v1/api/broadcast/${encodeURIComponent(await realtimeTopic(eventId))}/events/state-changed`,
         {
           method: 'POST',
@@ -80,6 +80,9 @@ Deno.serve(async (request) => {
           body: JSON.stringify({ eventId, version, globalControl }),
         },
       );
+      if (!response.ok) {
+        console.warn(`Realtime broadcast rejected with HTTP ${String(response.status)}.`);
+      }
     } catch {
       // A missed notification is harmless: the desktop fallback pull recovers it.
     }
@@ -162,6 +165,7 @@ Deno.serve(async (request) => {
 
     if (!path.startsWith('/v1/mobile/')) return bad(404, 'NOT_FOUND', 'Rota canônica não encontrada.');
     const current = await currentSession(), operator = current.operator as Obj, eventId = string(current.eventId, 'eventId'), allowed = operator.permissions as Record<Permission, boolean>;
+    if (path === '/v1/mobile/realtime-topic' && request.method === 'GET') return ok({ topic: await realtimeTopic(eventId) });
     if (path === '/v1/mobile/catalog' && request.method === 'GET') return ok((await state(eventId)).catalog);
     if (path === '/v1/mobile/context' && request.method === 'GET') { const remote = await state(eventId), context = asObj(remote.context) ? remote.context : emptyContext; return ok({ ...context, ticketLots: allowed.tickets ? context.ticketLots : [], servicePoints: allowed.sales || allowed.vouchers ? context.servicePoints : [], voucherCodes: allowed.vouchers ? context.voucherCodes : [], vouchers: allowed.sales || allowed.vouchers ? context.vouchers : [] }); }
     const required: Record<string, Permission> = { '/v1/mobile/sales': 'sales', '/v1/mobile/stock': 'inventory', '/v1/mobile/tickets': 'tickets', '/v1/mobile/expenses': 'expenses', '/v1/mobile/vouchers': 'vouchers' }, permission = required[path];
