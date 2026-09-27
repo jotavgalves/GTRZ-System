@@ -1261,7 +1261,9 @@ export class CloudSyncService {
         database.sqlite
           .prepare('DELETE FROM sync_state WHERE key = ?')
           .run(`replica.reconciled:${event.id}`);
-        this.#ensureEventStreams(database, event.id, deviceId, pairingKey);
+        if (!this.#endpoint.includes('.supabase.co/functions/')) {
+          this.#ensureEventStreams(database, event.id, deviceId, pairingKey);
+        }
         this.#onDataChanged();
       } else if (event !== undefined) {
         resetEventData(database, {
