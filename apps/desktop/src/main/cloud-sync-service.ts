@@ -40,6 +40,7 @@ import type { DatabaseRuntime } from './database-runtime';
 const CONNECTION_TIMEOUT_MS = 5_000;
 const OUTBOX_INTERVAL_MS = 3_000;
 const CANONICAL_FALLBACK_RECONCILIATION_INTERVAL_MS = 15_000;
+const CANONICAL_REALTIME_RECONCILIATION_DELAY_MS = 750;
 const CANONICAL_SUPABASE_URL = 'https://muhzjnveqrahccoisddo.supabase.co';
 const CANONICAL_SUPABASE_PUBLISHABLE_KEY = 'sb_publishable_ikPSVbY1junIsMbz5SrFrg_wkobALXv';
 const STREAM_RECONNECT_MAX_MS = 60_000;
@@ -326,8 +327,11 @@ export class CloudSyncService {
   readonly #eventReconnectTimers = new Map<string, NodeJS.Timeout>();
   readonly #eventReconnectDelays = new Map<string, number>();
   readonly #canonicalRealtimeChannels = new Map<string, RealtimeChannel>();
+  readonly #canonicalDesktopRealtimeChannels = new Map<string, RealtimeChannel>();
   readonly #canonicalRealtimeReadyEvents = new Set<string>();
   readonly #canonicalReconciliations = new Map<string, Promise<void>>();
+  readonly #canonicalReconciliationTimers = new Map<string, NodeJS.Timeout>();
+  readonly #canonicalFastAppliedAt = new Map<string, number>();
   #canonicalRealtimeClient: SupabaseClient | null = null;
   #canonicalLastFallbackReconciliationAt = 0;
   #controlStream: WebSocket | null = null;
@@ -1912,36 +1916,85 @@ export class CloudSyncService {
     if (activeEventId !== null) wanted.add(activeEventId);
 
     for (const eventId of wanted) {
-      if (this.#canonicalRealtimeChannels.has(eventId)) continue;
-      const topic = await this.#readCanonicalRealtimeTopic(eventId, pairingKey);
-      const channel = this.#canonicalRealtimeClient
-        .channel(topic)
-        .on('broadcast', { event: 'state-changed' }, (message: unknown) => {
-          const envelope = isRecord(message) && isRecord(message.payload) ? message.payload : null;
-          if (envelope?.eventId !== eventId) return;
-          if (envelope.globalControl === true) {
-            void this.#pullGlobalControl(database, pairingKey, deviceId)
-              .then((recovered) => {
-                if (!recovered) {
-                  this.#recordCloudFailure();
-                  return;
-                }
-                const nextEventId = getSessionState(database).activeEvent?.id ?? null;
-                void this.#ensureCanonicalRealtime(database, nextEventId, deviceId, pairingKey);
-              })
-              .catch(() => this.#recordCloudFailure());
-            return;
-          }
-          void this.#reconcileCanonicalEvent(database, eventId, deviceId, pairingKey);
-        })
-        .subscribe((status) => {
-          if (status === REALTIME_SUBSCRIBE_STATES.SUBSCRIBED) {
-            this.#canonicalRealtimeReadyEvents.add(eventId);
-          } else {
-            this.#canonicalRealtimeReadyEvents.delete(eventId);
-          }
-        });
-      this.#canonicalRealtimeChannels.set(eventId, channel);
+      const hasStateChannel = this.#canonicalRealtimeChannels.has(eventId);
+      const hasDesktopChannel = this.#canonicalDesktopRealtimeChannels.has(eventId);
+      if (hasStateChannel && hasDesktopChannel) continue;
+      const [topic, desktopTopic] = await Promise.all([
+        this.#readCanonicalRealtimeTopic(eventId, pairingKey),
+        this.#readCanonicalDesktopRealtimeTopic(eventId, pairingKey),
+      ]);
+      if (!hasStateChannel) {
+        const channel = this.#canonicalRealtimeClient
+          .channel(topic)
+          .on('broadcast', { event: 'state-changed' }, (message: unknown) => {
+            const envelope =
+              isRecord(message) && isRecord(message.payload) ? message.payload : null;
+            if (envelope?.eventId !== eventId) return;
+            if (envelope.globalControl === true) {
+              void this.#pullGlobalControl(database, pairingKey, deviceId)
+                .then((recovered) => {
+                  if (!recovered) {
+                    this.#recordCloudFailure();
+                    return;
+                  }
+                  const nextEventId = getSessionState(database).activeEvent?.id ?? null;
+                  void this.#ensureCanonicalRealtime(database, nextEventId, deviceId, pairingKey);
+                })
+                .catch(() => this.#recordCloudFailure());
+              return;
+            }
+            const fastPath = envelope.fastPath === true;
+            const recentlyApplied =
+              fastPath && Date.now() - (this.#canonicalFastAppliedAt.get(eventId) ?? 0) < 1_500;
+            if (!recentlyApplied) {
+              this.#scheduleCanonicalReconciliation(
+                database,
+                eventId,
+                deviceId,
+                pairingKey,
+                fastPath ? 2_000 : CANONICAL_REALTIME_RECONCILIATION_DELAY_MS,
+              );
+            }
+          })
+          .subscribe((status) => {
+            if (status === REALTIME_SUBSCRIBE_STATES.SUBSCRIBED) {
+              this.#canonicalRealtimeReadyEvents.add(eventId);
+            } else {
+              this.#canonicalRealtimeReadyEvents.delete(eventId);
+            }
+          });
+        this.#canonicalRealtimeChannels.set(eventId, channel);
+      }
+      if (!hasDesktopChannel) {
+        const desktopChannel = this.#canonicalRealtimeClient
+          .channel(desktopTopic)
+          .on('broadcast', { event: 'journal-entry' }, (message: unknown) => {
+            const envelope =
+              isRecord(message) && isRecord(message.payload) ? message.payload : null;
+            const journalEvent = envelope?.event;
+            if (envelope?.eventId !== eventId || !isRemoteJournalEvent(journalEvent)) return;
+            const result = this.#applyJournalEnvelope(
+              database,
+              eventId,
+              deviceId,
+              { currentSequence: journalEvent.sequence },
+              [journalEvent],
+            );
+            if (!result.accepted) {
+              void this.#reconcileCanonicalEvent(database, eventId, deviceId, pairingKey);
+              return;
+            }
+            this.#canonicalFastAppliedAt.set(eventId, Date.now());
+            const pending = this.#canonicalReconciliationTimers.get(eventId);
+            if (pending !== undefined) {
+              clearTimeout(pending);
+              this.#canonicalReconciliationTimers.delete(eventId);
+            }
+            this.#recordCloudSuccess();
+          })
+          .subscribe();
+        this.#canonicalDesktopRealtimeChannels.set(eventId, desktopChannel);
+      }
     }
 
     for (const [eventId, channel] of this.#canonicalRealtimeChannels) {
@@ -1950,17 +2003,30 @@ export class CloudSyncService {
       this.#canonicalRealtimeChannels.delete(eventId);
       void this.#canonicalRealtimeClient.removeChannel(channel);
     }
+    for (const [eventId, channel] of this.#canonicalDesktopRealtimeChannels) {
+      if (wanted.has(eventId)) continue;
+      this.#canonicalDesktopRealtimeChannels.delete(eventId);
+      this.#canonicalFastAppliedAt.delete(eventId);
+      void this.#canonicalRealtimeClient.removeChannel(channel);
+    }
   }
 
   #stopCanonicalRealtime(): void {
     this.#canonicalRealtimeReadyEvents.clear();
     this.#canonicalReconciliations.clear();
+    for (const timer of this.#canonicalReconciliationTimers.values()) clearTimeout(timer);
+    this.#canonicalReconciliationTimers.clear();
+    this.#canonicalFastAppliedAt.clear();
     if (this.#canonicalRealtimeClient !== null) {
       for (const channel of this.#canonicalRealtimeChannels.values()) {
         void this.#canonicalRealtimeClient.removeChannel(channel);
       }
+      for (const channel of this.#canonicalDesktopRealtimeChannels.values()) {
+        void this.#canonicalRealtimeClient.removeChannel(channel);
+      }
     }
     this.#canonicalRealtimeChannels.clear();
+    this.#canonicalDesktopRealtimeChannels.clear();
     this.#canonicalRealtimeClient = null;
     this.#canonicalLastFallbackReconciliationAt = 0;
   }
@@ -1978,6 +2044,36 @@ export class CloudSyncService {
       throw new Error('A nuvem não conseguiu abrir o canal de atualização imediata.');
     }
     return payload.topic;
+  }
+
+  async #readCanonicalDesktopRealtimeTopic(eventId: string, pairingKey: string): Promise<string> {
+    const response = await fetch(
+      `${this.#endpoint}/v1/events/${encodeURIComponent(eventId)}/desktop-realtime-topic`,
+      {
+        headers: await this.#cloudHeaders(pairingKey),
+        signal: AbortSignal.timeout(CONNECTION_TIMEOUT_MS),
+      },
+    );
+    const payload: unknown = await response.json().catch(() => null);
+    if (!response.ok || !isRecord(payload) || typeof payload.topic !== 'string') {
+      throw new Error('A nuvem não conseguiu abrir o canal rápido entre computadores.');
+    }
+    return payload.topic;
+  }
+
+  #scheduleCanonicalReconciliation(
+    database: DatabaseContext,
+    eventId: string,
+    deviceId: string,
+    pairingKey: string,
+    delayMs: number,
+  ): void {
+    if (this.#canonicalReconciliationTimers.has(eventId)) return;
+    const timer = setTimeout(() => {
+      this.#canonicalReconciliationTimers.delete(eventId);
+      void this.#reconcileCanonicalEvent(database, eventId, deviceId, pairingKey);
+    }, delayMs);
+    this.#canonicalReconciliationTimers.set(eventId, timer);
   }
 
   #reconcileCanonicalEvent(

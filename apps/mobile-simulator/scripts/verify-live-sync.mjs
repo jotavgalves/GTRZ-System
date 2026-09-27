@@ -62,6 +62,10 @@ async function main() {
   if (typeof topicReply.topic !== 'string' || topicReply.topic.length === 0) {
     throw new Error('A central não forneceu o tópico em tempo real.');
   }
+  const desktopTopicReply = await edgeRequest(`/v1/events/${eventId}/desktop-realtime-topic`);
+  if (typeof desktopTopicReply.topic !== 'string' || desktopTopicReply.topic.length === 0) {
+    throw new Error('A central não forneceu o tópico rápido entre computadores.');
+  }
 
   const browser = await chromium.connectOverCDP(`http://127.0.0.1:${debugPort}`);
   const page = browser
@@ -69,6 +73,21 @@ async function main() {
     .flatMap((context) => context.pages())
     .find((candidate) => candidate.url().endsWith('/cashier'));
   if (!page) throw new Error('O GTRZ System Mobile instalado não está aberto na porta de teste.');
+  await page.evaluate(() => {
+    const testWindow = window;
+    testWindow.__gtrzLiveRenderStartedAt = null;
+    testWindow.__gtrzLiveRenderElapsedMs = null;
+    const root = document.getElementById('app');
+    if (!root) throw new Error('A interface mobile não possui a raiz do aplicativo.');
+    new MutationObserver(() => {
+      if (
+        typeof testWindow.__gtrzLiveRenderStartedAt === 'number' &&
+        testWindow.__gtrzLiveRenderElapsedMs === null
+      ) {
+        testWindow.__gtrzLiveRenderElapsedMs = Date.now() - testWindow.__gtrzLiveRenderStartedAt;
+      }
+    }).observe(root, { childList: true, subtree: true, characterData: true });
+  });
   const mobileRefreshState = () =>
     page.evaluate(() => ({
       inFlight: state.realtimeRefreshInFlight,
@@ -109,6 +128,23 @@ async function main() {
       }
     });
 
+  const desktopFastReplica = createClient(projectUrl, publishableKey, {
+    auth: { persistSession: false, autoRefreshToken: false },
+  });
+  let resolveFastBroadcast;
+  let desktopFastBroadcastElapsedMs = null;
+  const fastBroadcastReceived = new Promise((resolve) => {
+    resolveFastBroadcast = resolve;
+  });
+  const fastChannel = desktopFastReplica
+    .channel(desktopTopicReply.topic)
+    .on('broadcast', { event: 'journal-entry' }, ({ payload }) => {
+      if (payload?.eventId === eventId && payload?.event?.sequence === 0) {
+        desktopFastBroadcastElapsedMs = startedAt === null ? null : Date.now() - startedAt;
+        resolveFastBroadcast();
+      }
+    });
+
   await new Promise((resolve, reject) => {
     const timeout = setTimeout(
       () => reject(new Error('Assinante equivalente ao desktop não conectou em 10 segundos.')),
@@ -127,8 +163,30 @@ async function main() {
       }
     });
   });
+  await new Promise((resolve, reject) => {
+    const timeout = setTimeout(
+      () => reject(new Error('Assinante rápido entre computadores não conectou em 10 segundos.')),
+      10_000,
+    );
+    fastChannel.subscribe((status) => {
+      if (status === REALTIME_SUBSCRIBE_STATES.SUBSCRIBED) {
+        clearTimeout(timeout);
+        resolve();
+      } else if (
+        status === REALTIME_SUBSCRIBE_STATES.CHANNEL_ERROR ||
+        status === REALTIME_SUBSCRIBE_STATES.TIMED_OUT
+      ) {
+        clearTimeout(timeout);
+        reject(new Error(`Assinante rápido entre computadores: ${status}.`));
+      }
+    });
+  });
 
   startedAt = Date.now();
+  await page.evaluate((started) => {
+    window.__gtrzLiveRenderStartedAt = started;
+    window.__gtrzLiveRenderElapsedMs = null;
+  }, startedAt);
   await edgeRequest('/v1/monitor/realtime-ping', {
     method: 'POST',
     body: JSON.stringify({ eventId }),
@@ -136,7 +194,10 @@ async function main() {
   await Promise.race([
     broadcastReceived,
     new Promise((_, reject) =>
-      setTimeout(() => reject(new Error('O broadcast não chegou ao assinante do desktop.')), 10_000),
+      setTimeout(
+        () => reject(new Error('O broadcast não chegou ao assinante do desktop.')),
+        10_000,
+      ),
     ),
   ]);
 
@@ -161,6 +222,25 @@ async function main() {
   if (initialRefresh.inFlight || initialRefresh.pending || !initialRefresh.online) {
     throw new Error('A primeira atualização móvel não estabilizou antes do teste de rajada.');
   }
+  const mobileVisualRenderElapsedMs = await page.evaluate(() => window.__gtrzLiveRenderElapsedMs);
+  if (typeof mobileVisualRenderElapsedMs !== 'number') {
+    throw new Error('A atualização em tempo real não gerou uma renderização visível no mobile.');
+  }
+
+  startedAt = Date.now();
+  await edgeRequest('/v1/monitor/desktop-realtime-ping', {
+    method: 'POST',
+    body: JSON.stringify({ eventId }),
+  });
+  await Promise.race([
+    fastBroadcastReceived,
+    new Promise((_, reject) =>
+      setTimeout(
+        () => reject(new Error('O canal rápido não chegou ao assinante do desktop.')),
+        10_000,
+      ),
+    ),
+  ]);
 
   await edgeRequest('/v1/monitor/realtime-ping', {
     method: 'POST',
@@ -185,6 +265,7 @@ async function main() {
   }
 
   await desktopReplica.removeChannel(channel);
+  await desktopFastReplica.removeChannel(fastChannel);
   await protocol.detach();
   const missingSteps = requiredSteps.filter(
     (step) => !milestones.some((milestone) => milestone.step === step),
@@ -201,6 +282,8 @@ async function main() {
       eventId,
       desktopReplicaReceived: true,
       desktopBroadcastElapsedMs,
+      desktopFastBroadcastElapsedMs,
+      mobileVisualRenderElapsedMs,
       milestones,
       burst: {
         duringFirstRefresh,
