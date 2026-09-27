@@ -124,7 +124,12 @@ async function main() {
   });
   protocol.on('Network.requestWillBeSent', ({ request }) => {
     const match = request.url.match(/\/v1\/mobile\/(refresh)/);
-    if (mobileStartedAt !== null && refreshSignalReceivedAt !== null && match) {
+    if (
+      mobileStartedAt !== null &&
+      refreshSignalReceivedAt !== null &&
+      match &&
+      request.method === 'GET'
+    ) {
       milestones.push({ step: match[1], elapsedMs: Date.now() - mobileStartedAt });
     }
   });
@@ -132,6 +137,7 @@ async function main() {
     if (
       mobileStartedAt !== null &&
       refreshSignalReceivedAt !== null &&
+      request.method === 'GET' &&
       /\/v1\/mobile\/refresh/.test(request.url)
     ) {
       refreshRequests.set(requestId, Date.now());

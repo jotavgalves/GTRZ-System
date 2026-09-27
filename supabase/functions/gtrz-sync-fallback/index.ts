@@ -14,6 +14,8 @@ const cors = {
   'Access-Control-Allow-Headers':
     'authorization, apikey, content-type, x-gtrz-key, x-gtrz-device-id, x-gtrz-session',
   'Access-Control-Allow-Methods': 'GET, POST, PATCH, DELETE, OPTIONS',
+  // Chromium honors up to two hours. The first authenticated request warms this cache.
+  'Access-Control-Max-Age': '7200',
 };
 const emptyCatalog = { products: [], currentSequence: 0 };
 const emptyContext = {
