@@ -168,6 +168,7 @@ function recalculateCombos(products: Obj[]): void {
 
 Deno.serve(async (request) => {
   if (request.method === 'OPTIONS') return new Response(null, { headers: cors });
+  const requestStartedAt = performance.now();
   const path = pathOf(request);
   if (path === '/health' && request.method === 'GET')
     return ok({ status: 'ok', service: 'gtrz-canonical-cloud' });
@@ -502,6 +503,7 @@ Deno.serve(async (request) => {
       const catalog = asObj(current.catalog) ? current.catalog : emptyCatalog,
         context = asObj(current.context) ? current.context : emptyContext,
         next = mutate(catalog, context);
+      const commitStartedAt = performance.now();
       const { data, error } = await db.rpc('gtrz_commit_mobile_state_fast', {
         p_event_id: eventId,
         p_command_id: commandId,
@@ -513,6 +515,7 @@ Deno.serve(async (request) => {
         p_created_at: Date.now(),
         p_desktop_realtime_topic: desktopTopic,
       });
+      const commitFinishedAt = performance.now();
       if (error) throw error;
       if (!asObj(data) || data.status !== 'conflict') {
         const version =
@@ -524,6 +527,7 @@ Deno.serve(async (request) => {
         // Start the Desktop delivery as soon as the canonical journal commit
         // succeeds. The receipt job is still part of the command contract, but
         // must not postpone the dashboard's live journal notification.
+        const desktopDeliveryStartedAt = performance.now();
         const desktopDelivery = notifyRealtime(
           eventId,
           version,
@@ -534,10 +538,29 @@ Deno.serve(async (request) => {
           null,
           true,
         );
+        const receiptStartedAt = performance.now();
         await queueReceipt(eventId, commandId, payload);
+        const receiptFinishedAt = performance.now();
+        const timing = {
+          requestBeforeCommitMs: Math.round(commitStartedAt - requestStartedAt),
+          commitMs: Math.round(commitFinishedAt - commitStartedAt),
+          receiptQueueMs: Math.round(receiptFinishedAt - receiptStartedAt),
+        };
+        const timedDesktopDelivery = desktopDelivery.then((delivery) => {
+          console.log(
+            JSON.stringify({
+              kind: 'gtrz-mobile-command-timing',
+              action: payload.action,
+              ...timing,
+              desktopBroadcastMs: Math.round(performance.now() - desktopDeliveryStartedAt),
+              desktopBroadcastFailed: delivery.failed,
+            }),
+          );
+          return delivery;
+        });
         EdgeRuntime.waitUntil(
           Promise.all([
-            desktopDelivery,
+            timedDesktopDelivery,
             notifyRealtime(eventId, version, false, event, true, null, next, false),
           ]).catch((backgroundError: unknown) => {
             console.warn(
@@ -546,7 +569,7 @@ Deno.serve(async (request) => {
             );
           }),
         );
-        return data;
+        return asObj(data) ? { ...data, timing } : { result: data, timing };
       }
       current = await state(eventId);
     }
@@ -1134,7 +1157,7 @@ Deno.serve(async (request) => {
     const input = await body(),
       commandId = string(input.commandId, 'commandId'),
       now = Date.now(),
-      deviceId = `mobile:${String(operator.operator_id)}:${String(current.deviceId)}`.slice(0, 80),
+      deviceId = `mobile:${String(operator.id)}:${String(current.deviceId)}`.slice(0, 80),
       operatorName = string(operator.name, 'operator.name', 60);
     if (path === '/v1/mobile/stock') {
       const productId = string(input.productId, 'productId'),

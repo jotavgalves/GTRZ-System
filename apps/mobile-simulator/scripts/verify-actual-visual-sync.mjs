@@ -426,6 +426,11 @@ async function main() {
   await mobilePage.locator('details.cart > summary').click();
   await mobilePage.locator('[data-method="pix"]').click();
   await mobilePage.locator('#charge').waitFor({ state: 'visible' });
+  const saleResponsePromise = mobilePage.waitForResponse(
+    (response) =>
+      response.request().method() === 'POST' && response.url().endsWith('/v1/mobile/sales'),
+    { timeout: MAX_VISUAL_WAIT_MS },
+  );
   mobilePage.on('request', (request) => {
     if (request.method() === 'POST' && request.url().endsWith('/v1/mobile/sales')) {
       mobileSaleRequestStartedAt ??= Date.now();
@@ -443,6 +448,8 @@ async function main() {
 
   const actionAt = Date.now();
   await mobilePage.locator('#charge').click();
+  const saleResponse = await saleResponsePromise;
+  const saleResponseBody = await saleResponse.json().catch(() => null);
   await mobilePage
     .getByRole('heading', { name: 'Venda confirmada' })
     .waitFor({ timeout: MAX_VISUAL_WAIT_MS });
@@ -486,6 +493,15 @@ async function main() {
         desktopDataChangedAt === null ? null : Number(desktopDataChangedAt) - actionAt,
       desktopRenderAfterDataChangedMs:
         desktopDataChangedAt === null ? null : Number(visualAt) - Number(desktopDataChangedAt),
+      edgeCommand:
+        saleResponseBody !== null &&
+        typeof saleResponseBody === 'object' &&
+        !Array.isArray(saleResponseBody) &&
+        saleResponseBody.timing !== null &&
+        typeof saleResponseBody.timing === 'object' &&
+        !Array.isArray(saleResponseBody.timing)
+          ? saleResponseBody.timing
+          : null,
     },
     expectedMaximumMs: 200,
     withinTarget: latencyMs >= 0 && latencyMs <= 200,
