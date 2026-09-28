@@ -79,9 +79,15 @@ export class ThermalPrintService {
     // Never hand a receipt to Windows' implicit default target. On a new PC it
     // is commonly "Microsoft Print to PDF", which opens a save dialog and can
     // make a completed sale look as if it was printed by the thermal station.
+    await this.archiveOrder(orderId).catch(() => undefined);
     const registration = await this.getCloudPrinterRegistration();
     if (!registration.enabled) return;
-    await this.#printOrder(orderId, false).catch(() => undefined);
+    await this.#printOrder(orderId, false, false).catch(() => undefined);
+  }
+
+  async archiveOrder(orderId: string): Promise<void> {
+    const receipt = getOrderReceipt(this.#getDatabase(), orderId);
+    await this.#archiveReceiptDocument(receipt);
   }
 
   async reprintOrder(orderId: string): Promise<PrintOrderResult> {
@@ -138,7 +144,7 @@ export class ThermalPrintService {
     };
   }
 
-  async #printOrder(orderId: string, force: boolean): Promise<PrintOrderResult> {
+  async #printOrder(orderId: string, force: boolean, archive = true): Promise<PrintOrderResult> {
     const settings = getPrintingSettings(this.#getDatabase());
     if (!force && !settings.automaticPrinting) {
       return { success: true, skipped: true, message: 'Impressão automática desativada.' };
@@ -146,7 +152,7 @@ export class ThermalPrintService {
 
     try {
       const receipt = getOrderReceipt(this.#getDatabase(), orderId);
-      return await this.#printReceipt(receipt, settings);
+      return await this.#printReceipt(receipt, settings, archive);
     } catch (error: unknown) {
       return {
         success: false,
@@ -159,6 +165,7 @@ export class ThermalPrintService {
   async #printReceipt(
     receipt: DatabaseOrderReceipt,
     settings: PrintingSettings,
+    archive = true,
   ): Promise<PrintOrderResult> {
     try {
       const html = await buildReceiptHtml(receipt, settings.paperWidthMm);
@@ -166,7 +173,7 @@ export class ThermalPrintService {
 
       try {
         await window.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`);
-        await this.#archiveReceipt(window, receipt.orderId, receipt.closedAt);
+        if (archive) await this.#archiveReceipt(window, receipt.orderId, receipt.closedAt);
         const success = await new Promise<boolean>((resolve) => {
           const printOptions = {
             silent: true,
@@ -199,6 +206,20 @@ export class ThermalPrintService {
         skipped: false,
         message: error instanceof Error ? error.message : 'Falha ao imprimir a nota de retirada.',
       };
+    }
+  }
+
+  async #archiveReceiptDocument(receipt: DatabaseOrderReceipt): Promise<void> {
+    const html = await buildReceiptHtml(
+      receipt,
+      getPrintingSettings(this.#getDatabase()).paperWidthMm,
+    );
+    const window = createHiddenWindow();
+    try {
+      await window.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`);
+      await this.#archiveReceipt(window, receipt.orderId, receipt.closedAt);
+    } finally {
+      if (!window.isDestroyed()) window.destroy();
     }
   }
 

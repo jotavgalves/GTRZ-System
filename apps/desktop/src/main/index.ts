@@ -137,6 +137,7 @@ if (!hasSingleInstanceLock) {
         },
         () => printService.getCloudPrinterRegistration(),
       );
+      cloudSyncService.setReceiptArchiveAgent((orderId) => printService.archiveOrder(orderId));
       cloudSyncService.setResetBackupAgent(() => backupService.createBackup('pre-event-reset'));
       if (cloudSyncEnabledForRuntime) {
         cloudSyncService.start(

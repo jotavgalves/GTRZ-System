@@ -328,6 +328,8 @@ export class CloudSyncService {
   readonly #databaseRuntime: DatabaseRuntime | null;
   #printAgent: ((job: ClaimedCloudPrintJob) => Promise<PrintAgentResult>) | null = null;
   #getPrintQueueRegistration: (() => Promise<PrintQueueRegistration>) | null = null;
+  #receiptArchiveAgent: ((orderId: string) => Promise<void>) | null = null;
+  readonly #receiptArchivesInFlight = new Set<string>();
   #resetBackupAgent: (() => Promise<BackupRecord>) | null = null;
   #outboxTimer: NodeJS.Timeout | null = null;
   readonly #eventStreams = new Map<string, WebSocket>();
@@ -355,6 +357,7 @@ export class CloudSyncService {
   #cloudRetryDelayMs = 3_000;
   #cloudRetryNotBefore = 0;
   #printQueueInFlight: Promise<void> | null = null;
+  #queuedReceiptArchiveCheckComplete = false;
   #replicationRunning = true;
   #flushInFlight = false;
   #cloudConnected = false;
@@ -425,6 +428,10 @@ export class CloudSyncService {
   ): void {
     this.#printAgent = agent;
     this.#getPrintQueueRegistration = getRegistration;
+  }
+
+  setReceiptArchiveAgent(agent: (orderId: string) => Promise<void>): void {
+    this.#receiptArchiveAgent = agent;
   }
 
   setResetBackupAgent(agent: () => Promise<BackupRecord>): void {
@@ -1863,6 +1870,49 @@ export class CloudSyncService {
       .run();
   }
 
+  #scheduleReceiptArchive(database: DatabaseContext, orderId: string): void {
+    const agent = this.#receiptArchiveAgent;
+    const stateKey = `cloud.receipt-archive:${orderId}`;
+    if (agent === null || this.#receiptArchivesInFlight.has(orderId)) return;
+    const archived = database.sqlite
+      .prepare('SELECT 1 AS archived FROM sync_state WHERE key = ?')
+      .get(stateKey) as { readonly archived: number } | undefined;
+    if (archived !== undefined) return;
+
+    this.#receiptArchivesInFlight.add(orderId);
+    void agent(orderId)
+      .then(() => {
+        database.sqlite
+          .prepare(
+            `INSERT INTO sync_state (key, value, updated_at) VALUES (?, '1', ?)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+          )
+          .run(stateKey, Date.now());
+      })
+      .catch(() => undefined)
+      .finally(() => this.#receiptArchivesInFlight.delete(orderId));
+  }
+
+  async #archiveQueuedReceiptsOnce(
+    database: DatabaseContext,
+    baseUrl: string,
+    pairingKey: string,
+  ): Promise<void> {
+    if (this.#queuedReceiptArchiveCheckComplete) return;
+    const response = await fetch(`${baseUrl}/jobs`, {
+      headers: await this.#cloudHeaders(pairingKey),
+      signal: AbortSignal.timeout(CONNECTION_TIMEOUT_MS),
+    });
+    if (!response.ok) return;
+    const payload: unknown = await response.json();
+    if (!isRecord(payload) || !Array.isArray(payload.jobs)) return;
+    for (const job of payload.jobs) {
+      if (!isRecord(job) || job.status !== 'queued' || typeof job.orderId !== 'string') continue;
+      this.#scheduleReceiptArchive(database, job.orderId);
+    }
+    this.#queuedReceiptArchiveCheckComplete = true;
+  }
+
   #writeSyncDiagnostic(database: DatabaseContext, message: string): void {
     database.sqlite
       .prepare(
@@ -1912,6 +1962,7 @@ export class CloudSyncService {
         `Não foi possível registrar a impressora deste computador (${String(register.status)}).`,
       );
     }
+    void this.#archiveQueuedReceiptsOnce(database, baseUrl, pairingKey).catch(() => undefined);
     if (!registration.enabled || this.#printAgent === null) {
       if (registration.unavailableReason !== null) {
         this.#writePrintQueueDiagnostic(database, registration.unavailableReason);
@@ -2469,6 +2520,14 @@ export class CloudSyncService {
     }
     this.#storeRemoteJournalEvents(database, eventId, newEvents);
     this.#applyInbox(database, deviceId);
+    if (eventId === getSessionState(database).activeEvent?.id) {
+      for (const journalEvent of newEvents) {
+        const payload = journalPayload(journalEvent.payload);
+        if (payload?.action === 'operations.order-paid' && payload.entityId !== null) {
+          this.#scheduleReceiptArchive(database, payload.entityId);
+        }
+      }
+    }
     const nextCursor = this.#getInboxCursor(database, eventId);
     return {
       accepted: true,
