@@ -123,6 +123,20 @@ function mobileContext(context: Obj, allowed: Record<Permission, boolean>): Obj 
     vouchers: allowed.sales || allowed.vouchers ? context.vouchers : [],
   };
 }
+
+function compactMobileProjection(projection: MobileProjection): MobileProjection {
+  const catalog = asObj(projection.catalog) ? projection.catalog : emptyCatalog;
+  return {
+    catalog: {
+      ...catalog,
+      products: catalogProducts(catalog).map((product) => {
+        const { imageDataUrl: _imageDataUrl, ...compactProduct } = product;
+        return compactProduct;
+      }),
+    },
+    context: projection.context,
+  };
+}
 function recalculateCombos(products: Obj[]): void {
   const ids = new Map(products.map((product) => [product.productId, product]));
   for (const combo of products.filter(
@@ -311,6 +325,7 @@ Deno.serve(async (request) => {
     let mobileRecipients = 0;
     try {
       const notifications: Promise<Response>[] = [];
+      const snapshot = mobileProjection ? compactMobileProjection(mobileProjection) : null;
       if (notifyMobile) {
         notifications.push(
           fetch(
@@ -357,11 +372,11 @@ Deno.serve(async (request) => {
                   version,
                   globalControl,
                   fastPath: event !== null && !globalControl,
-                  ...(mobileProjection
+                  ...(snapshot
                     ? {
                         snapshot: {
-                          catalog: mobileProjection.catalog,
-                          context: mobileContext(mobileProjection.context, permissions),
+                          catalog: snapshot.catalog,
+                          context: mobileContext(snapshot.context, permissions),
                         },
                       }
                     : {}),
