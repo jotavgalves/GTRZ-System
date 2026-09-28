@@ -521,19 +521,30 @@ Deno.serve(async (request) => {
               : Number(current.version ?? 0) + 1,
           response = asObj(data) && asObj(data.response) ? data.response : null,
           event = response && asObj(response.event) ? response.event : null;
-        // Receipt persistence remains part of the request contract. The Desktop
-        // already receives the journal event inside the database transaction;
-        // only the supplementary Mobile fan-out can run after the response.
+        // Start the Desktop delivery as soon as the canonical journal commit
+        // succeeds. The receipt job is still part of the command contract, but
+        // must not postpone the dashboard's live journal notification.
+        const desktopDelivery = notifyRealtime(
+          eventId,
+          version,
+          false,
+          event,
+          false,
+          null,
+          null,
+          true,
+        );
         await queueReceipt(eventId, commandId, payload);
         EdgeRuntime.waitUntil(
-          notifyRealtime(eventId, version, false, event, true, null, next, false).catch(
-            (backgroundError: unknown) => {
-              console.warn(
-                'A confirmação móvel foi registrada, mas uma tarefa posterior falhou.',
-                backgroundError,
-              );
-            },
-          ),
+          Promise.all([
+            desktopDelivery,
+            notifyRealtime(eventId, version, false, event, true, null, next, false),
+          ]).catch((backgroundError: unknown) => {
+            console.warn(
+              'A confirmação móvel foi registrada, mas uma tarefa posterior falhou.',
+              backgroundError,
+            );
+          }),
         );
         return data;
       }
