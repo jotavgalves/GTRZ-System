@@ -110,7 +110,9 @@ export function resetEventData(
     database.sqlite.prepare('DELETE FROM ticket_sales WHERE event_id = ?').run(event.id);
     database.sqlite.prepare('DELETE FROM ticket_lots WHERE event_id = ?').run(event.id);
     database.sqlite.prepare('DELETE FROM food_sale_settlements WHERE event_id = ?').run(event.id);
-    database.sqlite.prepare('DELETE FROM food_combo_sale_settlements WHERE event_id = ?').run(event.id);
+    database.sqlite
+      .prepare('DELETE FROM food_combo_sale_settlements WHERE event_id = ?')
+      .run(event.id);
     database.sqlite
       .prepare(
         `DELETE FROM app_meta
@@ -244,7 +246,9 @@ export function deleteEventPermanently(
     database.sqlite.prepare('DELETE FROM ticket_lots WHERE event_id = ?').run(event.id);
 
     database.sqlite.prepare('DELETE FROM food_sale_settlements WHERE event_id = ?').run(event.id);
-    database.sqlite.prepare('DELETE FROM food_combo_sale_settlements WHERE event_id = ?').run(event.id);
+    database.sqlite
+      .prepare('DELETE FROM food_combo_sale_settlements WHERE event_id = ?')
+      .run(event.id);
     database.sqlite
       .prepare(
         `DELETE FROM app_meta
@@ -293,7 +297,16 @@ export function deleteEventPermanently(
       .prepare('DELETE FROM stock_transfers WHERE source_event_id = ? OR destination_event_id = ?')
       .run(event.id, event.id);
 
-    database.sqlite.prepare('DELETE FROM sync_outbox WHERE event_id = ?').run(event.id);
+    // Catalog mutations are transported under `_catalog` even when their audit
+    // belongs to this event. Remove both representations before deleting those
+    // audit rows, otherwise SQLite correctly rejects the event deletion.
+    database.sqlite
+      .prepare(
+        `DELETE FROM sync_outbox
+         WHERE event_id = ?
+            OR audit_id IN (SELECT id FROM audit_log WHERE event_id = ?)`,
+      )
+      .run(event.id, event.id);
     database.sqlite.prepare('DELETE FROM sync_inbox WHERE event_id = ?').run(event.id);
     database.sqlite.prepare('DELETE FROM sync_conflicts WHERE event_id = ?').run(event.id);
     database.sqlite

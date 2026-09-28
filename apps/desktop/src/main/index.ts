@@ -10,13 +10,33 @@ import { CloudSyncService } from './cloud-sync-service';
 import { createMainWindow } from './create-main-window';
 import { DatabaseRuntime } from './database-runtime';
 import { registerIpcHandlers } from './register-ipc';
-import { cloudSyncEndpoint, environmentLabel, getRuntimeEnvironment } from './runtime-environment';
+import {
+  cloudSyncEndpoint,
+  environmentLabel,
+  getRuntimeEnvironment,
+  isVisualQaRun,
+} from './runtime-environment';
 
 let mainWindow: BrowserWindow | null = null;
 let databaseRuntime: DatabaseRuntime | null = null;
 let cloudSyncService: CloudSyncService | null = null;
 const runtimeEnvironment = getRuntimeEnvironment();
+const visualQaRun = isVisualQaRun();
 const cloudSyncEnabledForRuntime = process.env.GTRZ_E2E_DISABLE_CLOUD_SYNC !== '1';
+
+if (visualQaRun) {
+  const userDataPath = process.env.GTRZ_E2E_USER_DATA_PATH?.trim();
+  app.setPath(
+    'userData',
+    userDataPath && userDataPath.length > 0
+      ? userDataPath
+      : path.join(app.getPath('appData'), '@gtrz', 'desktop-visual-qa'),
+  );
+  const remoteDebuggingPort = process.env.GTRZ_E2E_REMOTE_DEBUGGING_PORT?.trim();
+  if (remoteDebuggingPort !== undefined && /^\d{2,5}$/u.test(remoteDebuggingPort)) {
+    app.commandLine.appendSwitch('remote-debugging-port', remoteDebuggingPort);
+  }
+}
 
 if (process.platform === 'win32') {
   app.setAppUserModelId('br.com.gtrz.system');
@@ -60,10 +80,10 @@ if (!hasSingleInstanceLock) {
   void app.whenReady().then(async () => {
     try {
       const userDataPath = app.getPath('userData');
-      const documentsFolder =
-        runtimeEnvironment === 'test'
-          ? path.join(userDataPath, 'test-files')
-          : path.join(app.getPath('documents'), 'GTRZ System');
+      const isolatedDataRun = runtimeEnvironment === 'test' || visualQaRun;
+      const documentsFolder = isolatedDataRun
+        ? path.join(userDataPath, 'test-files')
+        : path.join(app.getPath('documents'), 'GTRZ System');
       const databasePath = path.join(userDataPath, 'gtrz-system.sqlite');
       databaseRuntime = new DatabaseRuntime(databasePath);
       const backupService = new BackupService({
@@ -73,12 +93,19 @@ if (!hasSingleInstanceLock) {
         databaseRuntime,
       });
       cloudSyncService = new CloudSyncService(
-        path.join(
-          documentsFolder,
-          runtimeEnvironment === 'test'
-            ? 'Nuvem GTRZ TESTE - chave de pareamento.txt'
-            : 'Nuvem GTRZ - chave de pareamento.txt',
-        ),
+        visualQaRun
+          ? (process.env.GTRZ_E2E_PAIRING_KEY_PATH?.trim() ??
+            path.join(
+              app.getPath('documents'),
+              'GTRZ System',
+              'Nuvem GTRZ - chave de pareamento.txt',
+            ))
+          : path.join(
+              documentsFolder,
+              runtimeEnvironment === 'test'
+                ? 'Nuvem GTRZ TESTE - chave de pareamento.txt'
+                : 'Nuvem GTRZ - chave de pareamento.txt',
+            ),
         path.join(userDataPath, 'gtrz-cloud-device-id'),
         () => {
           if (mainWindow !== null && !mainWindow.isDestroyed()) {
@@ -86,7 +113,10 @@ if (!hasSingleInstanceLock) {
           }
         },
         cloudSyncEndpoint(runtimeEnvironment),
-        () => getPrintingSettings(requireDatabaseRuntime().get()).machineName,
+        () =>
+          visualQaRun
+            ? 'QA visual desktop'
+            : getPrintingSettings(requireDatabaseRuntime().get()).machineName,
         databaseRuntime,
         path.join(userDataPath, 'gtrz-cloud-device-credential.json'),
       );
@@ -115,7 +145,9 @@ if (!hasSingleInstanceLock) {
       }
 
       await backupService.createBackup('automatic').catch(() => undefined);
-      mainWindow = createMainWindow({ title: environmentLabel(runtimeEnvironment) });
+      mainWindow = createMainWindow({
+        title: visualQaRun ? 'GTRZ System - QA visual' : environmentLabel(runtimeEnvironment),
+      });
     } catch (error: unknown) {
       const message =
         error instanceof Error ? error.message : 'Falha desconhecida na inicialização.';

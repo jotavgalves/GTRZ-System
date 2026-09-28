@@ -329,9 +329,16 @@ export class CloudSyncService {
   readonly #canonicalRealtimeChannels = new Map<string, RealtimeChannel>();
   readonly #canonicalDesktopRealtimeChannels = new Map<string, RealtimeChannel>();
   readonly #canonicalRealtimeReadyEvents = new Set<string>();
+  readonly #canonicalDesktopRealtimeReadyEvents = new Set<string>();
   readonly #canonicalReconciliations = new Map<string, Promise<void>>();
   readonly #canonicalReconciliationTimers = new Map<string, NodeJS.Timeout>();
   readonly #canonicalFastAppliedAt = new Map<string, number>();
+  // A persisted fingerprint confirms what this database published in the past,
+  // not what the current canonical transport still contains. Revalidate once
+  // per process so a repaired/restarted trusted desktop can restore a missing
+  // mobile projection without turning the regular sync loop into polling.
+  readonly #canonicalProjectionPublished = new Set<string>();
+  readonly #canonicalProtectedProjectionFingerprints = new Map<string, string>();
   #canonicalRealtimeClient: SupabaseClient | null = null;
   #canonicalLastFallbackReconciliationAt = 0;
   #controlStream: WebSocket | null = null;
@@ -354,7 +361,10 @@ export class CloudSyncService {
     endpoint = 'https://muhzjnveqrahccoisddo.supabase.co/functions/v1/gtrz-sync-fallback',
     getDeviceLabel: () => string = hostname,
     databaseRuntime: DatabaseRuntime | null = null,
-    deviceCredentialPath = path.join(path.dirname(deviceIdPath), 'gtrz-cloud-device-credential.json'),
+    deviceCredentialPath = path.join(
+      path.dirname(deviceIdPath),
+      'gtrz-cloud-device-credential.json',
+    ),
   ) {
     this.#pairingKeyPath = pairingKeyPath;
     this.#deviceIdPath = deviceIdPath;
@@ -575,8 +585,10 @@ export class CloudSyncService {
       const fallbackIsDue =
         !canonicalCloud ||
         !this.#canonicalRealtimeReadyEvents.has(CATALOG_EVENT_ID) ||
+        !this.#canonicalDesktopRealtimeReadyEvents.has(CATALOG_EVENT_ID) ||
         (effectiveActiveEventId !== null &&
-          !this.#canonicalRealtimeReadyEvents.has(effectiveActiveEventId)) ||
+          (!this.#canonicalRealtimeReadyEvents.has(effectiveActiveEventId) ||
+            !this.#canonicalDesktopRealtimeReadyEvents.has(effectiveActiveEventId))) ||
         Date.now() - this.#canonicalLastFallbackReconciliationAt >=
           CANONICAL_FALLBACK_RECONCILIATION_INTERVAL_MS;
       if (fallbackIsDue) {
@@ -594,7 +606,12 @@ export class CloudSyncService {
       await this.#publishCashierCatalog(workingDatabase, effectiveActiveEventId, pairingKey);
       await this.#publishMobileContext(workingDatabase, effectiveActiveEventId, pairingKey);
       if (canonicalCloud) {
-        await this.#processPrintQueue(workingDatabase, effectiveActiveEventId, deviceId, pairingKey);
+        await this.#processPrintQueue(
+          workingDatabase,
+          effectiveActiveEventId,
+          deviceId,
+          pairingKey,
+        );
       }
       this.#applyInbox(workingDatabase, deviceId);
 
@@ -608,18 +625,57 @@ export class CloudSyncService {
 
       for (const item of pending) {
         try {
+          // The canonical Edge endpoint stores an envelope around the local
+          // audit payload. The legacy Worker still accepts the raw payload.
+          // Sending the raw form to Supabase made it reject `type`, leaving
+          // the first failed row at the head of the outbox forever.
+          const canonicalPayload = canonicalCloud
+            ? (JSON.parse(item.payload_json) as unknown)
+            : null;
+          const canonicalCreatedAt =
+            canonicalPayload !== null && isRecord(canonicalPayload)
+              ? integerField(canonicalPayload, 'createdAt')
+              : null;
+          if (canonicalCloud && canonicalCreatedAt === null) {
+            throw new Error('A operação local não possui a data exigida pela central.');
+          }
+          const requestBody = canonicalCloud
+            ? JSON.stringify({
+                commandId: item.operation_id,
+                type: 'journal.committed',
+                payload: canonicalPayload,
+                createdAt: canonicalCreatedAt,
+              })
+            : item.payload_json;
           const response = await fetch(
             `${this.#endpoint}/v1/events/${encodeURIComponent(item.event_id)}/journal`,
             {
               method: 'POST',
               headers: await this.#cloudHeaders(pairingKey, { 'Content-Type': 'application/json' }),
-              body: item.payload_json,
+              body: requestBody,
               signal: AbortSignal.timeout(CONNECTION_TIMEOUT_MS),
             },
           );
 
           if (!response.ok) {
             throw new Error(`A central respondeu ${String(response.status)}.`);
+          }
+
+          // A local action already exists in SQLite, but its canonical journal
+          // sequence does not. Persist the server acknowledgement so the next
+          // mobile event is expected as N + 1 instead of being rejected as a
+          // gap and deferred to the slow snapshot recovery path.
+          if (canonicalCloud) {
+            const acknowledgement: unknown = await response.json();
+            const journalEvent =
+              isRecord(acknowledgement) && isRemoteJournalEvent(acknowledgement.event)
+                ? acknowledgement.event
+                : null;
+            if (journalEvent === null) {
+              throw new Error('A central confirmou a operação sem a sequência do diário.');
+            }
+            this.#storeRemoteJournalEvents(workingDatabase, item.event_id, [journalEvent]);
+            this.#applyInbox(workingDatabase, deviceId);
           }
 
           this.#recordCloudSuccess();
@@ -1118,7 +1174,8 @@ export class CloudSyncService {
       }
       // A complete push frame contains commands. Fall back to the cursor-based
       // recovery endpoint only for a malformed or legacy/incomplete frame.
-      const completePayload = isRecord(payload) && Array.isArray(payload.commands) ? payload : undefined;
+      const completePayload =
+        isRecord(payload) && Array.isArray(payload.commands) ? payload : undefined;
       void this.#pullGlobalControl(database, pairingKey, deviceId, completePayload)
         .then((recovered) => {
           if (!recovered) this.#recordCloudFailure();
@@ -1368,9 +1425,9 @@ export class CloudSyncService {
         method: 'POST',
         headers: await this.#cloudHeaders(pairingKey, {
           'Content-Type': 'application/octet-stream',
-           'X-GTRZ-Device-Id': deviceId,
-            'X-GTRZ-Backup-Name': backup.fileName,
-            'X-GTRZ-Backup-Sha256': createHash('sha256').update(contents).digest('hex'),
+          'X-GTRZ-Device-Id': deviceId,
+          'X-GTRZ-Backup-Name': backup.fileName,
+          'X-GTRZ-Backup-Sha256': createHash('sha256').update(contents).digest('hex'),
           'X-GTRZ-Backup-Size': String(contents.byteLength),
           'Content-Length': String(contents.byteLength),
         }),
@@ -1424,9 +1481,7 @@ export class CloudSyncService {
 
   async #readPairingKey(): Promise<string | null> {
     try {
-      const rawCredential: unknown = JSON.parse(
-        await readFile(this.#deviceCredentialPath, 'utf8'),
-      );
+      const rawCredential: unknown = JSON.parse(await readFile(this.#deviceCredentialPath, 'utf8'));
       if (
         isRecord(rawCredential) &&
         typeof rawCredential.token === 'string' &&
@@ -1529,18 +1584,31 @@ export class CloudSyncService {
         })),
     ];
     const fingerprint = JSON.stringify(catalog);
-    // Publication confirmations belong to a transport. A prior legacy publish
+    // Publication confirmations belong to a transport. A prior alternate publish
     // must never suppress the first canonical-cloud snapshot for the same event.
     const canonicalCloud = this.#endpoint.includes('.supabase.co/functions/');
     const stateKey = `cashier.catalog:${activeEventId}:${canonicalCloud ? 'canonical' : 'legacy'}`;
     const current = database.sqlite
       .prepare('SELECT value FROM sync_state WHERE key = ?')
       .get(stateKey) as { readonly value: string } | undefined;
-    if (current?.value === fingerprint) return;
-
-    const expectedVersion = canonicalCloud
-      ? await this.#readCanonicalEventVersion(activeEventId, pairingKey)
+    const canonicalState = canonicalCloud
+      ? await this.#readCanonicalEventState(activeEventId, pairingKey)
       : null;
+    if (
+      canonicalCloud &&
+      catalog.length === 0 &&
+      this.#projectionArrayHasEntries(canonicalState?.catalog, 'products')
+    ) {
+      // A desktop that has not rebuilt its local replica must never replace a
+      // populated mobile catalogue with an empty list. Once its journal catch-up
+      // fills the local data, the fingerprint changes and publishing resumes.
+      this.#canonicalProtectedProjectionFingerprints.set(stateKey, fingerprint);
+      return;
+    }
+    const publishedInThisProcess = this.#canonicalProjectionPublished.has(stateKey);
+    if (publishedInThisProcess && current?.value === fingerprint) return;
+
+    const expectedVersion = canonicalState?.version ?? null;
     const response = await fetch(
       `${this.#endpoint}/v1/events/${encodeURIComponent(activeEventId)}/cashier/catalog`,
       {
@@ -1564,6 +1632,10 @@ export class CloudSyncService {
          ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
       )
       .run(stateKey, fingerprint, Date.now());
+    if (canonicalCloud) {
+      this.#canonicalProjectionPublished.add(stateKey);
+      this.#canonicalProtectedProjectionFingerprints.delete(stateKey);
+    }
   }
 
   async #publishMobileContext(
@@ -1654,10 +1726,23 @@ export class CloudSyncService {
     const current = database.sqlite
       .prepare('SELECT value FROM sync_state WHERE key = ?')
       .get(stateKey) as { readonly value: string } | undefined;
-    if (current?.value === fingerprint) return;
-    const expectedVersion = canonicalCloud
-      ? await this.#readCanonicalEventVersion(activeEventId, pairingKey)
+    const canonicalState = canonicalCloud
+      ? await this.#readCanonicalEventState(activeEventId, pairingKey)
       : null;
+    if (
+      canonicalCloud &&
+      context.servicePoints.length === 0 &&
+      this.#projectionArrayHasEntries(canonicalState?.context, 'servicePoints')
+    ) {
+      if (this.#canonicalProtectedProjectionFingerprints.get(stateKey) === fingerprint) return;
+      // Service points are the mobile's access boundary. Do not erase a
+      // working remote list from a desktop whose event replica is still empty.
+      this.#canonicalProtectedProjectionFingerprints.set(stateKey, fingerprint);
+      return;
+    }
+    const publishedInThisProcess = this.#canonicalProjectionPublished.has(stateKey);
+    if (publishedInThisProcess && current?.value === fingerprint) return;
+    const expectedVersion = canonicalState?.version ?? null;
     const response = await fetch(
       `${this.#endpoint}/v1/events/${encodeURIComponent(activeEventId)}/cashier/context`,
       {
@@ -1675,9 +1760,22 @@ export class CloudSyncService {
          ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
       )
       .run(stateKey, fingerprint, Date.now());
+    if (canonicalCloud) {
+      this.#canonicalProjectionPublished.add(stateKey);
+      this.#canonicalProtectedProjectionFingerprints.delete(stateKey);
+    }
   }
 
-  async #readCanonicalEventVersion(eventId: string, pairingKey: string): Promise<number> {
+  #projectionArrayHasEntries(projection: unknown, key: string): boolean {
+    if (!isRecord(projection)) return false;
+    const value = projection[key];
+    return Array.isArray(value) && value.length > 0;
+  }
+
+  async #readCanonicalEventState(
+    eventId: string,
+    pairingKey: string,
+  ): Promise<{ readonly version: number; readonly catalog: unknown; readonly context: unknown }> {
     const response = await fetch(
       `${this.#endpoint}/v1/events/${encodeURIComponent(eventId)}/state`,
       {
@@ -1686,13 +1784,15 @@ export class CloudSyncService {
       },
     );
     if (!response.ok) {
-      throw new Error(`Não foi possível ler a versão canônica do evento (${String(response.status)}).`);
+      throw new Error(
+        `Não foi possível ler a versão canônica do evento (${String(response.status)}).`,
+      );
     }
     const payload: unknown = await response.json();
     if (!isRecord(payload) || typeof payload.version !== 'number' || payload.version < 0) {
       throw new Error('A nuvem respondeu com uma versão de evento inválida.');
     }
-    return payload.version;
+    return { version: payload.version, catalog: payload.catalog, context: payload.context };
   }
 
   async #processPrintQueue(
@@ -1961,6 +2061,10 @@ export class CloudSyncService {
               this.#canonicalRealtimeReadyEvents.add(eventId);
             } else {
               this.#canonicalRealtimeReadyEvents.delete(eventId);
+              if (this.#canonicalRealtimeChannels.get(eventId) === channel) {
+                this.#canonicalRealtimeChannels.delete(eventId);
+                void this.#canonicalRealtimeClient?.removeChannel(channel);
+              }
             }
           });
         this.#canonicalRealtimeChannels.set(eventId, channel);
@@ -1992,7 +2096,17 @@ export class CloudSyncService {
             }
             this.#recordCloudSuccess();
           })
-          .subscribe();
+          .subscribe((status) => {
+            if (status === REALTIME_SUBSCRIBE_STATES.SUBSCRIBED) {
+              this.#canonicalDesktopRealtimeReadyEvents.add(eventId);
+            } else {
+              this.#canonicalDesktopRealtimeReadyEvents.delete(eventId);
+              if (this.#canonicalDesktopRealtimeChannels.get(eventId) === desktopChannel) {
+                this.#canonicalDesktopRealtimeChannels.delete(eventId);
+                void this.#canonicalRealtimeClient?.removeChannel(desktopChannel);
+              }
+            }
+          });
         this.#canonicalDesktopRealtimeChannels.set(eventId, desktopChannel);
       }
     }
@@ -2000,11 +2114,13 @@ export class CloudSyncService {
     for (const [eventId, channel] of this.#canonicalRealtimeChannels) {
       if (wanted.has(eventId)) continue;
       this.#canonicalRealtimeReadyEvents.delete(eventId);
+      this.#canonicalDesktopRealtimeReadyEvents.delete(eventId);
       this.#canonicalRealtimeChannels.delete(eventId);
       void this.#canonicalRealtimeClient.removeChannel(channel);
     }
     for (const [eventId, channel] of this.#canonicalDesktopRealtimeChannels) {
       if (wanted.has(eventId)) continue;
+      this.#canonicalDesktopRealtimeReadyEvents.delete(eventId);
       this.#canonicalDesktopRealtimeChannels.delete(eventId);
       this.#canonicalFastAppliedAt.delete(eventId);
       void this.#canonicalRealtimeClient.removeChannel(channel);
@@ -2013,6 +2129,7 @@ export class CloudSyncService {
 
   #stopCanonicalRealtime(): void {
     this.#canonicalRealtimeReadyEvents.clear();
+    this.#canonicalDesktopRealtimeReadyEvents.clear();
     this.#canonicalReconciliations.clear();
     for (const timer of this.#canonicalReconciliationTimers.values()) clearTimeout(timer);
     this.#canonicalReconciliationTimers.clear();
@@ -2187,7 +2304,10 @@ export class CloudSyncService {
           cursor: this.#getInboxCursor(database, eventId),
         };
       }
-      return { ...this.#applyJournalEnvelope(database, eventId, deviceId, envelope, events), printQueued };
+      return {
+        ...this.#applyJournalEnvelope(database, eventId, deviceId, envelope, events),
+        printQueued,
+      };
     } catch {
       return this.#rejectedStreamMessage(database, eventId);
     }
@@ -2210,7 +2330,8 @@ export class CloudSyncService {
     events: readonly unknown[],
   ): Omit<StreamMessageResult, 'printQueued'> {
     const journalEvents = events.filter(isRemoteJournalEvent);
-    if (journalEvents.length !== events.length) return this.#rejectedStreamMessage(database, eventId);
+    if (journalEvents.length !== events.length)
+      return this.#rejectedStreamMessage(database, eventId);
 
     const cursor = this.#getInboxCursor(database, eventId);
     const newEvents = journalEvents.filter((event) => event.sequence > cursor);
@@ -2222,7 +2343,8 @@ export class CloudSyncService {
         cursor,
       };
     }
-    if (newEvents[0]?.sequence !== cursor + 1) return this.#rejectedStreamMessage(database, eventId);
+    if (newEvents[0]?.sequence !== cursor + 1)
+      return this.#rejectedStreamMessage(database, eventId);
     for (let index = 1; index < newEvents.length; index += 1) {
       const previous = newEvents[index - 1];
       const current = newEvents[index];
@@ -2258,7 +2380,9 @@ export class CloudSyncService {
         },
       );
       if (!response.ok) {
-        throw new Error(`A central não concluiu a recuperação do diário (${String(response.status)}).`);
+        throw new Error(
+          `A central não concluiu a recuperação do diário (${String(response.status)}).`,
+        );
       }
       const payload: unknown = await response.json();
       if (!isRecord(payload) || !Array.isArray(payload.events)) {
@@ -2738,8 +2862,12 @@ export class CloudSyncService {
       database.sqlite
         .prepare('DELETE FROM food_combo_sale_settlements WHERE combo_id = ?')
         .run(payload.entityId);
-      database.sqlite.prepare('DELETE FROM food_combo_terms WHERE combo_id = ?').run(payload.entityId);
-      database.sqlite.prepare('DELETE FROM combo_components WHERE combo_id = ?').run(payload.entityId);
+      database.sqlite
+        .prepare('DELETE FROM food_combo_terms WHERE combo_id = ?')
+        .run(payload.entityId);
+      database.sqlite
+        .prepare('DELETE FROM combo_components WHERE combo_id = ?')
+        .run(payload.entityId);
       database.sqlite.prepare('DELETE FROM combos WHERE id = ?').run(payload.entityId);
       return;
     }
@@ -2775,15 +2903,17 @@ export class CloudSyncService {
         const quantity = integerField(component, 'quantity');
         const choiceGroup = component.choiceGroup === undefined ? null : component.choiceGroup;
         const choiceLabel = component.choiceLabel === undefined ? null : component.choiceLabel;
-        const sortOrder = component.sortOrder === undefined ? index : integerField(component, 'sortOrder');
+        const sortOrder =
+          component.sortOrder === undefined ? index : integerField(component, 'sortOrder');
         if (
           productId === null ||
           quantity === null ||
           quantity <= 0 ||
           (choiceGroup !== null && typeof choiceGroup !== 'string') ||
           (choiceLabel !== null && typeof choiceLabel !== 'string') ||
-          (choiceGroup === null) !== (choiceLabel === null)
-          || sortOrder === null || sortOrder < 0
+          (choiceGroup === null) !== (choiceLabel === null) ||
+          sortOrder === null ||
+          sortOrder < 0
         ) {
           throw new Error('Componente remoto de combo inválido.');
         }
@@ -2840,7 +2970,9 @@ export class CloudSyncService {
           component.sortOrder,
         );
       }
-      database.sqlite.prepare('DELETE FROM food_combo_terms WHERE combo_id = ?').run(payload.entityId);
+      database.sqlite
+        .prepare('DELETE FROM food_combo_terms WHERE combo_id = ?')
+        .run(payload.entityId);
       if (isRecord(externalFoodTerms)) {
         const supplierId = stringField(externalFoodTerms, 'supplierId');
         const supplierUnitCents = integerField(externalFoodTerms, 'supplierUnitCents');

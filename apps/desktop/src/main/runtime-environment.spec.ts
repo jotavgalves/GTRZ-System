@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { cloudSyncEndpoint, getRuntimeEnvironment } from './runtime-environment';
+import { cloudSyncEndpoint, getRuntimeEnvironment, isVisualQaRun } from './runtime-environment';
 
 describe('runtime environment', () => {
   it('usa teste apenas com o argumento explícito', () => {
@@ -13,5 +13,10 @@ describe('runtime environment', () => {
       'https://muhzjnveqrahccoisddo.supabase.co/functions/v1/gtrz-sync-fallback',
     );
     expect(cloudSyncEndpoint('test')).toBe('https://gtrz-sync-test.jvgacontato.workers.dev');
+  });
+
+  it('só ativa a verificação visual com um argumento explícito', () => {
+    expect(isVisualQaRun(['GTRZ System.exe'])).toBe(false);
+    expect(isVisualQaRun(['GTRZ System.exe', '--gtrz-visual-qa'])).toBe(true);
   });
 });

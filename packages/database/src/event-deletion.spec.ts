@@ -163,6 +163,39 @@ describe('permanent event deletion', () => {
     database.close();
   });
 
+  it('remove a fila de catálogo que referencia a auditoria do evento excluído', async () => {
+    const database = await createTemporaryDatabase();
+    const event = createEvent(database, {
+      name: 'Evento com fila de catálogo',
+      startsAt: Date.now(),
+    });
+    const audit = database.sqlite
+      .prepare("SELECT id FROM audit_log WHERE event_id = ? AND action = 'event.created'")
+      .get(event.id) as { readonly id: number };
+    const now = Date.now();
+    database.sqlite
+      .prepare(
+        `INSERT INTO sync_outbox
+         (audit_id, operation_id, event_id, payload_json, status, attempts, last_error, accepted_at, created_at, updated_at)
+         VALUES (?, ?, '_catalog', '{}', 'pending', 0, NULL, NULL, ?, ?)`,
+      )
+      .run(audit.id, `catalog-${String(audit.id)}`, now, now);
+
+    deleteEventPermanently(database, {
+      eventId: event.id,
+      confirmationName: event.name,
+      reason: 'Evento criado apenas para validar a limpeza da fila',
+    });
+
+    expect(
+      database.sqlite
+        .prepare('SELECT COUNT(*) AS amount FROM sync_outbox WHERE audit_id = ?')
+        .get(audit.id),
+    ).toEqual({ amount: 0 });
+    expect(verifyDatabaseIntegrity(database)).toBe(true);
+    database.close();
+  });
+
   it('mantém o custo da compra no evento de origem após transferir o estoque', async () => {
     const database = await createTemporaryDatabase();
     const source = createEvent(database, { name: 'Origem removível', startsAt: Date.now() });

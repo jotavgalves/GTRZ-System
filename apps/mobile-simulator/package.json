@@ -10,7 +10,8 @@
     "dev": "electron-vite dev",
     "build": "electron-vite build",
     "package:win": "npm run build && electron-builder --win nsis --x64",
-    "test:live-sync": "node scripts/verify-live-sync.mjs"
+    "test:live-sync": "node scripts/verify-live-sync.mjs",
+    "test:visual-sync": "node scripts/verify-actual-visual-sync.mjs"
   },
   "build": {
     "appId": "br.com.gtrz.system.mobile",

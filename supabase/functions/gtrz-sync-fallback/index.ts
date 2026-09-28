@@ -263,44 +263,15 @@ Deno.serve(async (request) => {
     return data;
   };
   const currentSession = async (): Promise<Obj> => {
-    const raw = routeToken(request);
-    if (!raw)
-      throw Object.assign(new Error('A sessão móvel foi encerrada.'), {
-        status: 401,
-        code: 'MOBILE_UNAUTHORIZED',
-      });
-    const { data, error } = await store
-      .from('mobile_sessions')
-      .select(
-        'session_id,operator_id,device_id,expires_at,revoked_at,mobile_operators(operator_id,name,permissions,active,created_at,updated_at)',
-      )
-      .eq('token_hash', await sha(raw))
-      .maybeSingle();
-    if (error) throw error;
-    const row = data as unknown as Obj | null,
-      operator = row && asObj(row.mobile_operators) ? row.mobile_operators : null;
+    const refreshed = await mobileRefresh(),
+      operator = asObj(refreshed.operator) ? refreshed.operator : null;
     if (
-      !row ||
       !operator ||
-      row.revoked_at !== null ||
-      Number(row.expires_at) <= Date.now() ||
-      operator.active !== true
+      typeof refreshed.deviceId !== 'string' ||
+      typeof refreshed.eventId !== 'string'
     )
-      throw Object.assign(new Error('A sessão móvel foi encerrada.'), {
-        status: 401,
-        code: 'MOBILE_UNAUTHORIZED',
-      });
-    const active = await activeEvent();
-    if (!active || typeof active.eventId !== 'string')
-      throw Object.assign(new Error('Nenhum evento ativo está disponível.'), {
-        status: 409,
-        code: 'NO_ACTIVE_EVENT',
-      });
-    await store
-      .from('mobile_sessions')
-      .update({ last_seen_at: Date.now() })
-      .eq('session_id', row.session_id as string);
-    return { operator, deviceId: row.device_id, eventId: active.eventId };
+      throw new Error('A sessão móvel não retornou o contexto operacional.');
+    return refreshed;
   };
   // The mobile topic is a high-entropy capability derived from the server-only
   // pairing secret. It carries only invalidation signals. A distinct topic,
@@ -320,6 +291,7 @@ Deno.serve(async (request) => {
     notifyMobile = true,
     traceId: string | null = null,
     mobileProjection: MobileProjection | null = null,
+    notifyDesktop = true,
   ): Promise<RealtimeDelivery> => {
     if (!pairingKey) return { mobileRecipients: 0, failed: true };
     let mobileRecipients = 0;
@@ -355,7 +327,7 @@ Deno.serve(async (request) => {
             operator = asObj(relation)
               ? relation
               : Array.isArray(relation)
-                ? relation.find(asObj) ?? null
+                ? (relation.find(asObj) ?? null)
                 : null,
             tokenHash = typeof session.token_hash === 'string' ? session.token_hash : null;
           if (!operator || !tokenHash || operator.active !== true) continue;
@@ -387,7 +359,7 @@ Deno.serve(async (request) => {
           );
         }
       }
-      if (event !== null && !globalControl) {
+      if (notifyDesktop && event !== null && !globalControl) {
         notifications.push(
           fetch(
             `${endpoint}/realtime/v1/api/broadcast/${encodeURIComponent(await desktopRealtimeTopic(eventId))}/events/journal-entry`,
@@ -521,14 +493,16 @@ Deno.serve(async (request) => {
     eventId: string,
     commandId: string,
     payload: Obj,
+    initialState: Obj,
     mutate: (catalog: Obj, context: Obj) => { catalog: Obj; context: Obj },
   ): Promise<unknown> => {
+    let current = initialState;
+    const desktopTopic = await desktopRealtimeTopic(eventId);
     for (let attempt = 0; attempt < 4; attempt += 1) {
-      const current = await state(eventId),
-        catalog = asObj(current.catalog) ? current.catalog : emptyCatalog,
+      const catalog = asObj(current.catalog) ? current.catalog : emptyCatalog,
         context = asObj(current.context) ? current.context : emptyContext,
         next = mutate(catalog, context);
-      const { data, error } = await db.rpc('gtrz_commit_mobile_state', {
+      const { data, error } = await db.rpc('gtrz_commit_mobile_state_fast', {
         p_event_id: eventId,
         p_command_id: commandId,
         p_type: 'journal.committed',
@@ -537,6 +511,7 @@ Deno.serve(async (request) => {
         p_context: next.context,
         p_expected_version: Number(current.version ?? 0),
         p_created_at: Date.now(),
+        p_desktop_realtime_topic: desktopTopic,
       });
       if (error) throw error;
       if (!asObj(data) || data.status !== 'conflict') {
@@ -546,12 +521,23 @@ Deno.serve(async (request) => {
               : Number(current.version ?? 0) + 1,
           response = asObj(data) && asObj(data.response) ? data.response : null,
           event = response && asObj(response.event) ? response.event : null;
-        await Promise.all([
-          queueReceipt(eventId, commandId, payload),
-          notifyRealtime(eventId, version, false, event, true, null, next),
-        ]);
+        // Receipt persistence remains part of the request contract. The Desktop
+        // already receives the journal event inside the database transaction;
+        // only the supplementary Mobile fan-out can run after the response.
+        await queueReceipt(eventId, commandId, payload);
+        EdgeRuntime.waitUntil(
+          notifyRealtime(eventId, version, false, event, true, null, next, false).catch(
+            (backgroundError: unknown) => {
+              console.warn(
+                'A confirmação móvel foi registrada, mas uma tarefa posterior falhou.',
+                backgroundError,
+              );
+            },
+          ),
+        );
         return data;
       }
+      current = await state(eventId);
     }
     throw Object.assign(new Error('Outro dispositivo atualizou o evento. Tente novamente.'), {
       status: 409,
@@ -1160,7 +1146,7 @@ Deno.serve(async (request) => {
         details: {},
       };
       return ok(
-        await commit(eventId, commandId, payload, (catalog, context) => {
+        await commit(eventId, commandId, payload, current, (catalog, context) => {
           const products = catalogProducts(catalog),
             product = products.find(
               (item) =>
@@ -1210,7 +1196,10 @@ Deno.serve(async (request) => {
         },
       };
       return ok(
-        await commit(eventId, commandId, payload, (catalog, context) => ({ catalog, context })),
+        await commit(eventId, commandId, payload, current, (catalog, context) => ({
+          catalog,
+          context,
+        })),
       );
     }
     if (path === '/v1/mobile/vouchers') {
@@ -1226,7 +1215,7 @@ Deno.serve(async (request) => {
         details: {},
       };
       return ok(
-        await commit(eventId, commandId, payload, (catalog, context) => {
+        await commit(eventId, commandId, payload, current, (catalog, context) => {
           const pointId = string(input.servicePointId, 'servicePointId'),
             points = Array.isArray(context.servicePoints)
               ? context.servicePoints.filter(asObj)
@@ -1296,7 +1285,7 @@ Deno.serve(async (request) => {
         details: {},
       };
       return ok(
-        await commit(eventId, commandId, payload, (catalog, context) => {
+        await commit(eventId, commandId, payload, current, (catalog, context) => {
           const lotId = string(input.lotId, 'lotId'),
             quantity = integer(input.quantity, 'quantity', true),
             lots = Array.isArray(context.ticketLots)
@@ -1346,7 +1335,7 @@ Deno.serve(async (request) => {
         details: {},
       };
       return ok(
-        await commit(eventId, commandId, payload, (catalog, context) => {
+        await commit(eventId, commandId, payload, current, (catalog, context) => {
           const products = catalogProducts(catalog),
             byId = new Map(products.map((product) => [String(product.productId), product])),
             points = Array.isArray(context.servicePoints)

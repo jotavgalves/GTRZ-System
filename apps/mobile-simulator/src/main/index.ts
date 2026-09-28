@@ -4,6 +4,17 @@ import path from 'node:path';
 const DEFAULT_CASHIER_URL = 'https://gtrz-sync.jvgacontato.workers.dev/cashier';
 const MOBILE_USER_AGENT =
   'Mozilla/5.0 (Linux; Android 14; GTRZ System Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0 Mobile Safari/537.36';
+const visualQaRun = process.argv.includes('--gtrz-visual-qa');
+
+if (visualQaRun) {
+  const userDataPath = process.env.GTRZ_E2E_MOBILE_USER_DATA_PATH?.trim();
+  if (userDataPath) app.setPath('userData', userDataPath);
+}
+
+const remoteDebuggingPort = process.env.GTRZ_E2E_REMOTE_DEBUGGING_PORT?.trim();
+if (remoteDebuggingPort !== undefined && /^\d{2,5}$/u.test(remoteDebuggingPort)) {
+  app.commandLine.appendSwitch('remote-debugging-port', remoteDebuggingPort);
+}
 
 let mainWindow: BrowserWindow | null = null;
 
