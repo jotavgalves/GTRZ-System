@@ -189,6 +189,12 @@ interface PrintAgentResult {
   readonly message: string;
 }
 
+interface PrintQueueRegistration {
+  readonly printerName: string;
+  readonly enabled: boolean;
+  readonly unavailableReason: string | null;
+}
+
 const CATALOG_EVENT_ID = '_catalog';
 const SYNCHRONIZED_ACTIONS = new Set([
   'event.created',
@@ -321,6 +327,7 @@ export class CloudSyncService {
   readonly #getDeviceLabel: () => string;
   readonly #databaseRuntime: DatabaseRuntime | null;
   #printAgent: ((job: ClaimedCloudPrintJob) => Promise<PrintAgentResult>) | null = null;
+  #getPrintQueueRegistration: (() => Promise<PrintQueueRegistration>) | null = null;
   #resetBackupAgent: (() => Promise<BackupRecord>) | null = null;
   #outboxTimer: NodeJS.Timeout | null = null;
   readonly #eventStreams = new Map<string, WebSocket>();
@@ -412,8 +419,12 @@ export class CloudSyncService {
     this.#outboxTimer = setInterval(flush, OUTBOX_INTERVAL_MS);
   }
 
-  setPrintAgent(agent: (job: ClaimedCloudPrintJob) => Promise<PrintAgentResult>): void {
+  setPrintAgent(
+    agent: (job: ClaimedCloudPrintJob) => Promise<PrintAgentResult>,
+    getRegistration: (() => Promise<PrintQueueRegistration>) | null = null,
+  ): void {
     this.#printAgent = agent;
+    this.#getPrintQueueRegistration = getRegistration;
   }
 
   setResetBackupAgent(agent: () => Promise<BackupRecord>): void {
@@ -541,6 +552,11 @@ export class CloudSyncService {
       // Production uses the compact Postgres journal. The stream branch remains
       // only for the legacy transport tests and an explicitly supplied legacy URL.
       const canonicalCloud = this.#endpoint.includes('.supabase.co/functions/');
+      // Printing is a separate delivery concern. It must keep polling even if a
+      // catalogue projection or another synchronisation step is temporarily rejected.
+      if (canonicalCloud) {
+        this.#schedulePrintQueue(database, activeEventId, deviceId, pairingKey);
+      }
       if (canonicalCloud) {
         const controlIsDue =
           this.#canonicalLastFallbackReconciliationAt === 0 ||
@@ -602,16 +618,6 @@ export class CloudSyncService {
           );
         }
         if (canonicalCloud) this.#canonicalLastFallbackReconciliationAt = Date.now();
-      }
-      await this.#publishCashierCatalog(workingDatabase, effectiveActiveEventId, pairingKey);
-      await this.#publishMobileContext(workingDatabase, effectiveActiveEventId, pairingKey);
-      if (canonicalCloud) {
-        await this.#processPrintQueue(
-          workingDatabase,
-          effectiveActiveEventId,
-          deviceId,
-          pairingKey,
-        );
       }
       this.#applyInbox(workingDatabase, deviceId);
 
@@ -700,6 +706,14 @@ export class CloudSyncService {
           this.#recordCloudFailure();
           return;
         }
+      }
+
+      // Journalled business commands are authoritative. Publish the derived
+      // mobile projections only after those commands have reached the central.
+      await this.#publishCashierCatalog(workingDatabase, effectiveActiveEventId, pairingKey);
+      await this.#publishMobileContext(workingDatabase, effectiveActiveEventId, pairingKey);
+      if (canonicalCloud) {
+        this.#schedulePrintQueue(workingDatabase, effectiveActiveEventId, deviceId, pairingKey);
       }
     } catch {
       // Keep every business operation in SQLite and progressively slow retries when
@@ -1811,6 +1825,39 @@ export class CloudSyncService {
     }
   }
 
+  #schedulePrintQueue(
+    database: DatabaseContext,
+    activeEventId: string | null,
+    deviceId: string,
+    pairingKey: string,
+  ): void {
+    void this.#processPrintQueue(database, activeEventId, deviceId, pairingKey).catch(
+      (error: unknown) => {
+        this.#writePrintQueueDiagnostic(
+          database,
+          error instanceof Error
+            ? error.message
+            : 'Falha desconhecida ao processar a fila de impressão.',
+        );
+      },
+    );
+  }
+
+  #writePrintQueueDiagnostic(database: DatabaseContext, message: string): void {
+    database.sqlite
+      .prepare(
+        `INSERT INTO sync_state (key, value, updated_at) VALUES ('cloud.print-queue.last-error', ?, ?)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+      )
+      .run(message.slice(0, 500), Date.now());
+  }
+
+  #clearPrintQueueDiagnostic(database: DatabaseContext): void {
+    database.sqlite
+      .prepare("DELETE FROM sync_state WHERE key = 'cloud.print-queue.last-error'")
+      .run();
+  }
+
   async #drainPrintQueue(
     database: DatabaseContext,
     activeEventId: string | null,
@@ -1819,7 +1866,16 @@ export class CloudSyncService {
   ): Promise<void> {
     if (activeEventId === null) return;
     const settings = getPrintingSettings(database);
-    const printerName = settings.deviceName ?? '__windows_default__';
+    const registration =
+      this.#getPrintQueueRegistration === null
+        ? {
+            printerName: settings.deviceName ?? '__windows_default__',
+            enabled: settings.automaticPrinting,
+            unavailableReason: settings.automaticPrinting
+              ? null
+              : 'A impressão automática está desativada neste computador.',
+          }
+        : await this.#getPrintQueueRegistration();
     const baseUrl = `${this.#endpoint}/v1/events/${encodeURIComponent(activeEventId)}/print`;
     const register = await fetch(`${baseUrl}/printers`, {
       method: 'POST',
@@ -1827,14 +1883,23 @@ export class CloudSyncService {
       body: JSON.stringify({
         deviceId,
         deviceLabel: settings.machineName,
-        printerName,
+        printerName: registration.printerName,
         paperWidthMm: settings.paperWidthMm,
-        enabled: settings.automaticPrinting,
+        enabled: registration.enabled,
       }),
       signal: AbortSignal.timeout(CONNECTION_TIMEOUT_MS),
     });
-    if (!register.ok) return;
-    if (!settings.automaticPrinting || this.#printAgent === null) return;
+    if (!register.ok) {
+      throw new Error(
+        `Não foi possível registrar a impressora deste computador (${String(register.status)}).`,
+      );
+    }
+    if (!registration.enabled || this.#printAgent === null) {
+      if (registration.unavailableReason !== null) {
+        this.#writePrintQueueDiagnostic(database, registration.unavailableReason);
+      }
+      return;
+    }
 
     for (;;) {
       const claim = await fetch(`${baseUrl}/claim`, {
@@ -1843,9 +1908,16 @@ export class CloudSyncService {
         body: JSON.stringify({ deviceId }),
         signal: AbortSignal.timeout(CONNECTION_TIMEOUT_MS),
       });
-      if (!claim.ok) return;
+      if (!claim.ok) {
+        throw new Error(
+          `Não foi possível reivindicar a nota para impressão (${String(claim.status)}).`,
+        );
+      }
       const payload: unknown = await claim.json();
-      if (!isRecord(payload) || !isRecord(payload.job)) return;
+      if (!isRecord(payload) || !isRecord(payload.job)) {
+        this.#clearPrintQueueDiagnostic(database);
+        return;
+      }
       const rawJob = payload.job;
       if (
         typeof rawJob.jobId !== 'string' ||
@@ -1885,7 +1957,15 @@ export class CloudSyncService {
         }),
         signal: AbortSignal.timeout(CONNECTION_TIMEOUT_MS),
       });
-      if (!complete.ok) return;
+      if (!complete.ok) {
+        throw new Error(
+          `Não foi possível concluir a impressão da nota (${String(complete.status)}).`,
+        );
+      }
+      if (!result.success) {
+        this.#writePrintQueueDiagnostic(database, result.message);
+        return;
+      }
     }
   }
 
@@ -2094,9 +2174,7 @@ export class CloudSyncService {
               // A confirmed mobile sale has already queued its receipt in the
               // same cloud transaction. Start the available local print agent
               // immediately instead of waiting for the three-second outbox tick.
-              void this.#processPrintQueue(database, eventId, deviceId, pairingKey).catch(
-                () => undefined,
-              );
+              this.#schedulePrintQueue(database, eventId, deviceId, pairingKey);
             }
             const pending = this.#canonicalReconciliationTimers.get(eventId);
             if (pending !== undefined) {
@@ -2255,9 +2333,7 @@ export class CloudSyncService {
     stream.on('open', () => {
       this.#eventReconnectDelays.set(eventId, 1_000);
       if (eventId === activeEventId) {
-        void this.#processPrintQueue(database, eventId, deviceId, pairingKey).catch(
-          () => undefined,
-        );
+        this.#schedulePrintQueue(database, eventId, deviceId, pairingKey);
       }
     });
     stream.on('message', (message) => {
@@ -2274,9 +2350,7 @@ export class CloudSyncService {
         }
       }
       if (result.printQueued && eventId === getSessionState(database).activeEvent?.id) {
-        void this.#processPrintQueue(database, eventId, deviceId, pairingKey).catch(
-          () => undefined,
-        );
+        this.#schedulePrintQueue(database, eventId, deviceId, pairingKey);
       }
     });
     stream.on('error', () => undefined);

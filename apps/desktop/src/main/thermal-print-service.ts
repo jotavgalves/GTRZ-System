@@ -24,6 +24,12 @@ interface ThermalPrintServiceOptions {
   readonly getDatabase: () => DatabaseContext;
 }
 
+export interface CloudPrinterRegistration {
+  readonly printerName: string;
+  readonly enabled: boolean;
+  readonly unavailableReason: string | null;
+}
+
 function createHiddenWindow(): BrowserWindow {
   return new BrowserWindow({
     show: false,
@@ -91,6 +97,40 @@ export class ThermalPrintService {
       printedByLabel: settings.machineName,
     };
     return this.#printReceipt(receipt, settings);
+  }
+
+  async getCloudPrinterRegistration(): Promise<CloudPrinterRegistration> {
+    const settings = getPrintingSettings(this.#getDatabase());
+    const printers = await this.listPrinters();
+    const selectedPrinter =
+      settings.deviceName === null
+        ? undefined
+        : printers.find((printer) => printer.name === settings.deviceName);
+
+    if (!settings.automaticPrinting) {
+      return {
+        printerName: settings.deviceName ?? '__windows_default__',
+        enabled: false,
+        unavailableReason: 'A impressão automática está desativada neste computador.',
+      };
+    }
+
+    if (selectedPrinter === undefined) {
+      return {
+        printerName: settings.deviceName ?? '__windows_default__',
+        enabled: false,
+        unavailableReason:
+          settings.deviceName === null
+            ? 'Selecione uma impressora térmica nas Configurações antes de ativar a impressão automática.'
+            : `A impressora configurada (${settings.deviceName}) não está disponível neste computador.`,
+      };
+    }
+
+    return {
+      printerName: selectedPrinter.name,
+      enabled: true,
+      unavailableReason: null,
+    };
   }
 
   async #printOrder(orderId: string, force: boolean): Promise<PrintOrderResult> {

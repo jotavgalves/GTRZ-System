@@ -129,10 +129,13 @@ if (!hasSingleInstanceLock) {
         receiptArchiveDirectory: path.join(documentsFolder, 'Notas'),
         runtimeEnvironment,
       });
-      cloudSyncService.setPrintAgent(async (job) => {
-        const result = await printService.printCloudJob(job);
-        return { success: result.success, message: result.message };
-      });
+      cloudSyncService.setPrintAgent(
+        async (job) => {
+          const result = await printService.printCloudJob(job);
+          return { success: result.success, message: result.message };
+        },
+        () => printService.getCloudPrinterRegistration(),
+      );
       cloudSyncService.setResetBackupAgent(() => backupService.createBackup('pre-event-reset'));
       if (cloudSyncEnabledForRuntime) {
         cloudSyncService.start(
