@@ -519,6 +519,91 @@ Deno.serve(async (request) => {
     });
     if (error) throw error;
   };
+  const commitMobileSaleFast = async (input: Obj): Promise<Obj> => {
+    const raw = routeToken(request);
+    if (!raw)
+      throw Object.assign(new Error('A sessão móvel foi encerrada.'), {
+        status: 401,
+        code: 'MOBILE_UNAUTHORIZED',
+      });
+    const commandId = string(input.commandId, 'commandId'),
+      saleId = string(input.saleId, 'saleId'),
+      commitStartedAt = performance.now(),
+      { data, error } = await db.rpc('gtrz_commit_mobile_sale_fast', {
+        p_token_hash: await sha(raw),
+        p_command_id: commandId,
+        p_sale_id: saleId,
+        p_service_point_id: string(input.servicePointId, 'servicePointId'),
+        p_items: Array.isArray(input.items) ? input.items : [],
+        p_payment_method: typeof input.paymentMethod === 'string' ? input.paymentMethod : null,
+        p_received_cents: typeof input.receivedCents === 'number' ? input.receivedCents : null,
+        p_voucher_use: asObj(input.voucherUse) ? input.voucherUse : null,
+        p_now: Date.now(),
+      }),
+      commitFinishedAt = performance.now();
+    if (error) throw error;
+    if (!asObj(data)) throw new Error('A venda móvel não retornou uma confirmação válida.');
+    if (data.status === 'unauthorized')
+      throw Object.assign(new Error('A sessão móvel foi encerrada.'), {
+        status: 401,
+        code: 'MOBILE_UNAUTHORIZED',
+      });
+    if (data.status === 'no-active-event')
+      throw Object.assign(new Error('Nenhum evento ativo está disponível.'), {
+        status: 409,
+        code: 'NO_ACTIVE_EVENT',
+      });
+    if (data.status === 'forbidden')
+      throw Object.assign(new Error('Este perfil não possui esta permissão.'), {
+        status: 403,
+        code: 'MOBILE_FORBIDDEN',
+      });
+    if (data.status !== 'accepted' && data.status !== 'replayed')
+      throw new Error('A venda móvel não pôde ser confirmada.');
+    const eventId = string(data.eventId, 'eventId'),
+      version = typeof data.version === 'number' ? data.version : 0,
+      response = asObj(data.response) ? data.response : null,
+      event = response && asObj(response.event) ? response.event : null,
+      payload = asObj(data.payload) ? data.payload : null;
+    if (!event || !payload) throw new Error('A venda móvel não retornou o evento canônico.');
+    const desktopDeliveryStartedAt = performance.now();
+    const desktopDelivery = notifyRealtime(eventId, version, false, event, false, null, null, true);
+    const receiptStartedAt = performance.now();
+    await queueReceipt(eventId, commandId, payload);
+    const receiptFinishedAt = performance.now();
+    const timing = {
+      requestBeforeCommitMs: Math.round(commitStartedAt - requestStartedAt),
+      commitMs: Math.round(commitFinishedAt - commitStartedAt),
+      receiptQueueMs: Math.round(receiptFinishedAt - receiptStartedAt),
+      canonicalServer:
+        asObj(data.serverTiming) && typeof data.serverTiming.commitMs === 'number'
+          ? data.serverTiming
+          : null,
+    };
+    const timedDesktopDelivery = desktopDelivery.then((delivery) => {
+      console.log(
+        JSON.stringify({
+          kind: 'gtrz-mobile-sale-fast-timing',
+          ...timing,
+          desktopBroadcastMs: Math.round(performance.now() - desktopDeliveryStartedAt),
+          desktopBroadcastFailed: delivery.failed,
+        }),
+      );
+      return delivery;
+    });
+    EdgeRuntime.waitUntil(
+      Promise.all([
+        timedDesktopDelivery,
+        notifyRealtime(eventId, version, false, event, true, null, null, false),
+      ]).catch((backgroundError: unknown) => {
+        console.warn(
+          'A venda móvel foi confirmada, mas uma atualização posterior falhou.',
+          backgroundError,
+        );
+      }),
+    );
+    return { ...data, timing };
+  };
   const commit = async (
     eventId: string,
     commandId: string,
@@ -1154,6 +1239,8 @@ Deno.serve(async (request) => {
         },
       });
     }
+    if (path === '/v1/mobile/sales' && request.method === 'POST')
+      return ok(await commitMobileSaleFast(await body()));
     const current = await currentSession(),
       operator = current.operator as Obj,
       eventId = string(current.eventId, 'eventId'),
