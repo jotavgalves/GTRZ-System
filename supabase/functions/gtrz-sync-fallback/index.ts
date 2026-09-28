@@ -4,6 +4,7 @@ type Obj = Record<string, unknown>;
 type Permission = 'sales' | 'inventory' | 'tickets' | 'expenses' | 'vouchers';
 type MobileProjection = { catalog: Obj; context: Obj };
 type RealtimeDelivery = { mobileRecipients: number; failed: boolean };
+type CachedMobileEventState = MobileProjection & { version: number; cachedAt: number };
 const permissionKeys: readonly Permission[] = [
   'sales',
   'inventory',
@@ -27,6 +28,7 @@ const emptyContext = {
   vouchers: [],
   currentSequence: 0,
 };
+const mobileEventStateCache = new Map<string, CachedMobileEventState>();
 const asObj = (value: unknown): value is Obj =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
 const ok = (body: unknown, status = 200) => Response.json(body, { status, headers: cors });
@@ -137,6 +139,19 @@ function compactMobileProjection(projection: MobileProjection): MobileProjection
     context: projection.context,
   };
 }
+function cacheMobileEventState(eventId: string, state: Obj): void {
+  const catalog = asObj(state.catalog) ? state.catalog : null,
+    context = asObj(state.context) ? state.context : null,
+    version = state.version;
+  if (!catalog || !context || typeof version !== 'number' || !Number.isSafeInteger(version)) return;
+  mobileEventStateCache.set(eventId, { catalog, context, version, cachedAt: Date.now() });
+  if (mobileEventStateCache.size > 64) {
+    const oldest = [...mobileEventStateCache.entries()].sort(
+      ([, left], [, right]) => left.cachedAt - right.cachedAt,
+    )[0];
+    if (oldest) mobileEventStateCache.delete(oldest[0]);
+  }
+}
 function recalculateCombos(products: Obj[]): void {
   const ids = new Map(products.map((product) => [product.productId, product]));
   for (const combo of products.filter(
@@ -236,20 +251,21 @@ Deno.serve(async (request) => {
   const state = async (eventId: string): Promise<Obj> => {
     const { data, error } = await db.rpc('gtrz_read_event_state', { p_event_id: eventId });
     if (error || !asObj(data)) throw error ?? new Error('Estado remoto inválido.');
+    cacheMobileEventState(eventId, data);
     return data;
   };
-  const mobileRefresh = async (): Promise<Obj> => {
+  const mobileAuthorization = async (): Promise<Obj> => {
     const raw = routeToken(request);
     if (!raw)
       throw Object.assign(new Error('A sessão móvel foi encerrada.'), {
         status: 401,
         code: 'MOBILE_UNAUTHORIZED',
       });
-    const { data, error } = await db.rpc('gtrz_read_mobile_refresh', {
+    const { data, error } = await db.rpc('gtrz_authorize_mobile_command', {
       p_token_hash: await sha(raw),
       p_now: Date.now(),
     });
-    if (error || !asObj(data)) throw error ?? new Error('Atualização móvel inválida.');
+    if (error || !asObj(data)) throw error ?? new Error('Autorização móvel inválida.');
     if (data.status === 'unauthorized')
       throw Object.assign(new Error('A sessão móvel foi encerrada.'), {
         status: 401,
@@ -260,8 +276,21 @@ Deno.serve(async (request) => {
         status: 409,
         code: 'NO_ACTIVE_EVENT',
       });
-    if (data.status !== 'ok') throw new Error('Atualização móvel inválida.');
+    if (data.status !== 'ok') throw new Error('Autorização móvel inválida.');
     return data;
+  };
+  const mobileRefresh = async (): Promise<Obj> => {
+    const authorized = await mobileAuthorization(),
+      eventId = string(authorized.eventId, 'eventId'),
+      expectedVersion = Number(authorized.version ?? 0),
+      cached = mobileEventStateCache.get(eventId),
+      remote = cached?.version === expectedVersion ? cached : await state(eventId);
+    return {
+      ...authorized,
+      version: typeof remote.version === 'number' ? remote.version : expectedVersion,
+      catalog: remote.catalog,
+      context: remote.context,
+    };
   };
   const currentSession = async (): Promise<Obj> => {
     const refreshed = await mobileRefresh(),
@@ -541,6 +570,11 @@ Deno.serve(async (request) => {
         const receiptStartedAt = performance.now();
         await queueReceipt(eventId, commandId, payload);
         const receiptFinishedAt = performance.now();
+        cacheMobileEventState(eventId, {
+          version,
+          catalog: next.catalog,
+          context: next.context,
+        });
         const timing = {
           requestBeforeCommitMs: Math.round(commitStartedAt - requestStartedAt),
           commitMs: Math.round(commitFinishedAt - commitStartedAt),
@@ -979,7 +1013,7 @@ Deno.serve(async (request) => {
       const operator = current.operator as Obj;
       return ok({
         operator: {
-          id: operator.operator_id,
+          id: operator.id,
           name: operator.name,
           permissions: operator.permissions,
         },
