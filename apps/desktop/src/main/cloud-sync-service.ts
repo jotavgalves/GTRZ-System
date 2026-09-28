@@ -39,6 +39,7 @@ import type { DatabaseRuntime } from './database-runtime';
 
 const CONNECTION_TIMEOUT_MS = 5_000;
 const OUTBOX_INTERVAL_MS = 3_000;
+const PRINT_REGISTRATION_REFRESH_MS = 60_000;
 const CANONICAL_FALLBACK_RECONCILIATION_INTERVAL_MS = 15_000;
 const CANONICAL_REALTIME_RECONCILIATION_DELAY_MS = 750;
 const CANONICAL_SUPABASE_URL = 'https://muhzjnveqrahccoisddo.supabase.co';
@@ -358,6 +359,8 @@ export class CloudSyncService {
   #cloudRetryNotBefore = 0;
   #printQueueInFlight: Promise<void> | null = null;
   #queuedReceiptArchiveCheckComplete = false;
+  #printRegistrationFingerprint: string | null = null;
+  #printRegistrationUpdatedAt = 0;
   #replicationRunning = true;
   #flushInFlight = false;
   #cloudConnected = false;
@@ -1945,22 +1948,37 @@ export class CloudSyncService {
           }
         : await this.#getPrintQueueRegistration();
     const baseUrl = `${this.#endpoint}/v1/events/${encodeURIComponent(activeEventId)}/print`;
-    const register = await fetch(`${baseUrl}/printers`, {
-      method: 'POST',
-      headers: await this.#cloudHeaders(pairingKey, { 'Content-Type': 'application/json' }),
-      body: JSON.stringify({
-        deviceId,
-        deviceLabel: settings.machineName,
-        printerName: registration.printerName,
-        paperWidthMm: settings.paperWidthMm,
-        enabled: registration.enabled,
-      }),
-      signal: AbortSignal.timeout(CONNECTION_TIMEOUT_MS),
-    });
-    if (!register.ok) {
-      throw new Error(
-        `Não foi possível registrar a impressora deste computador (${String(register.status)}).`,
-      );
+    const registrationFingerprint = [
+      activeEventId,
+      deviceId,
+      settings.machineName,
+      registration.printerName,
+      settings.paperWidthMm,
+      registration.enabled,
+    ].join('|');
+    const registrationIsCurrent =
+      this.#printRegistrationFingerprint === registrationFingerprint &&
+      Date.now() - this.#printRegistrationUpdatedAt < PRINT_REGISTRATION_REFRESH_MS;
+    if (!registrationIsCurrent) {
+      const register = await fetch(`${baseUrl}/printers`, {
+        method: 'POST',
+        headers: await this.#cloudHeaders(pairingKey, { 'Content-Type': 'application/json' }),
+        body: JSON.stringify({
+          deviceId,
+          deviceLabel: settings.machineName,
+          printerName: registration.printerName,
+          paperWidthMm: settings.paperWidthMm,
+          enabled: registration.enabled,
+        }),
+        signal: AbortSignal.timeout(CONNECTION_TIMEOUT_MS),
+      });
+      if (!register.ok) {
+        throw new Error(
+          `Não foi possível registrar a impressora deste computador (${String(register.status)}).`,
+        );
+      }
+      this.#printRegistrationFingerprint = registrationFingerprint;
+      this.#printRegistrationUpdatedAt = Date.now();
     }
     void this.#archiveQueuedReceiptsOnce(database, baseUrl, pairingKey).catch(() => undefined);
     if (!registration.enabled || this.#printAgent === null) {

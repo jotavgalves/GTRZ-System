@@ -44,6 +44,11 @@ function createHiddenWindow(): BrowserWindow {
 export class ThermalPrintService {
   readonly #getDatabase: () => DatabaseContext;
   readonly #archiveDirectory: string;
+  #printerRegistrationCache: {
+    readonly fingerprint: string;
+    readonly value: CloudPrinterRegistration;
+    readonly checkedAt: number;
+  } | null = null;
 
   constructor(options: ThermalPrintServiceOptions) {
     this.#getDatabase = options.getDatabase;
@@ -55,7 +60,9 @@ export class ThermalPrintService {
   }
 
   updateSettings(input: UpdatePrintingSettingsInput): PrintingSettings {
-    return updatePrintingSettings(this.#getDatabase(), input);
+    const settings = updatePrintingSettings(this.#getDatabase(), input);
+    this.#printerRegistrationCache = null;
+    return settings;
   }
 
   async listPrinters(): Promise<readonly PrinterInfo[]> {
@@ -112,36 +119,59 @@ export class ThermalPrintService {
 
   async getCloudPrinterRegistration(): Promise<CloudPrinterRegistration> {
     const settings = getPrintingSettings(this.#getDatabase());
-    const printers = await this.listPrinters();
-    const selectedPrinter =
-      settings.deviceName === null
-        ? undefined
-        : printers.find((printer) => printer.name === settings.deviceName);
+    const fingerprint = [
+      settings.automaticPrinting,
+      settings.deviceName ?? '',
+      settings.paperWidthMm,
+    ].join('|');
+    const cached = this.#printerRegistrationCache;
+    if (
+      cached !== null &&
+      cached.fingerprint === fingerprint &&
+      Date.now() - cached.checkedAt < 30_000
+    )
+      return cached.value;
 
     if (!settings.automaticPrinting) {
-      return {
+      const value = {
         printerName: settings.deviceName ?? '__windows_default__',
         enabled: false,
         unavailableReason: 'A impressão automática está desativada neste computador.',
       };
+      this.#printerRegistrationCache = { fingerprint, value, checkedAt: Date.now() };
+      return value;
     }
 
-    if (selectedPrinter === undefined) {
-      return {
-        printerName: settings.deviceName ?? '__windows_default__',
+    if (settings.deviceName === null) {
+      const value = {
+        printerName: '__windows_default__',
         enabled: false,
         unavailableReason:
-          settings.deviceName === null
-            ? 'Selecione uma impressora térmica nas Configurações antes de ativar a impressão automática.'
-            : `A impressora configurada (${settings.deviceName}) não está disponível neste computador.`,
+          'Selecione uma impressora térmica nas Configurações antes de ativar a impressão automática.',
       };
+      this.#printerRegistrationCache = { fingerprint, value, checkedAt: Date.now() };
+      return value;
     }
 
-    return {
+    const printers = await this.listPrinters();
+    const selectedPrinter = printers.find((printer) => printer.name === settings.deviceName);
+    if (selectedPrinter === undefined) {
+      const value = {
+        printerName: settings.deviceName,
+        enabled: false,
+        unavailableReason: `A impressora configurada (${settings.deviceName}) não está disponível neste computador.`,
+      };
+      this.#printerRegistrationCache = { fingerprint, value, checkedAt: Date.now() };
+      return value;
+    }
+
+    const value = {
       printerName: selectedPrinter.name,
       enabled: true,
       unavailableReason: null,
     };
+    this.#printerRegistrationCache = { fingerprint, value, checkedAt: Date.now() };
+    return value;
   }
 
   async #printOrder(orderId: string, force: boolean, archive = true): Promise<PrintOrderResult> {
