@@ -715,9 +715,14 @@ export class CloudSyncService {
       if (canonicalCloud) {
         this.#schedulePrintQueue(workingDatabase, effectiveActiveEventId, deviceId, pairingKey);
       }
-    } catch {
+      this.#clearSyncDiagnostic(workingDatabase);
+    } catch (error: unknown) {
       // Keep every business operation in SQLite and progressively slow retries when
       // the remote side is unavailable or has reached a free-tier limit.
+      this.#writeSyncDiagnostic(
+        database,
+        error instanceof Error ? error.message : 'Falha desconhecida na sincronização.',
+      );
       this.#recordCloudFailure();
     } finally {
       this.#flushInFlight = false;
@@ -1858,6 +1863,19 @@ export class CloudSyncService {
       .run();
   }
 
+  #writeSyncDiagnostic(database: DatabaseContext, message: string): void {
+    database.sqlite
+      .prepare(
+        `INSERT INTO sync_state (key, value, updated_at) VALUES ('cloud.sync.last-error', ?, ?)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+      )
+      .run(message.slice(0, 500), Date.now());
+  }
+
+  #clearSyncDiagnostic(database: DatabaseContext): void {
+    database.sqlite.prepare("DELETE FROM sync_state WHERE key = 'cloud.sync.last-error'").run();
+  }
+
   async #drainPrintQueue(
     database: DatabaseContext,
     activeEventId: string | null,
@@ -2421,17 +2439,31 @@ export class CloudSyncService {
     const currentSequence = integerField(envelope, 'currentSequence');
     if (newEvents.length === 0) {
       return {
-        accepted: currentSequence === null || currentSequence <= cursor,
-        caughtUp: currentSequence === null || currentSequence <= cursor,
+        accepted: true,
+        // The canonical cursor is the event version, which also advances for
+        // projection updates that deliberately do not create a journal entry.
+        // An empty page is therefore authoritative evidence that this journal
+        // has no more business commands after the durable local cursor.
+        caughtUp: true,
         cursor,
       };
     }
-    if (newEvents[0]?.sequence !== cursor + 1)
+    // Journal entries use the event version as their sequence. Versions are
+    // monotonically increasing but not contiguous, because catalogue/context
+    // publications also increment the event version. Requiring `cursor + 1`
+    // incorrectly leaves a healthy desktop permanently offline after one of
+    // those projection-only changes.
+    const firstEvent = newEvents[0];
+    if (firstEvent === undefined || firstEvent.sequence <= cursor)
       return this.#rejectedStreamMessage(database, eventId);
     for (let index = 1; index < newEvents.length; index += 1) {
       const previous = newEvents[index - 1];
       const current = newEvents[index];
-      if (previous === undefined || current?.sequence !== previous.sequence + 1) {
+      if (
+        previous === undefined ||
+        current === undefined ||
+        current.sequence <= previous.sequence
+      ) {
         return this.#rejectedStreamMessage(database, eventId);
       }
     }

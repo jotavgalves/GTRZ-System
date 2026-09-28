@@ -8,6 +8,13 @@ export const orderStatusSchema = z.enum(['open', 'paid', 'cancelled']);
 export const orderItemKindSchema = z.enum(['product', 'combo']);
 export const paymentMethodSchema = z.enum(['cash', 'pix', 'credit-card', 'debit-card']);
 
+// Desktop-created records use UUIDs. Canonical mobile commands intentionally
+// derive child IDs from the immutable command ID (`<uuid>:0`,
+// `<uuid>:payment`) so a replay cannot create duplicate lines or payments.
+// These IDs are returned by the desktop state API only; command inputs keep
+// their UUID validation below.
+const persistedOperationRecordIdSchema = z.string().trim().min(1).max(120);
+
 export const servicePointSchema = z.object({
   id: z.uuid(),
   eventId: z.uuid(),
@@ -22,7 +29,7 @@ export const servicePointSchema = z.object({
 });
 
 export const orderItemSchema = z.object({
-  id: z.uuid(),
+  id: persistedOperationRecordIdSchema,
   orderId: z.uuid(),
   itemKind: orderItemKindSchema,
   itemId: z.uuid(),
@@ -50,7 +57,7 @@ export const orderItemSchema = z.object({
 });
 
 export const paymentSchema = z.object({
-  id: z.uuid(),
+  id: persistedOperationRecordIdSchema,
   orderId: z.uuid(),
   method: paymentMethodSchema,
   amountCents: z.number().int().positive(),

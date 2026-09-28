@@ -20,6 +20,7 @@ import {
 let mainWindow: BrowserWindow | null = null;
 let databaseRuntime: DatabaseRuntime | null = null;
 let cloudSyncService: CloudSyncService | null = null;
+let mainWindowWasCreated = false;
 const runtimeEnvironment = getRuntimeEnvironment();
 const visualQaRun = isVisualQaRun();
 const cloudSyncEnabledForRuntime = process.env.GTRZ_E2E_DISABLE_CLOUD_SYNC !== '1';
@@ -148,6 +149,7 @@ if (!hasSingleInstanceLock) {
       }
 
       await backupService.createBackup('automatic').catch(() => undefined);
+      mainWindowWasCreated = true;
       mainWindow = createMainWindow({
         title: visualQaRun ? 'GTRZ System - QA visual' : environmentLabel(runtimeEnvironment),
       });
@@ -161,6 +163,7 @@ if (!hasSingleInstanceLock) {
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
+      mainWindowWasCreated = true;
       mainWindow = createMainWindow({ title: environmentLabel(runtimeEnvironment) });
     }
   });
@@ -172,6 +175,9 @@ if (!hasSingleInstanceLock) {
   });
 
   app.on('window-all-closed', () => {
+    // Electron can emit this while asynchronous startup is still preparing the
+    // first BrowserWindow. Only a window that has actually existed may close the app.
+    if (!mainWindowWasCreated) return;
     if (process.platform !== 'darwin') {
       app.quit();
     }
