@@ -2,6 +2,7 @@ import { expect, test } from '@playwright/test';
 
 import {
   closeElectronApplication,
+  activateEvent,
   ensureProduction,
   launchElectronApplication,
 } from './electron-app';
@@ -21,6 +22,7 @@ test('SMK-FIN-001 — concilia despesa, suprimento e diferença de caixa', async
     await window.getByPlaceholder('Ex.: La Rumba Neon — Agosto').fill(eventName);
     await window.getByRole('button', { name: 'Criar evento' }).click();
     await expect(window.getByText(eventName, { exact: true }).first()).toBeVisible();
+    await activateEvent(window, eventName);
 
     await window.getByRole('link', { name: 'Caixa' }).click();
     await expect(window.getByRole('heading', { name: 'Caixa administrativo' })).toBeVisible();
@@ -33,10 +35,19 @@ test('SMK-FIN-001 — concilia despesa, suprimento e diferença de caixa', async
     await window.getByPlaceholder('Ex.: Estrutura').fill('Operação');
     await window.getByPlaceholder('Ex.: Locação de gerador').fill('Compra de gelo');
     await window.getByPlaceholder('0,00').fill('20.00');
-    await window.getByLabel('Forma de pagamento').selectOption('cash');
+    await window.getByLabel('Forma prevista').selectOption('cash');
     await window.getByRole('button', { name: 'Registrar despesa' }).click();
     await expect(window.getByText('Despesa registrada.')).toBeVisible();
     await expect(window.getByText('R$ 20,00', { exact: true }).first()).toBeVisible();
+
+    const expenseCard = window
+      .locator('article.expense-card')
+      .filter({ hasText: 'Compra de gelo' });
+    await expenseCard.getByRole('button', { name: 'Gerenciar', exact: true }).click();
+    await expenseCard.getByLabel('Pagamento real').fill('20.00');
+    await expenseCard.getByLabel('Por').selectOption('cash');
+    await expenseCard.getByRole('button', { name: 'Registrar pagamento' }).click();
+    await expect(window.getByText('Pagamento registrado no livro financeiro.')).toBeVisible();
 
     await window.getByRole('link', { name: 'Caixa' }).click();
     await expect(window.getByText('R$ 80,00', { exact: true }).first()).toBeVisible();

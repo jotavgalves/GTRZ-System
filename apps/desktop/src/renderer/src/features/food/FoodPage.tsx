@@ -6,41 +6,56 @@ import {
   RefreshCw,
   Store,
   TriangleAlert,
+  Trash2,
 } from 'lucide-react';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { FoodState, InventoryState } from '@gtrz/contracts';
+import { getCachedViewState, setCachedViewState } from '../../shared/navigation/view-state-cache';
 import { useRealtimeReload } from '../../shared/realtime/useRealtimeReload';
+
+interface FoodViewSnapshot {
+  readonly food: FoodState;
+  readonly inventory: InventoryState;
+}
 
 function formatMoney(cents: number): string {
   return new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(cents / 100);
 }
 
 export function FoodPage(): React.JSX.Element {
-  const [state, setState] = useState<FoodState | null>(null);
-  const [inventory, setInventory] = useState<InventoryState | null>(null);
+  const initialSnapshot = useRef(getCachedViewState<FoodViewSnapshot>('food')).current;
+  const [state, setState] = useState<FoodState | null>(() => initialSnapshot?.food ?? null);
+  const [inventory, setInventory] = useState<InventoryState | null>(
+    () => initialSnapshot?.inventory ?? null,
+  );
+  const [loading, setLoading] = useState(() => initialSnapshot === null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [supplier, setSupplier] = useState('');
   const [editingSupplier, setEditingSupplier] = useState<string | null>(null);
   const [supplierDraft, setSupplierDraft] = useState('');
-  const reload = useCallback(async () => {
+  const reload = useCallback(async (silent = false) => {
+    if (!silent) setLoading(true);
     try {
       const [food, stock] = await Promise.all([
         window.gtrz.food.getState(),
         window.gtrz.inventory.getState(),
       ]);
+      setCachedViewState<FoodViewSnapshot>('food', { food, inventory: stock });
       setState(food);
       setInventory(stock);
       setError(null);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : 'Não foi possível carregar Comida.');
+    } finally {
+      if (!silent) setLoading(false);
     }
   }, []);
   useEffect(() => {
-    void reload();
-  }, [reload]);
+    void reload(initialSnapshot !== null);
+  }, [initialSnapshot, reload]);
   useRealtimeReload(reload);
-  const run = async (action: () => Promise<unknown>) => {
+  const run = async (action: () => Promise<unknown>): Promise<void> => {
     setBusy(true);
     try {
       await action();
@@ -56,6 +71,9 @@ export function FoodPage(): React.JSX.Element {
     () => inventory?.products.filter((product) => product.kind === 'food') ?? [],
     [inventory],
   );
+  if (loading && (state === null || inventory === null)) {
+    return <div className="route-state">Carregando comida…</div>;
+  }
   return (
     <section className="feature-page">
       <header className="feature-header">
@@ -165,7 +183,9 @@ export function FoodPage(): React.JSX.Element {
                     <input
                       disabled={busy}
                       maxLength={100}
-                      onChange={(event) => setSupplier(event.target.value)}
+                      onChange={(event) => {
+                        setSupplier(event.target.value);
+                      }}
                       required
                       value={supplier}
                     />
@@ -197,7 +217,9 @@ export function FoodPage(): React.JSX.Element {
                       >
                         <input
                           autoFocus
-                          onChange={(event) => setSupplierDraft(event.target.value)}
+                          onChange={(event) => {
+                            setSupplierDraft(event.target.value);
+                          }}
                           value={supplierDraft}
                         />
                         <button
@@ -226,23 +248,67 @@ export function FoodPage(): React.JSX.Element {
                           <Pencil size={14} />
                         </button>
                         {item.active ? (
-                          <button
-                            className="icon-button"
-                            disabled={busy}
-                            onClick={() => {
-                              if (
-                                window.confirm(
-                                  `Arquivar ${item.name}? O histórico será preservado.`,
+                          <>
+                            <button
+                              aria-label={`Arquivar ${item.name}`}
+                              className="icon-button"
+                              disabled={busy}
+                              onClick={() => {
+                                if (
+                                  window.confirm(
+                                    `Arquivar ${item.name}? O histórico será preservado.`,
+                                  )
                                 )
-                              )
-                                void run(() =>
-                                  window.gtrz.food.archiveSupplier({ supplierId: item.id }),
+                                  void run(() =>
+                                    window.gtrz.food.archiveSupplier({ supplierId: item.id }),
+                                  );
+                              }}
+                              type="button"
+                            >
+                              <Archive size={14} />
+                            </button>
+                            <button
+                              aria-label={`Excluir ${item.name}`}
+                              className="icon-button"
+                              disabled={busy}
+                              onClick={() => {
+                                const reason = window.prompt(
+                                  `Motivo para excluir ${item.name}. Se houver vendas, você poderá confirmar o estorno delas.`,
                                 );
-                            }}
-                            type="button"
-                          >
-                            <Archive size={14} />
-                          </button>
+                                if (reason === null || reason.trim().length < 3) return;
+                                void run(async () => {
+                                  try {
+                                    await window.gtrz.food.deleteSupplier({
+                                      supplierId: item.id,
+                                      deleteLinkedSales: false,
+                                      reason,
+                                    });
+                                  } catch (deleteError) {
+                                    const message =
+                                      deleteError instanceof Error
+                                        ? deleteError.message
+                                        : 'Não foi possível excluir.';
+                                    if (!message.includes('Confirme a exclusão das vendas'))
+                                      throw deleteError;
+                                    if (
+                                      !window.confirm(
+                                        `${message}\n\nExcluir também essas vendas, com os respectivos estornos?`,
+                                      )
+                                    )
+                                      return;
+                                    await window.gtrz.food.deleteSupplier({
+                                      supplierId: item.id,
+                                      deleteLinkedSales: true,
+                                      reason,
+                                    });
+                                  }
+                                });
+                              }}
+                              type="button"
+                            >
+                              <Trash2 size={14} />
+                            </button>
+                          </>
                         ) : null}
                       </div>
                     ),

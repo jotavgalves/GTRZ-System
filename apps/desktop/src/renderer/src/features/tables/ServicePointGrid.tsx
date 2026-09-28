@@ -138,7 +138,10 @@ export function ServicePointGrid({
                 </button>
               </div>
             ) : null}
-            {production && servicePoint.type === 'table' && actionOpen && actionMode === 'rename' ? (
+            {production &&
+            servicePoint.type === 'table' &&
+            actionOpen &&
+            actionMode === 'rename' ? (
               <form
                 className="service-point-card__form"
                 onSubmit={(event) => {
@@ -169,7 +172,10 @@ export function ServicePointGrid({
                 </button>
               </form>
             ) : null}
-            {production && servicePoint.type === 'table' && actionOpen && actionMode === 'delete' ? (
+            {production &&
+            servicePoint.type === 'table' &&
+            actionOpen &&
+            actionMode === 'delete' ? (
               <form
                 className="service-point-card__form"
                 onSubmit={(event) => {

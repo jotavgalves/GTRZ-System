@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 
 import type {
   CreateTicketLotInput,
@@ -9,6 +9,7 @@ import type {
 } from '@gtrz/contracts';
 
 import { useRealtimeReload } from '../../shared/realtime/useRealtimeReload';
+import { getCachedViewState, setCachedViewState } from '../../shared/navigation/view-state-cache';
 
 interface TicketViewState {
   readonly state: TicketState | null;
@@ -30,8 +31,9 @@ function getErrorMessage(error: unknown): string {
 }
 
 export function useTickets(): TicketViewState {
-  const [state, setState] = useState<TicketState | null>(null);
-  const [loading, setLoading] = useState(true);
+  const initialState = useRef(getCachedViewState<TicketState>('tickets')).current;
+  const [state, setState] = useState<TicketState | null>(() => initialState);
+  const [loading, setLoading] = useState(() => initialState === null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
@@ -41,7 +43,7 @@ export function useTickets(): TicketViewState {
     setError(null);
 
     try {
-      setState(await window.gtrz.tickets.getState());
+      setState(setCachedViewState('tickets', await window.gtrz.tickets.getState()));
     } catch (loadError: unknown) {
       setError(getErrorMessage(loadError));
     } finally {
@@ -50,8 +52,8 @@ export function useTickets(): TicketViewState {
   }, []);
 
   useEffect(() => {
-    void reload();
-  }, [reload]);
+    void reload(initialState !== null);
+  }, [initialState, reload]);
   useRealtimeReload(reload);
 
   const run = useCallback(

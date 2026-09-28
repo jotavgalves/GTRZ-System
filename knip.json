@@ -3,7 +3,8 @@
   "workspaces": {
     ".": {
       "entry": ["scripts/*.mjs", "tests/**/*.ts"],
-      "project": ["**/*.{ts,tsx,mjs}"]
+      "project": ["**/*.{ts,tsx,mjs}", "!output/**", "!tmp/**"],
+      "ignoreDependencies": ["cloudflare"]
     },
     "apps/desktop": {
       "entry": [

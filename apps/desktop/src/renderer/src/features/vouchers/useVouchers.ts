@@ -1,14 +1,16 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 
 import type {
   AddVoucherBalanceInput,
   CreateVoucherInput,
   DeleteVoucherInput,
+  SetVoucherTotalInput,
   UpdateVoucherInput,
   VoucherState,
 } from '@gtrz/contracts';
 
 import { useRealtimeReload } from '../../shared/realtime/useRealtimeReload';
+import { getCachedViewState, setCachedViewState } from '../../shared/navigation/view-state-cache';
 
 interface VoucherViewState {
   readonly state: VoucherState | null;
@@ -21,6 +23,7 @@ interface VoucherViewState {
   readonly changeStatus: (voucherId: string, status: 'active' | 'cancelled') => Promise<void>;
   readonly updateVoucher: (input: UpdateVoucherInput) => Promise<void>;
   readonly addBalance: (input: AddVoucherBalanceInput) => Promise<void>;
+  readonly setVoucherTotal: (input: SetVoucherTotalInput) => Promise<void>;
   readonly deleteVoucher: (input: DeleteVoucherInput) => Promise<void>;
 }
 
@@ -29,8 +32,9 @@ function getErrorMessage(error: unknown): string {
 }
 
 export function useVouchers(): VoucherViewState {
-  const [state, setState] = useState<VoucherState | null>(null);
-  const [loading, setLoading] = useState(true);
+  const initialState = useRef(getCachedViewState<VoucherState>('vouchers')).current;
+  const [state, setState] = useState<VoucherState | null>(() => initialState);
+  const [loading, setLoading] = useState(() => initialState === null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
@@ -40,7 +44,7 @@ export function useVouchers(): VoucherViewState {
     setError(null);
 
     try {
-      setState(await window.gtrz.vouchers.getState());
+      setState(setCachedViewState('vouchers', await window.gtrz.vouchers.getState()));
     } catch (loadError: unknown) {
       setError(getErrorMessage(loadError));
     } finally {
@@ -49,8 +53,8 @@ export function useVouchers(): VoucherViewState {
   }, []);
 
   useEffect(() => {
-    void reload();
-  }, [reload]);
+    void reload(initialState !== null);
+  }, [initialState, reload]);
   useRealtimeReload(reload);
 
   const run = useCallback(
@@ -104,6 +108,13 @@ export function useVouchers(): VoucherViewState {
     [run],
   );
 
+  const setVoucherTotal = useCallback(
+    async (input: SetVoucherTotalInput): Promise<void> => {
+      await run(() => window.gtrz.vouchers.setTotal(input), 'Valor total do voucher corrigido.');
+    },
+    [run],
+  );
+
   const deleteVoucher = useCallback(
     async (input: DeleteVoucherInput): Promise<void> => {
       await run(async () => {
@@ -125,6 +136,7 @@ export function useVouchers(): VoucherViewState {
     changeStatus,
     updateVoucher,
     addBalance,
+    setVoucherTotal,
     deleteVoucher,
   };
 }

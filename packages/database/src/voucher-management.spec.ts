@@ -23,6 +23,7 @@ import {
   createManagedVoucher,
   deleteManagedVoucher,
   getManagedVoucherState,
+  setManagedVoucherTotal,
   updateManagedVoucher,
 } from './voucher-management';
 
@@ -131,6 +132,60 @@ describe('voucher management', () => {
       servicePointLabel: 'Mesa nova',
       servicePointActive: true,
       label: 'Voucher reassociado',
+    });
+    database.close();
+  });
+
+  it('corrige o valor total sem apagar consumo e bloqueia total abaixo do já usado', async () => {
+    const database = await createTemporaryDatabase();
+    createEvent(database, { name: 'Evento correção de voucher', startsAt: Date.now() });
+    const table = createServicePoint(database, { label: 'Mesa correção', type: 'table' });
+    const productId = seedProduct(database);
+    const voucher = createManagedVoucher(database, {
+      code: 'CORRIGIR-01',
+      label: 'Voucher corrigível',
+      initialBalanceCents: 2000,
+      servicePointId: table.id,
+    });
+    const order = openOrder(database, table.id);
+    const orderId = addOrderItem(database, {
+      orderId: order.id,
+      itemKind: 'product',
+      itemId: productId,
+      quantity: 1,
+    }).id;
+    bindOrderVoucher(database, { orderId, code: voucher.code });
+    closeOrder(database, {
+      orderId,
+      discountCents: 0,
+      payments: [],
+      voucherUses: [{ code: voucher.code, amountCents: 1000 }],
+    });
+
+    expect(
+      setManagedVoucherTotal(database, {
+        voucherId: voucher.id,
+        initialBalanceCents: 1500,
+        reason: 'Valor emitido acima do combinado',
+      }),
+    ).toMatchObject({ initialBalanceCents: 1500, remainingBalanceCents: 500, status: 'active' });
+
+    expect(() =>
+      setManagedVoucherTotal(database, {
+        voucherId: voucher.id,
+        initialBalanceCents: 999,
+        reason: 'Tentativa inválida',
+      }),
+    ).toThrow('não pode ser menor que o valor já utilizado');
+
+    const audit = database.sqlite
+      .prepare("SELECT action, details_json FROM audit_log WHERE action = 'voucher.value-updated'")
+      .get() as { readonly action: string; readonly details_json: string } | undefined;
+    expect(audit?.action).toBe('voucher.value-updated');
+    expect(JSON.parse(audit?.details_json ?? '{}')).toMatchObject({
+      reason: 'Valor emitido acima do combinado',
+      redeemedCents: 1000,
+      remainingBalanceCents: 500,
     });
     database.close();
   });

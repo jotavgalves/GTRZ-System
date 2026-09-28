@@ -19,6 +19,10 @@ const receipt: DatabaseOrderReceipt = {
       quantity: 2,
       unitPriceCents: 1000,
       totalCents: 2000,
+      preparation: [
+        { label: 'Escolha as arepas', productName: 'Arepa de frango', quantity: 1 },
+        { label: 'Escolha as arepas', productName: 'Arepa de carne', quantity: 1 },
+      ],
     },
   ],
   payments: [
@@ -30,24 +34,26 @@ const receipt: DatabaseOrderReceipt = {
     },
   ],
   vouchers: [{ code: 'VIP-001', amountCents: 500 }],
+  operatorName: 'João',
 };
 
 describe('thermal receipt html', () => {
-  it('inclui retirada, venda, mesa, itens, pagamento, voucher e troco', () => {
-    const html = buildReceiptHtml(receipt, 58);
+  it('gera comprovante do cliente e vale de retirada na mesma impressão', async () => {
+    const html = await buildReceiptHtml(receipt, 58);
 
     expect(html).toContain('width: 58mm');
-    expect(html).toContain('GTRZ SYSTEM');
-    expect(html).toContain('NOTA DE RETIRADA');
+    expect(html).toContain('NOTA DE COMPRA');
+    expect(html).toContain('VALE DE RETIRADA');
     expect(html).toContain('La Rumba Teste');
-    expect(html).toContain('Mesa: <strong>Mesa 12</strong>');
     expect(html).toContain('2× Budweiser');
+    expect(html).toContain('Escolha as arepas: 1× Arepa de frango');
+    expect(html).toContain('Escolha as arepas: 1× Arepa de carne');
+    expect(html).toContain('JOÃO');
+    expect(html).toContain('ATENDENTE:');
     expect(html).toContain('Dinheiro');
-    expect(html).toContain('Troco');
-    expect(html).toContain('Voucher VIP-001');
-    expect(html).toContain('APRESENTE ESTA NOTA NO BAR PARA RETIRAR OS ITENS');
-    expect(html).toContain('Válida somente durante o evento.');
-    expect(html).toContain('Venda 85FFBB3F');
+    expect(html).toContain('R$ 10,00');
+    expect(html).toContain('CÓDIGO:');
+    expect(html).toContain('page-break-after:always');
   });
 
   it('dimensiona a altura conforme o conteúdo com limites seguros', () => {

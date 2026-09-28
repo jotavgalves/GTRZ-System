@@ -40,6 +40,11 @@ export async function launchElectronApplication(): Promise<ElectronApplication> 
     try {
       const application = await electron.launch({
         args: [`--user-data-dir=${userDataPath}`, applicationPath],
+        env: {
+          ...process.env,
+          GTRZ_E2E_USER_DATA_PATH: userDataPath,
+          GTRZ_E2E_DISABLE_CLOUD_SYNC: '1',
+        },
       });
       userDataDirectories.set(application, userDataPath);
       return application;
@@ -94,4 +99,20 @@ export async function ensureProduction(window: Page): Promise<void> {
     await window.getByRole('button', { name: 'Entrar em Produção' }).click();
     await expect(window.getByText('Produção', { exact: true })).toBeVisible();
   }
+}
+
+export async function createInventoryCategory(window: Page, name: string): Promise<void> {
+  await window.getByRole('link', { name: 'Configurações' }).click();
+  await window.getByPlaceholder('Ex.: Cervejas').fill(name);
+  await window.getByRole('button', { name: 'Criar categoria' }).click();
+  await expect(window.locator('.category-manager').getByText(name, { exact: true })).toBeVisible();
+  await window.getByRole('link', { name: 'Estoque' }).click();
+}
+
+export async function activateEvent(window: Page, name: string): Promise<void> {
+  const eventCard = window.locator('article.event-card').filter({ hasText: name });
+  await expect(eventCard).toBeVisible();
+  const operateButton = eventCard.getByRole('button', { name: 'Operar evento' });
+  if (await operateButton.isVisible()) await operateButton.click();
+  await expect(eventCard.getByText('Em operação', { exact: true })).toBeVisible();
 }

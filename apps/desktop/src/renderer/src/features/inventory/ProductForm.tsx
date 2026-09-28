@@ -141,6 +141,7 @@ export function ProductForm(props: ProductFormProps): React.JSX.Element {
   const selectedCategory = props.categories.find((category) => category.id === categoryId);
   const usesFoodEngine = selectedCategory?.engine === 'food';
   const externalFood = usesFoodEngine && foodState?.supplierMode === 'external';
+  const externalFoodComponent = externalFood && comboOnly;
 
   useEffect(() => {
     if (!usesFoodEngine || props.product !== undefined) return;
@@ -148,11 +149,13 @@ export function ProductForm(props: ProductFormProps): React.JSX.Element {
       .getState()
       .then((next) => {
         setFoodState(next);
-        setSupplierId(
-          (current) => current || next.suppliers.find((supplier) => supplier.active)?.id || '',
+        setSupplierId((current) =>
+          current !== '' ? current : (next.suppliers.find((supplier) => supplier.active)?.id ?? ''),
         );
       })
-      .catch(() => setFoodState(null));
+      .catch(() => {
+        setFoodState(null);
+      });
   }, [props.product, usesFoodEngine]);
 
   async function handleSubmit(event: SyntheticEvent<HTMLFormElement>): Promise<void> {
@@ -162,19 +165,21 @@ export function ProductForm(props: ProductFormProps): React.JSX.Element {
       if (externalFood) {
         if (props.product !== undefined || props.onExternalFoodSubmit === undefined)
           throw new Error('Este item externo deve ser cadastrado pelo fluxo de estoque.');
-        const supplierUnitCents = inputToCents(supplierUnit);
-        const commissionUnitCents = inputToCents(commissionUnit);
         const quantity = Number(initialQuantity);
         if (!Number.isInteger(quantity) || quantity <= 0)
           throw new Error('Informe a quantidade recebida.');
         await props.onExternalFoodSubmit({
           categoryId,
-          supplierId,
           name,
-          supplierUnitCents,
-          commissionUnitCents,
           initialQuantity: quantity,
           comboOnly,
+          ...(externalFoodComponent
+            ? {}
+            : {
+                supplierId,
+                supplierUnitCents: inputToCents(supplierUnit),
+                commissionUnitCents: inputToCents(commissionUnit),
+              }),
         });
         setName('');
         setSupplierUnit('');
@@ -239,7 +244,9 @@ export function ProductForm(props: ProductFormProps): React.JSX.Element {
           <span className="switch-field">
             <input
               checked={comboOnly}
-              onChange={(event) => setComboOnly(event.target.checked)}
+              onChange={(event) => {
+                setComboOnly(event.target.checked);
+              }}
               type="checkbox"
             />
             <span aria-hidden="true" className="switch-field__track" />
@@ -266,16 +273,18 @@ export function ProductForm(props: ProductFormProps): React.JSX.Element {
               ))}
           </select>
         </label>
-        {externalFood ? (
+        {externalFood && !externalFoodComponent ? (
           <label className="form-field">
             <span>Fornecedor</span>
             <select
-              onChange={(event) => setSupplierId(event.target.value)}
+              onChange={(event) => {
+                setSupplierId(event.target.value);
+              }}
               required
               value={supplierId}
             >
               <option value="">Selecione</option>
-              {foodState?.suppliers
+              {foodState.suppliers
                 .filter((supplier) => supplier.active)
                 .map((supplier) => (
                   <option key={supplier.id} value={supplier.id}>
@@ -307,7 +316,9 @@ export function ProductForm(props: ProductFormProps): React.JSX.Element {
             <span>Quantidade recebida</span>
             <input
               min="1"
-              onChange={(event) => setInitialQuantity(event.target.value)}
+              onChange={(event) => {
+                setInitialQuantity(event.target.value);
+              }}
               required
               step="1"
               type="number"
@@ -331,13 +342,15 @@ export function ProductForm(props: ProductFormProps): React.JSX.Element {
             />
           </label>
         )}
-        {externalFood ? (
+        {externalFood && !externalFoodComponent ? (
           <label className="form-field">
             <span>Valor do fornecedor por un.</span>
             <input
               inputMode="decimal"
               min="0"
-              onChange={(event) => setSupplierUnit(event.target.value)}
+              onChange={(event) => {
+                setSupplierUnit(event.target.value);
+              }}
               placeholder="0,00"
               required
               step="0.01"
@@ -345,6 +358,11 @@ export function ProductForm(props: ProductFormProps): React.JSX.Element {
               value={supplierUnit}
             />
           </label>
+        ) : externalFoodComponent ? (
+          <div className="form-field product-form__context">
+            <span>Componente do combo</span>
+            <small>O fornecedor, o valor e a comissão serão definidos no combo de comida.</small>
+          </div>
         ) : (
           <label className="form-field">
             <span>Preço de venda</span>
@@ -362,13 +380,15 @@ export function ProductForm(props: ProductFormProps): React.JSX.Element {
             />
           </label>
         )}
-        {externalFood ? (
+        {externalFood && !externalFoodComponent ? (
           <label className="form-field">
             <span>Comissão GTRZ por un.</span>
             <input
               inputMode="decimal"
               min="0"
-              onChange={(event) => setCommissionUnit(event.target.value)}
+              onChange={(event) => {
+                setCommissionUnit(event.target.value);
+              }}
               placeholder="0,00"
               required
               step="0.01"
@@ -376,7 +396,7 @@ export function ProductForm(props: ProductFormProps): React.JSX.Element {
               value={commissionUnit}
             />
           </label>
-        ) : (
+        ) : externalFoodComponent ? null : (
           <label className="form-field">
             <span>Aviso de estoque baixo</span>
             <input
@@ -475,7 +495,8 @@ export function ProductForm(props: ProductFormProps): React.JSX.Element {
             categoryId.length === 0 ||
             name.trim().length < 2 ||
             (usesFoodEngine && foodState === null) ||
-            (externalFood && (supplierId.length === 0 || initialQuantity.length === 0))
+            (externalFood &&
+              (initialQuantity.length === 0 || (!externalFoodComponent && supplierId.length === 0)))
           }
           type="submit"
         >
@@ -486,7 +507,9 @@ export function ProductForm(props: ProductFormProps): React.JSX.Element {
           )}
           {props.product === undefined
             ? externalFood
-              ? 'Cadastrar comida e dar entrada'
+              ? externalFoodComponent
+                ? 'Cadastrar componente e dar entrada'
+                : 'Cadastrar comida e dar entrada'
               : 'Cadastrar produto'
             : 'Salvar alterações'}
         </button>

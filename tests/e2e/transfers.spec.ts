@@ -2,6 +2,7 @@ import { expect, test } from '@playwright/test';
 
 import {
   closeElectronApplication,
+  createInventoryCategory,
   ensureProduction,
   launchElectronApplication,
 } from './electron-app';
@@ -30,11 +31,7 @@ test('SMK-TRF-001 — transfere estoque entre eventos e exibe o histórico', asy
     await expect(sourceEventCard.getByText('Em operação', { exact: true })).toBeVisible();
 
     await window.getByRole('link', { name: 'Estoque' }).click();
-    await window.getByPlaceholder('Ex.: Cervejas').fill(categoryName);
-    await window.getByRole('button', { name: 'Criar categoria' }).click();
-    await expect(
-      window.locator('.category-chips').getByText(categoryName, { exact: true }),
-    ).toBeVisible();
+    await createInventoryCategory(window, categoryName);
 
     const productForm = window.locator('form.product-form');
     await productForm.getByLabel('Nome', { exact: true }).fill(productName);
@@ -48,6 +45,7 @@ test('SMK-TRF-001 — transfere estoque entre eventos e exibe o histórico', asy
     await productCard.getByRole('button', { name: 'Entrada', exact: true }).click();
     const movementForm = window.locator('form.movement-form');
     await movementForm.getByLabel('Quantidade', { exact: true }).fill('8');
+    await movementForm.getByLabel('Valor total pago').fill('16.00');
     await movementForm.getByRole('button', { name: 'Registrar entrada' }).click();
     productCard = window.locator('article.inventory-card').filter({ hasText: productName });
     await expect(productCard.getByText('8 un.', { exact: true })).toBeVisible();

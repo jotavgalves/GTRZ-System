@@ -1,4 +1,6 @@
 import { BrowserWindow } from 'electron';
+import { mkdir, writeFile } from 'node:fs/promises';
+import path from 'node:path';
 
 import type {
   PrinterInfo,
@@ -8,15 +10,24 @@ import type {
 } from '@gtrz/contracts';
 import type { DatabaseContext } from '@gtrz/database';
 import {
+  type DatabaseOrderReceipt,
   getOrderReceipt,
   getPrintingSettings,
   updatePrintingSettings,
 } from '@gtrz/database/printing';
 
 import { buildReceiptHtml, estimateReceiptHeightMm } from './receipt-html';
+import type { ClaimedCloudPrintJob } from './cloud-sync-service';
 
 interface ThermalPrintServiceOptions {
+  readonly archiveDirectory: string;
   readonly getDatabase: () => DatabaseContext;
+}
+
+export interface CloudPrinterRegistration {
+  readonly printerName: string;
+  readonly enabled: boolean;
+  readonly unavailableReason: string | null;
 }
 
 function createHiddenWindow(): BrowserWindow {
@@ -32,9 +43,16 @@ function createHiddenWindow(): BrowserWindow {
 
 export class ThermalPrintService {
   readonly #getDatabase: () => DatabaseContext;
+  readonly #archiveDirectory: string;
+  #printerRegistrationCache: {
+    readonly fingerprint: string;
+    readonly value: CloudPrinterRegistration;
+    readonly checkedAt: number;
+  } | null = null;
 
   constructor(options: ThermalPrintServiceOptions) {
     this.#getDatabase = options.getDatabase;
+    this.#archiveDirectory = options.archiveDirectory;
   }
 
   getSettings(): PrintingSettings {
@@ -42,7 +60,9 @@ export class ThermalPrintService {
   }
 
   updateSettings(input: UpdatePrintingSettingsInput): PrintingSettings {
-    return updatePrintingSettings(this.#getDatabase(), input);
+    const settings = updatePrintingSettings(this.#getDatabase(), input);
+    this.#printerRegistrationCache = null;
+    return settings;
   }
 
   async listPrinters(): Promise<readonly PrinterInfo[]> {
@@ -63,14 +83,98 @@ export class ThermalPrintService {
   }
 
   async printAfterSale(orderId: string): Promise<void> {
-    await this.#printOrder(orderId, false).catch(() => undefined);
+    // Never hand a receipt to Windows' implicit default target. On a new PC it
+    // is commonly "Microsoft Print to PDF", which opens a save dialog and can
+    // make a completed sale look as if it was printed by the thermal station.
+    await this.archiveOrder(orderId).catch(() => undefined);
+    const registration = await this.getCloudPrinterRegistration();
+    if (!registration.enabled) return;
+    await this.#printOrder(orderId, false, false).catch(() => undefined);
+  }
+
+  async archiveOrder(orderId: string): Promise<void> {
+    const receipt = getOrderReceipt(this.#getDatabase(), orderId);
+    await this.#archiveReceiptDocument(receipt);
   }
 
   async reprintOrder(orderId: string): Promise<PrintOrderResult> {
     return this.#printOrder(orderId, true);
   }
 
-  async #printOrder(orderId: string, force: boolean): Promise<PrintOrderResult> {
+  async printCloudJob(job: ClaimedCloudPrintJob): Promise<PrintOrderResult> {
+    const settings = getPrintingSettings(this.#getDatabase());
+    if (!settings.automaticPrinting) {
+      return {
+        success: false,
+        skipped: true,
+        message: 'Este PC não está habilitado para imprimir.',
+      };
+    }
+    const receipt: DatabaseOrderReceipt = {
+      ...job.document,
+      printedByLabel: settings.machineName,
+    };
+    return this.#printReceipt(receipt, settings);
+  }
+
+  async getCloudPrinterRegistration(): Promise<CloudPrinterRegistration> {
+    const settings = getPrintingSettings(this.#getDatabase());
+    const fingerprint = [
+      settings.automaticPrinting,
+      settings.deviceName ?? '',
+      settings.paperWidthMm,
+    ].join('|');
+    const cached = this.#printerRegistrationCache;
+    if (
+      cached !== null &&
+      cached.fingerprint === fingerprint &&
+      Date.now() - cached.checkedAt < 30_000
+    )
+      return cached.value;
+
+    if (!settings.automaticPrinting) {
+      const value = {
+        printerName: settings.deviceName ?? '__windows_default__',
+        enabled: false,
+        unavailableReason: 'A impressão automática está desativada neste computador.',
+      };
+      this.#printerRegistrationCache = { fingerprint, value, checkedAt: Date.now() };
+      return value;
+    }
+
+    if (settings.deviceName === null) {
+      const value = {
+        printerName: '__windows_default__',
+        enabled: false,
+        unavailableReason:
+          'Selecione uma impressora térmica nas Configurações antes de ativar a impressão automática.',
+      };
+      this.#printerRegistrationCache = { fingerprint, value, checkedAt: Date.now() };
+      return value;
+    }
+
+    const printers = await this.listPrinters();
+    const selectedPrinter = printers.find((printer) => printer.name === settings.deviceName);
+    if (selectedPrinter === undefined) {
+      const value = {
+        printerName: settings.deviceName,
+        enabled: false,
+        unavailableReason: `A impressora configurada (${settings.deviceName}) não está disponível neste computador.`,
+      };
+      this.#printerRegistrationCache = { fingerprint, value, checkedAt: Date.now() };
+      return value;
+    }
+
+    const value = {
+      printerName: selectedPrinter.name,
+      enabled: true,
+      unavailableReason: null,
+    };
+    this.#printerRegistrationCache = { fingerprint, value, checkedAt: Date.now() };
+    return value;
+  }
+
+  async #printOrder(orderId: string, force: boolean, archive = true): Promise<PrintOrderResult> {
     const settings = getPrintingSettings(this.#getDatabase());
     if (!force && !settings.automaticPrinting) {
       return { success: true, skipped: true, message: 'Impressão automática desativada.' };
@@ -78,11 +182,28 @@ export class ThermalPrintService {
 
     try {
       const receipt = getOrderReceipt(this.#getDatabase(), orderId);
-      const html = buildReceiptHtml(receipt, settings.paperWidthMm);
+      return await this.#printReceipt(receipt, settings, archive);
+    } catch (error: unknown) {
+      return {
+        success: false,
+        skipped: false,
+        message: error instanceof Error ? error.message : 'Falha ao imprimir a nota de retirada.',
+      };
+    }
+  }
+
+  async #printReceipt(
+    receipt: DatabaseOrderReceipt,
+    settings: PrintingSettings,
+    archive = true,
+  ): Promise<PrintOrderResult> {
+    try {
+      const html = await buildReceiptHtml(receipt, settings.paperWidthMm);
       const window = createHiddenWindow();
 
       try {
         await window.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`);
+        if (archive) await this.#archiveReceipt(window, receipt.orderId, receipt.closedAt);
         const success = await new Promise<boolean>((resolve) => {
           const printOptions = {
             silent: true,
@@ -116,5 +237,33 @@ export class ThermalPrintService {
         message: error instanceof Error ? error.message : 'Falha ao imprimir a nota de retirada.',
       };
     }
+  }
+
+  async #archiveReceiptDocument(receipt: DatabaseOrderReceipt): Promise<void> {
+    const html = await buildReceiptHtml(
+      receipt,
+      getPrintingSettings(this.#getDatabase()).paperWidthMm,
+    );
+    const window = createHiddenWindow();
+    try {
+      await window.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`);
+      await this.#archiveReceipt(window, receipt.orderId, receipt.closedAt);
+    } finally {
+      if (!window.isDestroyed()) window.destroy();
+    }
+  }
+
+  async #archiveReceipt(window: BrowserWindow, orderId: string, closedAt: number): Promise<void> {
+    const occurredAt = new Date(closedAt);
+    const folder = path.join(
+      this.#archiveDirectory,
+      String(occurredAt.getFullYear()),
+      `${String(occurredAt.getMonth() + 1).padStart(2, '0')}-${String(occurredAt.getDate()).padStart(2, '0')}`,
+    );
+    await mkdir(folder, { recursive: true });
+    await writeFile(
+      path.join(folder, `Pedido-${orderId}.pdf`),
+      await window.webContents.printToPDF({ printBackground: true }),
+    );
   }
 }

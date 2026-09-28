@@ -94,7 +94,10 @@ export function ExpenseForm({ busy, onSubmit }: ExpenseFormProps): React.JSX.Ele
             value={amount}
           />
         </label>
-        <p className="form-field__hint">O pagamento é lançado separadamente. Assim, o caixa só muda quando o dinheiro realmente sai.</p>
+        <p className="form-field__hint">
+          O pagamento é lançado separadamente. Assim, o caixa só muda quando o dinheiro realmente
+          sai.
+        </p>
       </div>
       <label className="form-field">
         <span>Forma prevista</span>

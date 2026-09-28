@@ -153,9 +153,13 @@ export function StockMovementForm({
           </label>
         ) : null}
       </div>
-      {type === 'purchase' && Number.isInteger(parsedQuantity) && parsedQuantity > 0 && parseMoney(purchaseTotal) > 0 ? (
+      {type === 'purchase' &&
+      Number.isInteger(parsedQuantity) &&
+      parsedQuantity > 0 &&
+      parseMoney(purchaseTotal) > 0 ? (
         <p className="form-hint">
-          Lote criado automaticamente: {formatMoney(parseMoney(purchaseTotal) / parsedQuantity)} por unidade.
+          Lote criado automaticamente: {formatMoney(parseMoney(purchaseTotal) / parsedQuantity)} por
+          unidade.
         </p>
       ) : null}
       {type === 'correction-negative' ? (

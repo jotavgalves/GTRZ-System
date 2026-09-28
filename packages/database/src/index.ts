@@ -11,6 +11,11 @@ import { foodFoundationMigration } from './food-foundation-migration';
 import { foodFinanceMigration } from './food-finance-migration';
 import { foodCategoryMigration } from './food-category-migration';
 import { categoryEngineMigration } from './category-engine-migration';
+import { comboChoicesMigration } from './combo-choices-migration';
+import { comboChoiceLabelMigration } from './combo-choice-label-migration';
+import { comboComponentOccurrencesMigration } from './combo-component-occurrences-migration';
+import { comboOrderAndFoodTermsMigration } from './combo-order-and-food-terms-migration';
+import { legacyFoodComboClassificationMigration } from './legacy-food-combo-classification-migration';
 import { syncMigration } from './sync-migration';
 import { syncInboxMigration } from './sync-inbox-migration';
 import { syncConflictMigration } from './sync-conflict-migration';
@@ -319,6 +324,11 @@ const migrations: readonly Migration[] = [
   foodFinanceMigration,
   foodCategoryMigration,
   categoryEngineMigration,
+  comboChoicesMigration,
+  comboChoiceLabelMigration,
+  comboComponentOccurrencesMigration,
+  comboOrderAndFoodTermsMigration,
+  legacyFoodComboClassificationMigration,
 ];
 
 function ensureMigrationTable(sqlite: BetterSqlite3.Database): void {
@@ -358,14 +368,14 @@ function ensureColumn(
   column: string,
   definition: string,
 ): void {
-  const columns = sqlite.pragma(`table_info(${table})`) as Array<{ readonly name: string }>;
+  const columns = sqlite.pragma(`table_info(${table})`) as { readonly name: string }[];
   if (!columns.some((entry) => entry.name === column)) {
     sqlite.exec(`ALTER TABLE ${table} ADD COLUMN ${definition}`);
   }
 }
 
 function tableColumns(sqlite: BetterSqlite3.Database, table: string): readonly string[] {
-  return (sqlite.pragma(`table_info(${table})`) as Array<{ readonly name: string }>).map(
+  return (sqlite.pragma(`table_info(${table})`) as { readonly name: string }[]).map(
     (entry) => entry.name,
   );
 }
@@ -387,6 +397,8 @@ function repairFinanceLedgerColumns(sqlite: BetterSqlite3.Database): void {
     `);
   }
   ensureColumn(sqlite, 'products', 'combo_only', 'combo_only INTEGER NOT NULL DEFAULT 0');
+  ensureColumn(sqlite, 'combos', 'kind', "kind TEXT NOT NULL DEFAULT 'drink'");
+  ensureColumn(sqlite, 'combo_components', 'sort_order', 'sort_order INTEGER NOT NULL DEFAULT 0');
 }
 
 export function openDatabase(filePath: string): DatabaseContext {
@@ -428,6 +440,7 @@ export * from './event-close';
 export * from './event-deletion';
 export * from './expenses';
 export * from './food';
+export * from './food-settlements';
 export * from './capital';
 export * from './insights';
 export * from './inventory';

@@ -3,11 +3,15 @@ import { ipcRenderer } from 'electron';
 import {
   comboListSchema,
   comboSchema,
+  comboDeletionResultSchema,
   createComboInputSchema,
+  deleteComboInputSchema,
   IPC_CHANNELS,
   updateComboInputSchema,
   type ComboApi,
+  type ComboDeletionResult,
   type CreateComboInput,
+  type DeleteComboInput,
   type InventoryCombo,
   type UpdateComboInput,
 } from '@gtrz/contracts';
@@ -26,5 +30,12 @@ export const comboApi: ComboApi = {
     const parsedInput = updateComboInputSchema.parse(input);
     const payload: unknown = await ipcRenderer.invoke(IPC_CHANNELS.combosUpdate, parsedInput);
     return comboSchema.parse(payload);
+  },
+  async delete(input: DeleteComboInput): Promise<ComboDeletionResult> {
+    const payload: unknown = await ipcRenderer.invoke(
+      IPC_CHANNELS.combosDelete,
+      deleteComboInputSchema.parse(input),
+    );
+    return comboDeletionResultSchema.parse(payload);
   },
 };

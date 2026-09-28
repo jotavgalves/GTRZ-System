@@ -289,6 +289,73 @@ export function addManagedVoucherBalance(
   );
 }
 
+export function setManagedVoucherTotal(
+  database: DatabaseContext,
+  input: {
+    readonly voucherId: string;
+    readonly initialBalanceCents: number;
+    readonly reason: string;
+  },
+): DatabaseManagedVoucher {
+  requireProduction(database);
+  const eventId = requireActiveEvent(database);
+  const voucher = requireVoucher(database, input.voucherId);
+  const reason = input.reason.trim();
+
+  if (voucher.eventId !== eventId) {
+    throw new Error('O voucher não pertence ao evento em operação.');
+  }
+  if (!Number.isInteger(input.initialBalanceCents) || input.initialBalanceCents <= 0) {
+    throw new Error('O valor total do voucher deve ser positivo.');
+  }
+  if (reason.length < 2 || reason.length > 250) {
+    throw new Error('Informe um motivo entre 2 e 250 caracteres para corrigir o valor.');
+  }
+
+  const redeemedCents = voucher.initialBalanceCents - voucher.remainingBalanceCents;
+  if (input.initialBalanceCents < redeemedCents) {
+    throw new Error(
+      `O novo total não pode ser menor que o valor já utilizado (${redeemedCents} centavos).`,
+    );
+  }
+
+  const nextRemaining = input.initialBalanceCents - redeemedCents;
+  const nextStatus =
+    voucher.status === 'cancelled' ? 'cancelled' : nextRemaining === 0 ? 'exhausted' : 'active';
+  const now = Date.now();
+
+  database.sqlite.transaction(() => {
+    database.sqlite
+      .prepare(
+        `UPDATE vouchers
+         SET initial_balance_cents = ?, remaining_balance_cents = ?, status = ?, updated_at = ?
+         WHERE id = ?`,
+      )
+      .run(input.initialBalanceCents, nextRemaining, nextStatus, now, voucher.id);
+    appendAudit(database, {
+      action: 'voucher.value-updated',
+      entityType: 'voucher',
+      entityId: voucher.id,
+      eventId,
+      details: {
+        code: voucher.code,
+        reason,
+        previousInitialBalanceCents: voucher.initialBalanceCents,
+        previousRemainingBalanceCents: voucher.remainingBalanceCents,
+        initialBalanceCents: input.initialBalanceCents,
+        remainingBalanceCents: nextRemaining,
+        redeemedCents,
+        status: nextStatus,
+      },
+    });
+  })();
+
+  return enrichVoucher(
+    database,
+    getVoucherState(database).vouchers.find((item) => item.id === voucher.id) ?? voucher,
+  );
+}
+
 export function changeManagedVoucherStatus(
   database: DatabaseContext,
   input: { readonly voucherId: string; readonly status: 'active' | 'cancelled' },

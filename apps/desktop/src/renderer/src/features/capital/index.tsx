@@ -1,1 +1,0 @@
-export { CapitalPage } from './CapitalPage';

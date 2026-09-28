@@ -91,8 +91,13 @@ export const expenseSchema = z.object({
 });
 
 export const expensePaymentSchema = z.object({
-  id: z.uuid(), expenseId: z.uuid(), eventId: z.uuid(), method: paymentMethodSchema,
-  amountCents: z.number().int().positive(), note: z.string().nullable(), createdAt: z.number().int().nonnegative(),
+  id: z.uuid(),
+  expenseId: z.uuid(),
+  eventId: z.uuid(),
+  method: paymentMethodSchema,
+  amountCents: z.number().int().positive(),
+  note: z.string().nullable(),
+  createdAt: z.number().int().nonnegative(),
 });
 
 export const expenseStateSchema = z.object({
@@ -115,20 +120,56 @@ export const updateExpensePaymentStatusInputSchema = z.object({
 });
 
 export const recordExpensePaymentInputSchema = z.object({
-  expenseId: z.uuid(), method: paymentMethodSchema, amountCents: z.number().int().positive(), note: z.string().trim().max(240).optional(),
+  expenseId: z.uuid(),
+  method: paymentMethodSchema,
+  amountCents: z.number().int().positive(),
+  note: z.string().trim().max(240).optional(),
 });
 
 export const capitalContributionKindSchema = z.enum(['cash', 'inventory']);
 export const capitalContributionSchema = z.object({
-  id: z.uuid(), eventId: z.uuid(), contributorName: z.string().trim().min(2).max(100), kind: capitalContributionKindSchema,
-  amountCents: z.number().int().positive(), remainingStockValueCents: z.number().int().nonnegative(), reimbursedCents: z.number().int().nonnegative(), recoverableCents: z.number().int().nonnegative(), recoveryPriority: z.number().int().positive(), note: z.string().nullable(), status: z.enum(['active', 'cancelled']), createdAt: z.number().int().nonnegative(), updatedAt: z.number().int().nonnegative(),
+  id: z.uuid(),
+  eventId: z.uuid(),
+  contributorName: z.string().trim().min(2).max(100),
+  kind: capitalContributionKindSchema,
+  amountCents: z.number().int().positive(),
+  remainingStockValueCents: z.number().int().nonnegative(),
+  reimbursedCents: z.number().int().nonnegative(),
+  recoverableCents: z.number().int().nonnegative(),
+  recoveryPriority: z.number().int().positive(),
+  note: z.string().nullable(),
+  status: z.enum(['active', 'cancelled']),
+  createdAt: z.number().int().nonnegative(),
+  updatedAt: z.number().int().nonnegative(),
 });
 export const capitalStateSchema = z.object({
-  activeEventId: z.uuid().nullable(), contributions: z.array(capitalContributionSchema), contributedCents: z.number().int().nonnegative(), reimbursedCents: z.number().int().nonnegative(), recoverableCents: z.number().int().nonnegative(), remainingStockAssetCents: z.number().int().nonnegative(), cashReimbursementsCents: z.number().int().nonnegative(),
+  activeEventId: z.uuid().nullable(),
+  contributions: z.array(capitalContributionSchema),
+  contributedCents: z.number().int().nonnegative(),
+  reimbursedCents: z.number().int().nonnegative(),
+  recoverableCents: z.number().int().nonnegative(),
+  remainingStockAssetCents: z.number().int().nonnegative(),
+  cashReimbursementsCents: z.number().int().nonnegative(),
 });
-export const createCapitalContributionInputSchema = z.object({ contributorName: z.string().trim().min(2).max(100), kind: capitalContributionKindSchema, amountCents: z.number().int().positive(), remainingStockValueCents: z.number().int().nonnegative().optional(), recoveryPriority: z.number().int().positive().optional(), note: z.string().trim().max(240).optional() });
-export const updateCapitalContributionInputSchema = z.object({ contributionId: z.uuid(), remainingStockValueCents: z.number().int().nonnegative(), note: z.string().trim().max(240).optional() });
-export const recordCapitalReimbursementInputSchema = z.object({ contributionId: z.uuid(), method: paymentMethodSchema, amountCents: z.number().int().positive(), note: z.string().trim().max(240).optional() });
+export const createCapitalContributionInputSchema = z.object({
+  contributorName: z.string().trim().min(2).max(100),
+  kind: capitalContributionKindSchema,
+  amountCents: z.number().int().positive(),
+  remainingStockValueCents: z.number().int().nonnegative().optional(),
+  recoveryPriority: z.number().int().positive().optional(),
+  note: z.string().trim().max(240).optional(),
+});
+export const updateCapitalContributionInputSchema = z.object({
+  contributionId: z.uuid(),
+  remainingStockValueCents: z.number().int().nonnegative(),
+  note: z.string().trim().max(240).optional(),
+});
+export const recordCapitalReimbursementInputSchema = z.object({
+  contributionId: z.uuid(),
+  method: paymentMethodSchema,
+  amountCents: z.number().int().positive(),
+  note: z.string().trim().max(240).optional(),
+});
 
 export const updateExpenseInputSchema = z.object({
   expenseId: z.uuid(),

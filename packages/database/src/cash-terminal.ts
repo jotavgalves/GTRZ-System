@@ -24,7 +24,15 @@ function applyOperatingCosts(
     return { ...state, terminalFeesCents: 0, stockCostCents: 0 };
   }
 
-  const saved = database.sqlite.prepare(`SELECT COALESCE(SUM(p.fee_cents), 0) AS saved_cents, COALESCE(SUM(CASE WHEN p.fee_cents IS NULL AND p.method = 'debit-card' THEN p.amount_cents ELSE 0 END), 0) AS legacy_debit_cents, COALESCE(SUM(CASE WHEN p.fee_cents IS NULL AND p.method = 'credit-card' THEN p.amount_cents ELSE 0 END), 0) AS legacy_credit_cents FROM payments p INNER JOIN orders o ON o.id = p.order_id WHERE o.event_id = ? AND o.status = 'paid'`).get(state.activeEventId) as {saved_cents:number;legacy_debit_cents:number;legacy_credit_cents:number};
+  const saved = database.sqlite
+    .prepare(
+      `SELECT COALESCE(SUM(p.fee_cents), 0) AS saved_cents, COALESCE(SUM(CASE WHEN p.fee_cents IS NULL AND p.method = 'debit-card' THEN p.amount_cents ELSE 0 END), 0) AS legacy_debit_cents, COALESCE(SUM(CASE WHEN p.fee_cents IS NULL AND p.method = 'credit-card' THEN p.amount_cents ELSE 0 END), 0) AS legacy_credit_cents FROM payments p INNER JOIN orders o ON o.id = p.order_id WHERE o.event_id = ? AND o.status = 'paid'`,
+    )
+    .get(state.activeEventId) as {
+    saved_cents: number;
+    legacy_debit_cents: number;
+    legacy_credit_cents: number;
+  };
   const fees = calculatePaymentTerminalFees(database, state.activeEventId, {
     debitCardCents: saved.legacy_debit_cents,
     creditCardCents: saved.legacy_credit_cents,
@@ -35,7 +43,8 @@ function applyOperatingCosts(
     ...state,
     terminalFeesCents: saved.saved_cents + fees.totalFeeCents,
     stockCostCents,
-    projectedResultCents: state.projectedResultCents - stockCostCents - saved.saved_cents - fees.totalFeeCents,
+    projectedResultCents:
+      state.projectedResultCents - stockCostCents - saved.saved_cents - fees.totalFeeCents,
   };
 }
 

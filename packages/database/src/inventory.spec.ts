@@ -188,20 +188,25 @@ describe('inventory database', () => {
     });
     const lot = listStockPurchaseLots(database, productId)[0];
     if (lot === undefined) throw new Error('Lote não criado.');
-    expect(correctStockPurchaseLot(database, {
-      movementId: lot.movementId,
-      totalCostCents: 1_250,
-      reason: 'Nota de compra corrigida',
-    })).toMatchObject({ totalCostCents: 1_250, voided: false });
-    expect(voidStockPurchaseLot(database, {
-      movementId: lot.movementId,
-      reason: 'Entrada de teste',
-    })).toMatchObject({ voided: true });
-    expect(getInventoryState(database).products.find((item) => item.id === productId)?.quantity).toBe(0);
+    expect(
+      correctStockPurchaseLot(database, {
+        movementId: lot.movementId,
+        totalCostCents: 1_250,
+        reason: 'Nota de compra corrigida',
+      }),
+    ).toMatchObject({ totalCostCents: 1_250, voided: false });
+    expect(
+      voidStockPurchaseLot(database, {
+        movementId: lot.movementId,
+        reason: 'Entrada de teste',
+      }),
+    ).toMatchObject({ voided: true });
+    expect(
+      getInventoryState(database).products.find((item) => item.id === productId)?.quantity,
+    ).toBe(0);
     expect(listStockPurchaseLots(database, productId)[0]).toMatchObject({ voided: true });
     database.close();
   });
-
 
   it('mantém saldos independentes para o mesmo produto em eventos diferentes', async () => {
     const database = await createTemporaryDatabase();

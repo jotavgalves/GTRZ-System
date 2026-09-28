@@ -20,7 +20,7 @@ export function CategoryForm({
   const [editing, setEditing] = useState<string | null>(null);
   const [draft, setDraft] = useState('');
   const [error, setError] = useState<string | null>(null);
-  const submit = async (event: SyntheticEvent<HTMLFormElement>) => {
+  const submit = async (event: SyntheticEvent<HTMLFormElement>): Promise<void> => {
     event.preventDefault();
     try {
       await onSubmit(name);
@@ -37,7 +37,9 @@ export function CategoryForm({
           <input
             maxLength={60}
             minLength={2}
-            onChange={(event) => setName(event.target.value)}
+            onChange={(event) => {
+              setName(event.target.value);
+            }}
             placeholder="Ex.: Cervejas"
             required
             value={name}
@@ -62,19 +64,23 @@ export function CategoryForm({
               onSubmit={(event) => {
                 event.preventDefault();
                 void onUpdate(category.id, draft)
-                  .then(() => setEditing(null))
-                  .catch((reason) =>
+                  .then(() => {
+                    setEditing(null);
+                  })
+                  .catch((reason: unknown) => {
                     setError(
                       reason instanceof Error ? reason.message : 'Não foi possível atualizar.',
-                    ),
-                  );
+                    );
+                  });
               }}
             >
               <input
                 autoFocus
                 maxLength={60}
                 minLength={2}
-                onChange={(event) => setDraft(event.target.value)}
+                onChange={(event) => {
+                  setDraft(event.target.value);
+                }}
                 required
                 value={draft}
               />
@@ -90,7 +96,9 @@ export function CategoryForm({
                 aria-label="Cancelar edição"
                 className="icon-button"
                 disabled={busy}
-                onClick={() => setEditing(null)}
+                onClick={() => {
+                  setEditing(null);
+                }}
                 type="button"
               >
                 <X size={15} />
@@ -117,11 +125,11 @@ export function CategoryForm({
                 disabled={busy}
                 onClick={() => {
                   if (window.confirm(`Excluir a categoria ${category.name}?`))
-                    void onDelete(category.id).catch((reason) =>
+                    void onDelete(category.id).catch((reason: unknown) => {
                       setError(
                         reason instanceof Error ? reason.message : 'Não foi possível excluir.',
-                      ),
-                    );
+                      );
+                    });
                 }}
                 type="button"
               >

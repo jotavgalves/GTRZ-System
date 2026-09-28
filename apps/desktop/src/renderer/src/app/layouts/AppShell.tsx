@@ -1,11 +1,12 @@
 import { Cloud, Database, Shield, WifiOff } from 'lucide-react';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState, type CSSProperties } from 'react';
 import { NavLink, Outlet } from 'react-router';
 
 import type { CloudSyncStatus, SystemInfo } from '@gtrz/contracts';
 
 import gtrzLockup from '../../assets/brand/gtrz-lockup.svg';
 import { navigationModules } from '../../shared/navigation/modules';
+import { preloadViewState } from '../../shared/navigation/view-state-cache';
 import { ProfileSwitcher } from '../../shared/session/ProfileSwitcher';
 import { useSession } from '../../shared/session/session-context';
 
@@ -52,6 +53,29 @@ export function AppShell(): React.JSX.Element {
   }, []);
 
   useEffect(() => {
+    // Warm every sidebar snapshot once. Navigation then swaps complete views instead of first
+    // painting their empty defaults while local SQLite responds.
+    void Promise.allSettled([
+      preloadViewState('dashboard', () => window.gtrz.dashboard.getState()),
+      preloadViewState('inventory', () => window.gtrz.inventory.getState()),
+      preloadViewState('operations', () => window.gtrz.operations.getState()),
+      preloadViewState('audit', () => window.gtrz.audit.list({ limit: 100 })),
+      preloadViewState('tickets', () => window.gtrz.tickets.getState()),
+      preloadViewState('vouchers', () => window.gtrz.vouchers.getState()),
+      preloadViewState('expenses', () => window.gtrz.expenses.getState()),
+      preloadViewState('cash', () => window.gtrz.cash.getState()),
+      preloadViewState('events', () => window.gtrz.events.list()),
+      preloadViewState('food', async () => {
+        const [food, inventory] = await Promise.all([
+          window.gtrz.food.getState(),
+          window.gtrz.inventory.getState(),
+        ]);
+        return { food, inventory };
+      }),
+    ]);
+  }, []);
+
+  useEffect(() => {
     let mounted = true;
     const loadCloudStatus = (): void => {
       void window.gtrz.settings
@@ -65,6 +89,7 @@ export function AppShell(): React.JSX.Element {
     };
 
     loadCloudStatus();
+    // This is a local IPC read. It refreshes the visible connection state without polling Cloudflare.
     const interval = window.setInterval(loadCloudStatus, 15_000);
     return () => {
       mounted = false;
@@ -76,6 +101,9 @@ export function AppShell(): React.JSX.Element {
     () => navigationModules.filter((module) => module.profiles.includes(activeProfile)),
     [activeProfile],
   );
+  const navigationStyle = { '--sidebar-item-count': visibleModules.length } as CSSProperties;
+  const navigationContainerClassName =
+    visibleModules.length <= 3 ? 'sidebar-nav sidebar-nav--compact' : 'sidebar-nav';
 
   return (
     <div className="app-shell">
@@ -97,7 +125,11 @@ export function AppShell(): React.JSX.Element {
           </small>
         </div>
 
-        <nav className="sidebar-nav" aria-label="Módulos do sistema">
+        <nav
+          className={navigationContainerClassName}
+          aria-label="Módulos do sistema"
+          style={navigationStyle}
+        >
           {visibleModules.map((module) => {
             const Icon = module.icon;
             return (

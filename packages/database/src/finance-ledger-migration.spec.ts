@@ -25,7 +25,9 @@ describe('finance ledger migration recovery', () => {
     const migration = recovered.sqlite
       .prepare('SELECT version FROM schema_migrations WHERE version = 18')
       .get() as { readonly version: number } | undefined;
-    const columns = recovered.sqlite.pragma('table_info(payments)') as Array<{ readonly name: string }>;
+    const columns = recovered.sqlite.pragma('table_info(payments)') as {
+      readonly name: string;
+    }[];
 
     expect(migration?.version).toBe(18);
     expect(columns.map((column) => column.name)).toContain('fee_cents');
@@ -59,7 +61,10 @@ describe('finance ledger migration recovery', () => {
     const recovered = openDatabase(filePath);
     const payment = recovered.sqlite
       .prepare('SELECT method, cash_register_id FROM expense_payments WHERE id = ?')
-      .get('legacy-payment') as { readonly method: string; readonly cash_register_id: string | null };
+      .get('legacy-payment') as {
+      readonly method: string;
+      readonly cash_register_id: string | null;
+    };
 
     expect(payment).toEqual({ method: 'pix', cash_register_id: null });
     recovered.close();

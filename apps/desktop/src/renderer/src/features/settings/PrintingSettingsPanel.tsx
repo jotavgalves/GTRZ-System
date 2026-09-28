@@ -6,6 +6,7 @@ import type { PrinterInfo, PrintingSettings, ThermalPaperWidth } from '@gtrz/con
 const DEFAULT_SETTINGS: PrintingSettings = {
   automaticPrinting: false,
   deviceName: null,
+  machineName: '',
   paperWidthMm: 80,
 };
 
@@ -85,6 +86,20 @@ export function PrintingSettingsPanel(): React.JSX.Element {
           type="checkbox"
         />
         Imprimir automaticamente após concluir a venda
+      </label>
+
+      <label className="form-field">
+        <span>Nome deste computador na nuvem</span>
+        <input
+          disabled={loading}
+          maxLength={60}
+          minLength={2}
+          onChange={(event) => {
+            setSettings((current) => ({ ...current, machineName: event.target.value }));
+          }}
+          required
+          value={settings.machineName}
+        />
       </label>
 
       <label className="form-field">

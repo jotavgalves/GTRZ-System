@@ -15,6 +15,8 @@ export default defineConfig(
       '**/release/**',
       '**/coverage/**',
       '**/.wrangler/**',
+      '**/output/**',
+      '**/tmp/**',
       'LOGOS.zip',
     ],
   },

@@ -24,8 +24,12 @@ export function VouchersPage(): React.JSX.Element {
     changeStatus,
     updateVoucher,
     addBalance,
+    setVoucherTotal,
     deleteVoucher,
   } = useVouchers();
+  if (loading && state === null) {
+    return <div className="route-state">Carregando vouchers…</div>;
+  }
   const vouchers = state?.vouchers ?? [];
   const deletedVouchers = state?.deletedVouchers ?? [];
   const servicePoints = state?.servicePoints ?? [];
@@ -116,6 +120,7 @@ export function VouchersPage(): React.JSX.Element {
                 )}
                 key={voucher.id}
                 onAddBalance={addBalance}
+                onSetTotal={setVoucherTotal}
                 onChangeStatus={changeStatus}
                 onDelete={deleteVoucher}
                 onUpdate={updateVoucher}
@@ -143,6 +148,7 @@ export function VouchersPage(): React.JSX.Element {
                 hasUsage
                 key={voucher.id}
                 onAddBalance={addBalance}
+                onSetTotal={setVoucherTotal}
                 onChangeStatus={changeStatus}
                 onDelete={deleteVoucher}
                 onUpdate={updateVoucher}

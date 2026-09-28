@@ -25,7 +25,9 @@ export function EnvironmentSelector(): React.JSX.Element | null {
   const [switching, setSwitching] = useState<RuntimeEnvironment | null>(null);
 
   useEffect(() => {
-    void window.gtrz.system.getInfo().then((info) => setCurrent(info.environment));
+    void window.gtrz.system.getInfo().then((info) => {
+      setCurrent(info.environment);
+    });
   }, []);
 
   const switchEnvironment = (environment: RuntimeEnvironment): void => {
@@ -51,15 +53,23 @@ export function EnvironmentSelector(): React.JSX.Element | null {
           const Icon = environment.value === 'production' ? Cloud : FlaskConical;
           return (
             <button
-              className={selected ? 'cloud-environment__choice cloud-environment__choice--selected' : 'cloud-environment__choice'}
+              className={
+                selected
+                  ? 'cloud-environment__choice cloud-environment__choice--selected'
+                  : 'cloud-environment__choice'
+              }
               disabled={selected || switching !== null}
               key={environment.value}
-              onClick={() => switchEnvironment(environment.value)}
+              onClick={() => {
+                switchEnvironment(environment.value);
+              }}
               type="button"
             >
               <Icon size={18} aria-hidden="true" />
               <span>
-                <strong>{switching === environment.value ? 'Abrindo ambiente...' : environment.label}</strong>
+                <strong>
+                  {switching === environment.value ? 'Abrindo ambiente...' : environment.label}
+                </strong>
                 <small>{environment.description}</small>
               </span>
             </button>

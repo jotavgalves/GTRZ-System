@@ -15,6 +15,7 @@ import {
   createInventoryProduct,
   createProductCategory,
   createServicePoint,
+  deleteExpense,
   getCashState,
   getExpenseState,
   getOperationState,
@@ -28,6 +29,7 @@ import {
   updateExpense,
   type DatabaseContext,
 } from './index';
+import { getDashboardStateWithTerminal } from './dashboard-terminal';
 import { createManagedVoucher } from './voucher-management';
 
 let temporaryDirectory: string | null = null;
@@ -111,7 +113,9 @@ describe('cash and expenses database', () => {
       amountCents: 300,
       paymentMethod: 'cash',
     });
-    const cashExpense = getExpenseState(database).expenses.find((expense) => expense.description === 'Gelo emergencial');
+    const cashExpense = getExpenseState(database).expenses.find(
+      (expense) => expense.description === 'Gelo emergencial',
+    );
     if (cashExpense === undefined) throw new Error('Despesa não criada.');
     recordExpensePayment(database, { expenseId: cashExpense.id, method: 'cash', amountCents: 300 });
     createExpense(database, {
@@ -154,13 +158,146 @@ describe('cash and expenses database', () => {
     expect(expense.paymentStatus).toBe('open');
     expect(getCashState(database).projectedResultCents).toBe(-1200);
 
-    const partial = recordExpensePayment(database, { expenseId: expense.id, method: 'pix', amountCents: 400 });
+    const partial = recordExpensePayment(database, {
+      expenseId: expense.id,
+      method: 'pix',
+      amountCents: 400,
+    });
     expect(partial.paymentStatus).toBe('partial');
     expect(getCashState(database).projectedResultCents).toBe(-1200);
 
-    const paid = recordExpensePayment(database, { expenseId: expense.id, method: 'pix', amountCents: 800 });
+    const paid = recordExpensePayment(database, {
+      expenseId: expense.id,
+      method: 'pix',
+      amountCents: 800,
+    });
     expect(paid.paymentStatus).toBe('paid');
     expect(getCashState(database).projectedResultCents).toBe(-1200);
+    database.close();
+  });
+
+  it('concilia todos os meios de pagamento de despesas sem duplicar custo de estoque', async () => {
+    const database = await createTemporaryDatabase();
+    createEvent(database, { name: 'Evento conciliação completa', startsAt: Date.now() });
+    const productId = seedProduct(database);
+    openCashRegister(database, 1000);
+
+    closeOrder(database, {
+      orderId: createOrder(database, productId),
+      discountCents: 0,
+      payments: [{ method: 'cash', amountCents: 1000, receivedCents: 1000 }],
+    });
+
+    const cash = createExpense(database, {
+      category: 'Operação',
+      description: 'Compra em dinheiro',
+      amountCents: 100,
+      paymentMethod: 'cash',
+    });
+    const pix = createExpense(database, {
+      category: 'Operação',
+      description: 'Compra em PIX',
+      amountCents: 200,
+      paymentMethod: 'pix',
+    });
+    const credit = createExpense(database, {
+      category: 'Operação',
+      description: 'Compra no crédito',
+      amountCents: 300,
+      paymentMethod: 'credit-card',
+    });
+    const debit = createExpense(database, {
+      category: 'Operação',
+      description: 'Compra no débito',
+      amountCents: 400,
+      paymentMethod: 'debit-card',
+    });
+
+    recordExpensePayment(database, { expenseId: cash.id, method: 'cash', amountCents: 100 });
+    recordExpensePayment(database, { expenseId: pix.id, method: 'pix', amountCents: 200 });
+    recordExpensePayment(database, {
+      expenseId: credit.id,
+      method: 'credit-card',
+      amountCents: 300,
+    });
+    recordExpensePayment(database, {
+      expenseId: debit.id,
+      method: 'debit-card',
+      amountCents: 400,
+    });
+
+    expect(getCashState(database)).toMatchObject({
+      grossSalesCents: 1000,
+      activeExpensesCents: 1000,
+      paidExpensesCents: 1000,
+      outstandingExpensesCents: 0,
+      cashExpensesCents: 100,
+      expectedCashCents: 1900,
+      stockCostCents: 2000,
+      projectedResultCents: -2000,
+    });
+    expect(getDashboardStateWithTerminal(database)).toMatchObject({
+      grossSalesCents: 1000,
+      activeExpensesCents: 1000,
+      projectedResultCents: -2000,
+      inventory: { stockCostCents: 2000 },
+    });
+    database.close();
+  });
+
+  it('não permite apagar ou cancelar pagamentos reais pelo atalho da despesa', async () => {
+    const database = await createTemporaryDatabase();
+    createEvent(database, { name: 'Evento estorno de despesa', startsAt: Date.now() });
+    openCashRegister(database, 500);
+    const paid = createExpense(database, {
+      category: 'Operação',
+      description: 'Despesa paga',
+      amountCents: 300,
+      paymentMethod: 'cash',
+    });
+    recordExpensePayment(database, { expenseId: paid.id, method: 'cash', amountCents: 300 });
+
+    expect(() =>
+      updateExpense(database, {
+        expenseId: paid.id,
+        category: paid.category,
+        description: paid.description,
+        amountCents: 299,
+        paymentMethod: paid.paymentMethod,
+        paymentStatus: 'paid',
+      }),
+    ).toThrow('não pode ser menor que os pagamentos reais');
+    expect(() =>
+      cancelExpense(database, { expenseId: paid.id, reason: 'Erro de lançamento' }),
+    ).toThrow('Registre o estorno financeiro antes');
+    expect(() =>
+      deleteExpense(database, { expenseId: paid.id, reason: 'Erro de lançamento' }),
+    ).toThrow('Registre o estorno financeiro antes');
+    expect(getCashState(database)).toMatchObject({
+      activeExpensesCents: 300,
+      paidExpensesCents: 300,
+      cashExpensesCents: 300,
+      expectedCashCents: 200,
+    });
+
+    const unpaid = createExpense(database, {
+      category: 'Operação',
+      description: 'Despesa cadastrada por engano',
+      amountCents: 100,
+      paymentMethod: 'pix',
+    });
+    cancelExpense(database, { expenseId: unpaid.id, reason: 'Ainda não foi paga' });
+    expect(getCashState(database).activeExpensesCents).toBe(300);
+    const draft = createExpense(database, {
+      category: 'Operação',
+      description: 'Rascunho duplicado',
+      amountCents: 100,
+      paymentMethod: 'pix',
+    });
+    expect(deleteExpense(database, { expenseId: draft.id, reason: 'Cadastro duplicado' })).toEqual({
+      expenseId: draft.id,
+      deleted: true,
+    });
     database.close();
   });
 
