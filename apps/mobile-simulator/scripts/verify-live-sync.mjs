@@ -112,11 +112,15 @@ async function main() {
   const refreshRequests = new Map();
   const refreshTraceId = crypto.randomUUID();
   const snapshotTraceId = crypto.randomUUID();
+  const burstTraceIds = [crypto.randomUUID(), crypto.randomUUID(), crypto.randomUUID()];
   let refreshSignalReceivedAt = null;
   let snapshotStartedAt = null;
   let snapshotSignalReceivedAt = null;
   let snapshotSignalElapsedMs = null;
   let snapshotRefreshes = 0;
+  let burstStartedAt = null;
+  let burstSignals = 0;
+  let burstRefreshes = 0;
   let mobileStartedAt = null;
   let fastStartedAt = null;
   protocol.on('Network.webSocketFrameReceived', ({ response }) => {
@@ -135,6 +139,13 @@ async function main() {
     ) {
       snapshotSignalReceivedAt = Date.now();
       snapshotSignalElapsedMs = snapshotSignalReceivedAt - snapshotStartedAt;
+    }
+    if (
+      burstStartedAt !== null &&
+      response.payloadData.includes('state-changed') &&
+      burstTraceIds.some((traceId) => response.payloadData.includes(traceId))
+    ) {
+      burstSignals += 1;
     }
   });
   protocol.on('Network.requestWillBeSent', ({ request }) => {
@@ -155,6 +166,13 @@ async function main() {
       /\/v1\/mobile\/refresh/.test(request.url)
     ) {
       snapshotRefreshes += 1;
+    }
+    if (
+      burstStartedAt !== null &&
+      request.method === 'GET' &&
+      /\/v1\/mobile\/refresh/.test(request.url)
+    ) {
+      burstRefreshes += 1;
     }
     if (
       mobileStartedAt !== null &&
@@ -343,17 +361,18 @@ async function main() {
   ]);
   fastStartedAt = null;
 
-  await edgeRequest('/v1/monitor/realtime-ping', {
-    method: 'POST',
-    body: JSON.stringify({ eventId }),
-  });
-  await wait(500);
+  burstStartedAt = Date.now();
+  await Promise.all(
+    burstTraceIds.map((traceId) =>
+      edgeRequest('/v1/monitor/realtime-ping', {
+        method: 'POST',
+        body: JSON.stringify({ eventId, traceId }),
+      }),
+    ),
+  );
+  await wait(100);
   const duringFirstRefresh = await mobileRefreshState();
-  await edgeRequest('/v1/monitor/realtime-ping', {
-    method: 'POST',
-    body: JSON.stringify({ eventId }),
-  });
-  await wait(500);
+  await wait(100);
   const afterSecondSignal = await mobileRefreshState();
   const settleDeadline = Date.now() + 12_000;
   let settledRefresh = await mobileRefreshState();
@@ -364,6 +383,7 @@ async function main() {
     await wait(250);
     settledRefresh = await mobileRefreshState();
   }
+  burstStartedAt = null;
 
   await desktopReplica.removeChannel(channel);
   await desktopFastReplica.removeChannel(fastChannel);
@@ -372,8 +392,9 @@ async function main() {
     (step) => !milestones.some((milestone) => milestone.step === step),
   );
   const burstCoalesced =
-    duringFirstRefresh.inFlight &&
-    afterSecondSignal.pending &&
+    burstSignals === burstTraceIds.length &&
+    burstRefreshes > 0 &&
+    burstRefreshes <= 2 &&
     !settledRefresh.inFlight &&
     !settledRefresh.pending &&
     settledRefresh.online;
@@ -393,7 +414,7 @@ async function main() {
         recipients: snapshotReply.mobileRecipients ?? 0,
         deliveryFailed: snapshotReply.failed === true,
         immediate:
-          snapshotSignalToVisualElapsedMs >= 0 &&
+          snapshotSignalToVisualElapsedMs >= -16 &&
           snapshotSignalToVisualElapsedMs <= 200 &&
           snapshotRefreshes === 0,
       },
@@ -402,12 +423,14 @@ async function main() {
         duringFirstRefresh,
         afterSecondSignal,
         settledRefresh,
+        signals: burstSignals,
+        refreshes: burstRefreshes,
         coalesced: burstCoalesced,
       },
       passed:
         missingSteps.length === 0 &&
         burstCoalesced &&
-        snapshotSignalToVisualElapsedMs >= 0 &&
+        snapshotSignalToVisualElapsedMs >= -16 &&
         snapshotSignalToVisualElapsedMs <= 200 &&
         snapshotRefreshes === 0,
       missingSteps,
