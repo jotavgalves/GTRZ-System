@@ -2089,6 +2089,15 @@ export class CloudSyncService {
               return;
             }
             this.#canonicalFastAppliedAt.set(eventId, Date.now());
+            const payload = journalPayload(journalEvent.payload);
+            if (payload?.action === 'operations.order-paid') {
+              // A confirmed mobile sale has already queued its receipt in the
+              // same cloud transaction. Start the available local print agent
+              // immediately instead of waiting for the three-second outbox tick.
+              void this.#processPrintQueue(database, eventId, deviceId, pairingKey).catch(
+                () => undefined,
+              );
+            }
             const pending = this.#canonicalReconciliationTimers.get(eventId);
             if (pending !== undefined) {
               clearTimeout(pending);

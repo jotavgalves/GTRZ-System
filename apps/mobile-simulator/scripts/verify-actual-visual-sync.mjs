@@ -450,6 +450,15 @@ async function main() {
   await mobilePage.locator('#charge').click();
   const saleResponse = await saleResponsePromise;
   const saleResponseBody = await saleResponse.json().catch(() => null);
+  if (
+    saleResponse.status() !== 200 ||
+    saleResponseBody === null ||
+    typeof saleResponseBody !== 'object' ||
+    Array.isArray(saleResponseBody) ||
+    saleResponseBody.receiptQueued !== true
+  ) {
+    throw new Error('A venda móvel não confirmou a criação atômica da nota na fila de impressão.');
+  }
   await mobilePage
     .getByRole('heading', { name: 'Venda confirmada' })
     .waitFor({ timeout: MAX_VISUAL_WAIT_MS });
@@ -514,6 +523,7 @@ async function main() {
       paidOrders: dashboardAfter.orders.paid,
     },
     saleCents: product.salePriceCents,
+    receiptQueued: saleResponseBody.receiptQueued === true,
     screenshots: [
       '01-desktop-antes.png',
       '02-mobile-antes.png',

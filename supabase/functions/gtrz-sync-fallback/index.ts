@@ -529,7 +529,7 @@ Deno.serve(async (request) => {
     const commandId = string(input.commandId, 'commandId'),
       saleId = string(input.saleId, 'saleId'),
       commitStartedAt = performance.now(),
-      { data, error } = await db.rpc('gtrz_commit_mobile_sale_fast', {
+      { data, error } = await db.rpc('gtrz_commit_mobile_sale_with_receipt', {
         p_token_hash: await sha(raw),
         p_command_id: commandId,
         p_sale_id: saleId,
@@ -568,13 +568,10 @@ Deno.serve(async (request) => {
     if (!event || !payload) throw new Error('A venda móvel não retornou o evento canônico.');
     const desktopDeliveryStartedAt = performance.now();
     const desktopDelivery = notifyRealtime(eventId, version, false, event, false, null, null, true);
-    const receiptStartedAt = performance.now();
-    await queueReceipt(eventId, commandId, payload);
-    const receiptFinishedAt = performance.now();
     const timing = {
       requestBeforeCommitMs: Math.round(commitStartedAt - requestStartedAt),
       commitMs: Math.round(commitFinishedAt - commitStartedAt),
-      receiptQueueMs: Math.round(receiptFinishedAt - receiptStartedAt),
+      receiptQueued: data.receiptQueued === true,
       canonicalServer:
         asObj(data.serverTiming) && typeof data.serverTiming.commitMs === 'number'
           ? data.serverTiming
