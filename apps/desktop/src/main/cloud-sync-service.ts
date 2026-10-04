@@ -25,6 +25,7 @@ import {
   type BackupRecord,
 } from '@gtrz/contracts';
 import {
+  createDatabaseSnapshot,
   getSessionState,
   listCombos,
   redeemVouchers,
@@ -769,12 +770,88 @@ export class CloudSyncService {
       .get(eventId) as { readonly id: string; readonly name: string } | undefined;
     if (event === undefined)
       throw new Error('O evento selecionado não está disponível neste computador.');
+    const deviceId = await this.#readOrCreateDeviceId();
+    const pairingKey = await this.#readPairingKey();
+    if (pairingKey === null)
+      throw new Error('A chave da nuvem não foi encontrada neste computador.');
+
+    // The global activation is only announced after its verified SQLite baseline
+    // is already private in the canonical cloud. A fresh desktop therefore never
+    // depends on another computer being online to reconstruct the event.
+    await this.#announceDesktopPresence(pairingKey, deviceId, event.id);
+    await this.#publishReplicaSnapshot(database, event.id, pairingKey, deviceId);
     await this.#globalControlRequest('/v1/monitor/global-event', {
       eventId: event.id,
       eventName: event.name,
     });
     setActiveEvent(database, event.id);
     this.#onDataChanged();
+  }
+
+  async #announceDesktopPresence(
+    pairingKey: string,
+    deviceId: string,
+    activeEventId: string | null,
+  ): Promise<void> {
+    const response = await fetch(`${this.#endpoint}/v1/monitor/heartbeat`, {
+      method: 'POST',
+      headers: await this.#cloudHeaders(pairingKey, { 'Content-Type': 'application/json' }),
+      body: JSON.stringify({
+        deviceId,
+        label: this.#getDeviceLabel(),
+        activeEventId,
+        latencyMs: this.#lastLatencyMs,
+      }),
+      signal: AbortSignal.timeout(CONNECTION_TIMEOUT_MS),
+    });
+    if (!response.ok) throw new Error('A nuvem recusou o sinal deste computador.');
+  }
+
+  async #publishReplicaSnapshot(
+    database: DatabaseContext,
+    eventId: string,
+    pairingKey: string,
+    deviceId: string,
+  ): Promise<void> {
+    if (this.#databaseRuntime === null) {
+      throw new Error('A cópia inicial exige um banco local pronto.');
+    }
+
+    const temporaryDirectory = await mkdtemp(path.join(tmpdir(), 'gtrz-replica-upload-'));
+    const snapshotPath = path.join(temporaryDirectory, 'database.sqlite');
+    try {
+      await createDatabaseSnapshot(database, snapshotPath);
+      const contents = await readFile(snapshotPath);
+      if (contents.byteLength === 0 || contents.byteLength > 50 * 1024 * 1024) {
+        throw new Error('A cópia inicial do evento precisa ter entre 1 byte e 50 MB.');
+      }
+      const checksum = createHash('sha256').update(contents).digest('hex');
+      const response = await fetch(
+        `${this.#endpoint}/v1/events/${encodeURIComponent(eventId)}/replica-snapshot`,
+        {
+          method: 'POST',
+          headers: await this.#cloudHeaders(pairingKey, {
+            'Content-Type': 'application/vnd.sqlite3',
+            'X-GTRZ-Device-Id': deviceId,
+            'X-GTRZ-Snapshot-Sha256': checksum,
+            'X-GTRZ-Snapshot-Size': String(contents.byteLength),
+          }),
+          body: new Uint8Array(contents),
+          signal: AbortSignal.timeout(30_000),
+        },
+      );
+      const payload: unknown = await response.json().catch(() => null);
+      if (
+        !response.ok ||
+        !isRecord(payload) ||
+        typeof payload.snapshotId !== 'string' ||
+        payload.eventId !== eventId
+      ) {
+        throw new Error('A nuvem não confirmou a cópia inicial do evento.');
+      }
+    } finally {
+      await rm(temporaryDirectory, { force: true, recursive: true });
+    }
   }
 
   async resetGlobalEvent(
@@ -1088,7 +1165,14 @@ export class CloudSyncService {
     if (expectedChecksum === null || !/^[a-f0-9]{64}$/iu.test(expectedChecksum)) {
       throw new Error('A cópia inicial não possui verificação de integridade.');
     }
+    const expectedSize = Number(response.headers.get('X-GTRZ-Snapshot-Size'));
+    if (!Number.isSafeInteger(expectedSize) || expectedSize <= 0) {
+      throw new Error('A cópia inicial não informa um tamanho válido.');
+    }
     const contents = Buffer.from(await response.arrayBuffer());
+    if (contents.byteLength !== expectedSize) {
+      throw new Error('A cópia inicial foi recebida incompleta.');
+    }
     if (createHash('sha256').update(contents).digest('hex') !== expectedChecksum) {
       throw new Error('A cópia inicial falhou na verificação de integridade.');
     }

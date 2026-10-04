@@ -1,5 +1,9 @@
 import { createClient } from 'npm:@supabase/supabase-js@2.93.1';
 
+declare const EdgeRuntime: {
+  waitUntil(promise: Promise<unknown>): void;
+};
+
 type Obj = Record<string, unknown>;
 type Permission = 'sales' | 'inventory' | 'tickets' | 'expenses' | 'vouchers';
 type MobileProjection = { catalog: Obj; context: Obj };
@@ -17,6 +21,8 @@ const cors = {
   'Access-Control-Allow-Headers':
     'authorization, apikey, content-type, x-gtrz-key, x-gtrz-device-id, x-gtrz-session',
   'Access-Control-Allow-Methods': 'GET, POST, PATCH, DELETE, OPTIONS',
+  'Access-Control-Expose-Headers':
+    'x-gtrz-snapshot-event, x-gtrz-snapshot-sha256, x-gtrz-snapshot-size',
   // Chromium honors up to two hours. The first authenticated request warms this cache.
   'Access-Control-Max-Age': '7200',
 };
@@ -63,6 +69,9 @@ async function sha(value: string): Promise<string> {
   return hex(
     new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value))),
   );
+}
+async function shaBytes(value: ArrayBuffer): Promise<string> {
+  return hex(new Uint8Array(await crypto.subtle.digest('SHA-256', value)));
 }
 async function hashPassword(password: string, salt: string): Promise<string> {
   const key = await crypto.subtle.importKey(
@@ -779,6 +788,109 @@ Deno.serve(async (request) => {
         topic: await desktopRealtimeTopic(
           string(decodeURIComponent(desktopRealtimeTopicRoute[1]), 'eventId', 160),
         ),
+      });
+    }
+    const replicaSnapshotUploadRoute = /^\/v1\/events\/([^/]+)\/replica-snapshot$/.exec(path);
+    if (replicaSnapshotUploadRoute && request.method === 'POST') {
+      const actorDeviceId = await authorizeDesktop();
+      const eventId = string(decodeURIComponent(replicaSnapshotUploadRoute[1]), 'eventId', 160);
+      const sourceDeviceId = string(
+        request.headers.get('X-GTRZ-Device-Id') ?? '',
+        'X-GTRZ-Device-Id',
+        160,
+      );
+      assertDeviceClaim(actorDeviceId, sourceDeviceId);
+      const expectedSha256 = string(
+        request.headers.get('X-GTRZ-Snapshot-Sha256') ?? '',
+        'X-GTRZ-Snapshot-Sha256',
+        64,
+      ).toLowerCase();
+      const sizeBytes = integer(
+        Number(request.headers.get('X-GTRZ-Snapshot-Size') ?? ''),
+        'X-GTRZ-Snapshot-Size',
+        true,
+      );
+      if (!/^[a-f0-9]{64}$/.test(expectedSha256) || sizeBytes > 52428800) {
+        throw Object.assign(new Error('O snapshot do computador é inválido.'), {
+          status: 400,
+          code: 'INVALID_REPLICA_SNAPSHOT',
+        });
+      }
+      const contentLength = request.headers.get('Content-Length');
+      if (contentLength !== null && Number(contentLength) !== sizeBytes) {
+        throw Object.assign(new Error('O tamanho declarado do snapshot não confere.'), {
+          status: 400,
+          code: 'INVALID_REPLICA_SNAPSHOT',
+        });
+      }
+      const contents = await request.arrayBuffer();
+      if (contents.byteLength !== sizeBytes || (await shaBytes(contents)) !== expectedSha256) {
+        throw Object.assign(new Error('A cópia local falhou na verificação de integridade.'), {
+          status: 400,
+          code: 'INVALID_REPLICA_SNAPSHOT',
+        });
+      }
+      const snapshotId = crypto.randomUUID();
+      const storagePath = `replicas/${encodeURIComponent(eventId)}/${snapshotId}.sqlite`;
+      const { error: uploadError } = await db.storage
+        .from('gtrz-replica-snapshots')
+        .upload(storagePath, contents, {
+          contentType: 'application/vnd.sqlite3',
+          upsert: false,
+        });
+      if (uploadError) throw uploadError;
+      const { data, error } = await db.rpc('gtrz_record_replica_snapshot', {
+        p_snapshot_id: snapshotId,
+        p_event_id: eventId,
+        p_source_device_id: sourceDeviceId,
+        p_storage_path: storagePath,
+        p_sha256: expectedSha256,
+        p_size_bytes: sizeBytes,
+        p_created_at: Date.now(),
+      });
+      if (error) {
+        await db.storage.from('gtrz-replica-snapshots').remove([storagePath]);
+        throw error;
+      }
+      return ok(data);
+    }
+    const replicaSnapshotDownloadRoute = /^\/v1\/monitor\/replica-snapshot\/([^/]+)$/.exec(path);
+    if (replicaSnapshotDownloadRoute && request.method === 'GET') {
+      await authorizeDesktop();
+      const snapshotId = string(
+        decodeURIComponent(replicaSnapshotDownloadRoute[1]),
+        'snapshotId',
+        160,
+      );
+      const { data, error } = await db.rpc('gtrz_read_replica_snapshot', {
+        p_snapshot_id: snapshotId,
+      });
+      if (error) throw error;
+      if (!asObj(data)) {
+        throw Object.assign(new Error('A cópia inicial não foi encontrada na nuvem.'), {
+          status: 404,
+          code: 'REPLICA_SNAPSHOT_NOT_FOUND',
+        });
+      }
+      const storagePath = string(data.storagePath, 'storagePath', 500);
+      const eventId = string(data.eventId, 'eventId', 160);
+      const checksum = string(data.sha256, 'sha256', 64).toLowerCase();
+      const sizeBytes = integer(data.sizeBytes, 'sizeBytes', true);
+      const { data: blob, error: downloadError } = await db.storage
+        .from('gtrz-replica-snapshots')
+        .download(storagePath);
+      if (downloadError || blob === null) {
+        throw downloadError ?? new Error('O arquivo da cópia inicial não está disponível.');
+      }
+      return new Response(blob, {
+        headers: {
+          ...cors,
+          'Content-Type': 'application/vnd.sqlite3',
+          'Content-Length': String(sizeBytes),
+          'X-GTRZ-Snapshot-Event': eventId,
+          'X-GTRZ-Snapshot-Sha256': checksum,
+          'X-GTRZ-Snapshot-Size': String(sizeBytes),
+        },
       });
     }
     if (path === '/v1/monitor/global-control' && request.method === 'GET') {

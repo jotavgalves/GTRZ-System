@@ -1,5 +1,8 @@
 import { createHash } from 'node:crypto';
-import { writeFile } from 'node:fs/promises';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { WebSocket } from 'ws';
 import {
@@ -509,6 +512,7 @@ describe('cloud replication invariants', () => {
           headers: {
             'X-GTRZ-Snapshot-Event': 'remote-event',
             'X-GTRZ-Snapshot-Sha256': checksum,
+            'X-GTRZ-Snapshot-Size': String(snapshot.byteLength),
           },
         });
       }
@@ -562,6 +566,67 @@ describe('cloud replication invariants', () => {
         )
         .get(),
     ).toEqual({ value: 'applied' });
+  });
+
+  it('uploads a verified cloud replica before globally activating an event', async () => {
+    const temporaryDirectory = mkdtempSync(path.join(tmpdir(), 'gtrz-replica-test-'));
+    const databaseRuntime = {
+      get: (): ReturnType<typeof openDatabase> => db,
+      replaceWith: vi.fn(async (): Promise<void> => undefined),
+    };
+    service.stop();
+    service = new CloudSyncService(
+      'audit-key',
+      'audit-device',
+      (): void => undefined,
+      'https://muhzjnveqrahccoisddo.supabase.co/functions/v1/gtrz-sync-fallback',
+      (): string => 'Audit PC',
+      databaseRuntime as never,
+    );
+    vi.mocked(mkdtemp).mockResolvedValue(temporaryDirectory);
+    vi.mocked(readFile).mockImplementation((filePath) => {
+      if (String(filePath).endsWith('database.sqlite')) {
+        return Promise.resolve(Buffer.from('verified SQLite replica')) as never;
+      }
+      return Promise.resolve(filePath === 'audit-key' ? 'isolated-audit-key' : 'audit-pc') as never;
+    });
+    request.mockImplementation((url: string): Response => {
+      if (url.endsWith('/v1/monitor/heartbeat')) return new Response('{}', { status: 200 });
+      if (url.endsWith('/replica-snapshot')) {
+        return new Response(JSON.stringify({ snapshotId: 'snapshot-1', eventId: event.id }), {
+          status: 200,
+        });
+      }
+      if (url.endsWith('/v1/monitor/global-event')) return new Response('{}', { status: 200 });
+      return new Response('{}', { status: 200 });
+    });
+    const event = createEvent(db, { name: 'Replica event', startsAt: Date.now() });
+
+    try {
+      await service.setGlobalEvent(db, event.id);
+
+      const urls = request.mock.calls.map(([url]) => String(url));
+      expect(urls).toEqual(
+        expect.arrayContaining([
+          expect.stringContaining('/v1/monitor/heartbeat'),
+          expect.stringContaining(`/v1/events/${event.id}/replica-snapshot`),
+          expect.stringContaining('/v1/monitor/global-event'),
+        ]),
+      );
+      expect(
+        urls.findIndex((url) => url.endsWith(`/v1/events/${event.id}/replica-snapshot`)),
+      ).toBeLessThan(urls.findIndex((url) => url.endsWith('/v1/monitor/global-event')));
+      expect(request).toHaveBeenCalledWith(
+        expect.stringContaining(`/v1/events/${event.id}/replica-snapshot`),
+        expect.objectContaining({
+          headers: expect.objectContaining({
+            'X-GTRZ-Snapshot-Size': '23',
+          }),
+        }),
+      );
+    } finally {
+      rmSync(temporaryDirectory, { force: true, recursive: true });
+    }
   });
 
   it('puts event renames and combo creation into the shared journal', async () => {
