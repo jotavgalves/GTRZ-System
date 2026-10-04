@@ -2,6 +2,7 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { hostname, tmpdir } from 'node:os';
 import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
+import { createRequire } from 'node:module';
 import { WebSocket, type RawData } from 'ws';
 import {
   createClient,
@@ -36,6 +37,29 @@ import { getProductPresentation } from '@gtrz/database/product-presentation';
 import { getPrintingSettings } from '@gtrz/database/printing';
 
 import type { DatabaseRuntime } from './database-runtime';
+
+type FetchInput = Parameters<typeof globalThis.fetch>[0];
+type FetchInit = Parameters<typeof globalThis.fetch>[1];
+type ElectronNet = {
+  fetch(input: FetchInput, init?: FetchInit): ReturnType<typeof globalThis.fetch>;
+};
+
+const require = createRequire(import.meta.url);
+
+/**
+ * Node 24's bundled undici has crashed Electron's main process while finishing
+ * a cloud response on some Windows connections. Electron's net.fetch uses the
+ * Chromium network stack, while retaining the standard fetch response API.
+ */
+function cloudFetch(input: FetchInput, init?: FetchInit): ReturnType<typeof globalThis.fetch> {
+  if (process.versions.electron !== undefined) {
+    const electron = require('electron') as { readonly net?: ElectronNet };
+    if (electron.net !== undefined) return electron.net.fetch(input, init);
+  }
+  return globalThis.fetch(input, init);
+}
+
+const fetch = cloudFetch;
 
 const CONNECTION_TIMEOUT_MS = 5_000;
 const OUTBOX_INTERVAL_MS = 3_000;
