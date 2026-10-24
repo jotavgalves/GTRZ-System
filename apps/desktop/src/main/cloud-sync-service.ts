@@ -576,10 +576,12 @@ export class CloudSyncService {
 
   async flushOutbox(database: DatabaseContext, activeEventId: string | null): Promise<void> {
     if (this.#flushInFlight) return;
-    if (Date.now() < this.#cloudRetryNotBefore) return;
     this.#flushInFlight = true;
     try {
+      this.#initializeOutboxAuditFloor(database);
       const deviceId = await this.#readOrCreateDeviceId();
+      this.#enqueueNewAudits(database, deviceId);
+      if (Date.now() < this.#cloudRetryNotBefore) return;
       const pairingKey = await this.#readPairingKey();
 
       if (pairingKey === null) return;
@@ -2165,21 +2167,10 @@ export class CloudSyncService {
   }
 
   #enqueueNewAudits(database: DatabaseContext, deviceId: string): void {
+    this.#initializeOutboxAuditFloor(database);
     const floorRow = database.sqlite
       .prepare(`SELECT value FROM sync_state WHERE key = 'outbox.audit-floor'`)
-      .get() as { readonly value: string } | undefined;
-
-    if (floorRow === undefined) {
-      const current = database.sqlite
-        .prepare('SELECT COALESCE(MAX(id), 0) AS id FROM audit_log')
-        .get() as { readonly id: number };
-      database.sqlite
-        .prepare(
-          `INSERT INTO sync_state (key, value, updated_at) VALUES ('outbox.audit-floor', ?, ?)`,
-        )
-        .run(String(current.id), Date.now());
-      return;
-    }
+      .get() as { readonly value: string };
 
     const floor = Number(floorRow.value);
     const audits = database.sqlite
@@ -2245,6 +2236,21 @@ export class CloudSyncService {
       }
       updateFloor.run(String(audits.at(-1)?.id ?? floor), Date.now());
     })();
+  }
+
+  #initializeOutboxAuditFloor(database: DatabaseContext): void {
+    const existing = database.sqlite
+      .prepare("SELECT 1 FROM sync_state WHERE key = 'outbox.audit-floor'")
+      .get();
+    if (existing !== undefined) return;
+    const current = database.sqlite
+      .prepare('SELECT COALESCE(MAX(id), 0) AS id FROM audit_log')
+      .get() as { readonly id: number };
+    database.sqlite
+      .prepare(
+        "INSERT INTO sync_state (key, value, updated_at) VALUES ('outbox.audit-floor', ?, ?)",
+      )
+      .run(String(current.id), Date.now());
   }
 
   #ensureEventStreams(
@@ -3450,8 +3456,9 @@ export class CloudSyncService {
     if (payload.action === 'inventory.stock-moved') {
       const productId = stringField(payload.details, 'productId');
       const type = stringField(payload.details, 'type');
-      const quantity = integerField(payload.details, 'quantity');
       const delta = integerField(payload.details, 'delta');
+      const quantity =
+        integerField(payload.details, 'quantity') ?? (delta === null ? null : Math.abs(delta));
       const purchaseTotalCents = integerField(payload.details, 'purchaseTotalCents');
       const note = payload.details.note === null ? null : stringField(payload.details, 'note');
       if (
@@ -3461,6 +3468,7 @@ export class CloudSyncService {
         quantity <= 0 ||
         delta === null ||
         delta === 0 ||
+        quantity !== Math.abs(delta) ||
         type === null
       ) {
         throw new Error('Dados insuficientes para aplicar o movimento remoto.');

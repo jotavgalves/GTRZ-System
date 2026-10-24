@@ -6,13 +6,19 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { WebSocket } from 'ws';
 import {
+  addOrderItem,
+  closeOrder,
   createCombo,
   createEvent,
   createInventoryProduct,
   createProductCategory,
+  createServicePoint,
   ensureControlDefaults,
+  getOrder,
   getSessionState,
   openDatabase,
+  openOrder,
+  recordStockMovement,
   renameEvent,
   updateInventoryProduct,
 } from '@gtrz/database';
@@ -488,6 +494,195 @@ describe('cloud replication invariants', () => {
     expect(sentCommands[1]).toBe(sentCommands[0]);
   });
 
+  it('reconciles an offline sale from a cold-started PC into a second SQLite database', async () => {
+    vi.useFakeTimers();
+    let cloudAvailable = false;
+    let dropPaidAcknowledgement = true;
+    const journalByEvent = new Map<string, AuditJournalEvent[]>();
+    const acceptedCommands = new Set<string>();
+    request.mockImplementation((url: string, init?: RequestInit): Response => {
+      if (!cloudAvailable) return new Response('{}', { status: 503 });
+      if (url.includes('/global-control')) {
+        return new Response(JSON.stringify({ commands: globalCommands, pendingReset: null }));
+      }
+      const journalRoute = /\/v1\/events\/([^/]+)\/journal$/u.exec(url);
+      if (journalRoute !== null) {
+        const eventId = decodeURIComponent(journalRoute[1] ?? '');
+        if (typeof init?.body !== 'string') throw new Error('Missing journal payload.');
+        const payload = JSON.parse(init.body) as AuditJournalEvent['payload'] & {
+          commandId: string;
+        };
+        if (!acceptedCommands.has(payload.commandId)) {
+          acceptedCommands.add(payload.commandId);
+          const events = journalByEvent.get(eventId) ?? [];
+          events.push({
+            sequence: events.length + 1,
+            commandId: payload.commandId,
+            type: payload.action,
+            payload,
+          });
+          journalByEvent.set(eventId, events);
+        }
+        if (payload.action === 'operations.order-paid' && dropPaidAcknowledgement) {
+          dropPaidAcknowledgement = false;
+          return new Response('{}', { status: 503 });
+        }
+        return new Response('{}');
+      }
+      const snapshotRoute = /\/v1\/events\/([^/]+)\/snapshot\?after=(\d+)$/u.exec(url);
+      if (snapshotRoute !== null) {
+        const eventId = decodeURIComponent(snapshotRoute[1] ?? '');
+        const events = journalByEvent.get(eventId) ?? [];
+        const after = Number(snapshotRoute[2]);
+        return new Response(
+          JSON.stringify({
+            currentSequence: events.length,
+            events: events.filter((item) => item.sequence > after),
+          }),
+        );
+      }
+      return new Response('{}');
+    });
+
+    await service.flushOutbox(db, null);
+    expect(
+      db.sqlite.prepare("SELECT value FROM sync_state WHERE key = 'outbox.audit-floor'").get(),
+    ).toEqual({ value: '0' });
+
+    const event = createEvent(db, { name: 'Offline reconciliation', startsAt: Date.now() });
+    const category = createProductCategory(db, 'Drinks');
+    const product = createInventoryProduct(db, {
+      categoryId: category.id,
+      name: 'Water',
+      kind: 'drink',
+      costCents: 100,
+      salePriceCents: 500,
+      lowStockThreshold: 0,
+    });
+    recordStockMovement(db, { productId: product.id, type: 'purchase', quantity: 3 });
+    const table = createServicePoint(db, { label: 'Table offline', type: 'table' });
+    const order = openOrder(db, table.id);
+    addOrderItem(db, { orderId: order.id, itemKind: 'product', itemId: product.id, quantity: 1 });
+    closeOrder(db, {
+      orderId: order.id,
+      discountCents: 0,
+      payments: [{ method: 'cash', amountCents: 500 }],
+    });
+    const secondOrder = openOrder(db, table.id);
+    addOrderItem(db, {
+      orderId: secondOrder.id,
+      itemKind: 'product',
+      itemId: product.id,
+      quantity: 1,
+    });
+    closeOrder(db, {
+      orderId: secondOrder.id,
+      discountCents: 0,
+      payments: [{ method: 'pix', amountCents: 500 }],
+    });
+
+    await vi.advanceTimersByTimeAsync(3_000);
+    await service.flushOutbox(db, event.id);
+    expect(getOrder(db, order.id).status).toBe('paid');
+    expect(getOrder(db, secondOrder.id).status).toBe('paid');
+    const queued = db.sqlite
+      .prepare("SELECT COUNT(*) AS amount FROM sync_outbox WHERE status = 'pending'")
+      .get() as { amount: number };
+    expect(queued.amount).toBeGreaterThan(0);
+    expect(acceptedCommands.size).toBe(0);
+
+    globalCommands = [
+      {
+        sequence: 1,
+        commandId: 'activate-offline-reconciliation',
+        type: 'event.activated',
+        eventId: event.id,
+        eventName: event.name,
+        createdAt: Date.now(),
+      },
+    ];
+    cloudAvailable = true;
+    await vi.advanceTimersByTimeAsync(6_000);
+    await service.flushOutbox(db, event.id);
+    expect(dropPaidAcknowledgement).toBe(false);
+    expect(
+      db.sqlite.prepare("SELECT COUNT(*) AS amount FROM sync_outbox WHERE status = 'failed'").get(),
+    ).toEqual({ amount: 1 });
+    await vi.advanceTimersByTimeAsync(6_000);
+    await service.flushOutbox(db, event.id);
+    expect(
+      db.sqlite
+        .prepare("SELECT COUNT(*) AS amount FROM sync_outbox WHERE status = 'accepted'")
+        .get(),
+    ).toMatchObject({ amount: acceptedCommands.size });
+    expect(
+      [...journalByEvent.values()]
+        .flat()
+        .filter((item) => item.payload.action === 'operations.order-paid'),
+    ).toHaveLength(2);
+    const stockEvent = [...journalByEvent.values()]
+      .flat()
+      .find((item) => item.payload.action === 'inventory.stock-moved');
+    expect(stockEvent?.payload.details.quantity).toBe(3);
+    if (stockEvent !== undefined) delete stockEvent.payload.details.quantity;
+
+    const secondDatabase = openDatabase(':memory:');
+    ensureControlDefaults(secondDatabase);
+    vi.mocked(readFile).mockImplementation(
+      (file): Promise<string> =>
+        Promise.resolve(
+          file === 'receiver-device'
+            ? 'receiver-pc'
+            : file === 'receiver-key'
+              ? 'isolated-audit-key'
+              : 'audit-pc',
+        ),
+    );
+    const secondService = new CloudSyncService(
+      'receiver-key',
+      'receiver-device',
+      () => undefined,
+      'https://audit.invalid',
+    );
+    try {
+      await secondService.flushOutbox(secondDatabase, null);
+      expect(getSessionState(secondDatabase).activeEvent?.id).toBe(event.id);
+      expect(
+        secondDatabase.sqlite.prepare('SELECT action, reason FROM sync_conflicts').all(),
+      ).toEqual([]);
+      const receivedCashOrder = getOrder(secondDatabase, order.id);
+      const receivedPixOrder = getOrder(secondDatabase, secondOrder.id);
+      expect(receivedCashOrder.status).toBe('paid');
+      expect(receivedCashOrder.payments).toMatchObject([{ method: 'cash', amountCents: 500 }]);
+      expect(receivedPixOrder.status).toBe('paid');
+      expect(receivedPixOrder.payments).toMatchObject([{ method: 'pix', amountCents: 500 }]);
+      expect(
+        secondDatabase.sqlite
+          .prepare('SELECT quantity FROM event_stock WHERE event_id = ? AND product_id = ?')
+          .get(event.id, product.id),
+      ).toEqual({ quantity: 1 });
+
+      await secondService.flushOutbox(secondDatabase, event.id);
+      expect(
+        secondDatabase.sqlite
+          .prepare('SELECT COUNT(*) AS amount FROM orders WHERE id = ?')
+          .get(order.id),
+      ).toEqual({ amount: 1 });
+      expect(
+        secondDatabase.sqlite
+          .prepare('SELECT COUNT(*) AS amount FROM orders WHERE id = ?')
+          .get(secondOrder.id),
+      ).toEqual({ amount: 1 });
+    } finally {
+      secondService.stop();
+      secondDatabase.close();
+      vi.mocked(readFile).mockImplementation(
+        (file): Promise<string> =>
+          Promise.resolve(file === 'audit-key' ? 'isolated-audit-key' : 'audit-pc'),
+      );
+    }
+  });
+
   it('restores a verified database copy before a fresh paired PC consumes event sales', async () => {
     const snapshot = Buffer.from('verified SQLite replica');
     const checksum = createHash('sha256').update(snapshot).digest('hex');
@@ -521,10 +716,9 @@ describe('cloud replication invariants', () => {
           status: 200,
         });
       }
-      return new Response(
-        JSON.stringify({ currentSequence: 0, stock: [], events: [] }),
-        { status: 200 },
-      );
+      return new Response(JSON.stringify({ currentSequence: 0, stock: [], events: [] }), {
+        status: 200,
+      });
     });
 
     await service.flushOutbox(db, null);

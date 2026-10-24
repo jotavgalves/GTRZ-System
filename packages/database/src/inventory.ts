@@ -587,6 +587,7 @@ export function recordStockMovement(
         note,
         productId: input.productId,
         purchaseTotalCents,
+        quantity: input.quantity,
         type: input.type,
       },
     });
