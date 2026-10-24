@@ -1,0 +1,33 @@
+name: Verificar nuvem GTRZ
+
+on:
+  schedule:
+    - cron: '17 3,11,19 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  database-activity:
+    name: Consultar banco canônico
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Consultar controle global no Postgres
+        shell: bash
+        env:
+          GTRZ_KEEPALIVE_KEY: ${{ secrets.GTRZ_KEEPALIVE_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "$GTRZ_KEEPALIVE_KEY" ]; then
+            echo 'Secret GTRZ_KEEPALIVE_KEY ausente.' >&2
+            exit 1
+          fi
+          response="$(curl --fail --silent --show-error --retry 3 --retry-delay 5 \
+            --connect-timeout 10 --max-time 30 \
+            --header "X-GTRZ-Key: $GTRZ_KEEPALIVE_KEY" \
+            'https://muhzjnveqrahccoisddo.supabase.co/functions/v1/gtrz-sync-fallback/v1/monitor/global-control')"
+          jq -e '(.cursor | type == "number") and (.commands | type == "array")' \
+            <<< "$response" > /dev/null
+          echo 'Consulta real ao banco GTRZ concluída.'
