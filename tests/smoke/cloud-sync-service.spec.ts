@@ -512,6 +512,12 @@ describe('cloud replication invariants', () => {
         const payload = JSON.parse(init.body) as AuditJournalEvent['payload'] & {
           commandId: string;
         };
+        if (
+          payload.action === 'inventory.stock-moved' &&
+          typeof payload.details.quantity !== 'number'
+        ) {
+          return new Response('{}', { status: 422 });
+        }
         if (!acceptedCommands.has(payload.commandId)) {
           acceptedCommands.add(payload.commandId);
           const events = journalByEvent.get(eventId) ?? [];
@@ -590,6 +596,18 @@ describe('cloud replication invariants', () => {
       .get() as { amount: number };
     expect(queued.amount).toBeGreaterThan(0);
     expect(acceptedCommands.size).toBe(0);
+    const oldStockOutbox = db.sqlite
+      .prepare(
+        "SELECT audit_id, payload_json FROM sync_outbox WHERE json_extract(payload_json, '$.action') = 'inventory.stock-moved'",
+      )
+      .get() as { readonly audit_id: number; readonly payload_json: string };
+    const oldStockPayload = JSON.parse(oldStockOutbox.payload_json) as {
+      details: Record<string, unknown>;
+    };
+    delete oldStockPayload.details.quantity;
+    db.sqlite
+      .prepare('UPDATE sync_outbox SET payload_json = ? WHERE audit_id = ?')
+      .run(JSON.stringify(oldStockPayload), oldStockOutbox.audit_id);
 
     globalCommands = [
       {

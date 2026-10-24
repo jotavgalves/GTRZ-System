@@ -658,6 +658,15 @@ export class CloudSyncService {
       }
       this.#applyInbox(workingDatabase, deviceId);
 
+      if (!canonicalCloud) {
+        await this.#publishCashierCatalog(
+          workingDatabase,
+          effectiveActiveEventId,
+          pairingKey,
+          this.#pendingStockDeltas(workingDatabase, effectiveActiveEventId),
+        );
+      }
+
       const pending = workingDatabase.sqlite
         .prepare(
           `SELECT audit_id, operation_id, event_id, payload_json
@@ -672,13 +681,29 @@ export class CloudSyncService {
           // audit payload. The legacy Worker still accepts the raw payload.
           // Sending the raw form to Supabase made it reject `type`, leaving
           // the first failed row at the head of the outbox forever.
-          const canonicalPayload = canonicalCloud
-            ? (JSON.parse(item.payload_json) as unknown)
+          let outgoingPayload: unknown = JSON.parse(item.payload_json);
+          if (
+            isRecord(outgoingPayload) &&
+            outgoingPayload.action === 'inventory.stock-moved' &&
+            isRecord(outgoingPayload.details) &&
+            integerField(outgoingPayload.details, 'quantity') === null
+          ) {
+            const delta = integerField(outgoingPayload.details, 'delta');
+            if (delta !== null && delta !== 0) {
+              outgoingPayload = {
+                ...outgoingPayload,
+                details: { ...outgoingPayload.details, quantity: Math.abs(delta) },
+              };
+              workingDatabase.sqlite
+                .prepare(
+                  'UPDATE sync_outbox SET payload_json = ?, updated_at = ? WHERE audit_id = ?',
+                )
+                .run(JSON.stringify(outgoingPayload), Date.now(), item.audit_id);
+            }
+          }
+          const canonicalCreatedAt = isRecord(outgoingPayload)
+            ? integerField(outgoingPayload, 'createdAt')
             : null;
-          const canonicalCreatedAt =
-            canonicalPayload !== null && isRecord(canonicalPayload)
-              ? integerField(canonicalPayload, 'createdAt')
-              : null;
           if (canonicalCloud && canonicalCreatedAt === null) {
             throw new Error('A operação local não possui a data exigida pela central.');
           }
@@ -686,10 +711,10 @@ export class CloudSyncService {
             ? JSON.stringify({
                 commandId: item.operation_id,
                 type: 'journal.committed',
-                payload: canonicalPayload,
+                payload: outgoingPayload,
                 createdAt: canonicalCreatedAt,
               })
-            : item.payload_json;
+            : JSON.stringify(outgoingPayload);
           const response = await fetch(
             `${this.#endpoint}/v1/events/${encodeURIComponent(item.event_id)}/journal`,
             {
@@ -1663,6 +1688,7 @@ export class CloudSyncService {
     database: DatabaseContext,
     activeEventId: string | null,
     pairingKey: string,
+    pendingStockDeltas: ReadonlyMap<string, number> = new Map(),
   ): Promise<void> {
     if (activeEventId === null) return;
     const products = database.sqlite
@@ -1697,7 +1723,10 @@ export class CloudSyncService {
           fallbackIcon: presentation.fallbackIcon,
           components: [],
           unitPriceCents: product.sale_price_cents,
-          quantity: product.quantity,
+          quantity: Math.max(
+            0,
+            product.quantity - (pendingStockDeltas.get(product.product_id) ?? 0),
+          ),
         };
       }),
       ...listCombos(database)
@@ -1775,6 +1804,56 @@ export class CloudSyncService {
       this.#canonicalProjectionPublished.add(stateKey);
       this.#canonicalProtectedProjectionFingerprints.delete(stateKey);
     }
+  }
+
+  #pendingStockDeltas(
+    database: DatabaseContext,
+    activeEventId: string | null,
+  ): ReadonlyMap<string, number> {
+    const deltas = new Map<string, number>();
+    if (activeEventId === null) return deltas;
+    const rows = database.sqlite
+      .prepare(
+        "SELECT payload_json FROM sync_outbox WHERE event_id = ? AND status IN ('pending', 'failed') ORDER BY audit_id",
+      )
+      .all(activeEventId) as readonly { readonly payload_json: string }[];
+    const add = (productId: string, delta: number): void => {
+      deltas.set(productId, (deltas.get(productId) ?? 0) + delta);
+    };
+    for (const row of rows) {
+      const payload: unknown = JSON.parse(row.payload_json);
+      if (!isRecord(payload) || !isRecord(payload.details)) continue;
+      if (payload.action === 'inventory.stock-moved') {
+        const productId = stringField(payload.details, 'productId');
+        const delta = integerField(payload.details, 'delta');
+        if (productId !== null && delta !== null) add(productId, delta);
+      } else if (
+        payload.action === 'operations.order-paid' &&
+        Array.isArray(payload.details.stockMovements)
+      ) {
+        for (const movement of payload.details.stockMovements) {
+          if (!isRecord(movement)) continue;
+          const productId = stringField(movement, 'product_id');
+          const delta = integerField(movement, 'delta');
+          if (productId !== null && delta !== null) add(productId, delta);
+        }
+      } else if (
+        payload.action === 'operations.order-cancelled' &&
+        payload.details.previousStatus === 'paid' &&
+        typeof payload.entityId === 'string'
+      ) {
+        const returns = database.sqlite
+          .prepare(
+            "SELECT product_id, delta FROM stock_movements WHERE event_id = ? AND type = 'return' AND note = ?",
+          )
+          .all(activeEventId, `Estorno da comanda ${payload.entityId}`) as readonly {
+          readonly product_id: string;
+          readonly delta: number;
+        }[];
+        for (const returned of returns) add(returned.product_id, returned.delta);
+      }
+    }
+    return deltas;
   }
 
   async #publishMobileContext(
