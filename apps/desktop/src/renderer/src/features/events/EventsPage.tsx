@@ -37,9 +37,6 @@ export function EventsPage(): React.JSX.Element {
   const [deletingEventId, setDeletingEventId] = useState<string | null>(null);
   const [closeMessage, setCloseMessage] = useState<string | null>(null);
   const [deleteMessage, setDeleteMessage] = useState<string | null>(null);
-  if (loading && events.length === 0) {
-    return <div className="route-state">Carregando eventos…</div>;
-  }
   const activeEvent = sessionState?.activeEvent ?? null;
   const deletingEvent = events.find((event) => event.id === deletingEventId) ?? null;
 
@@ -51,6 +48,10 @@ export function EventsPage(): React.JSX.Element {
     }),
     [events],
   );
+
+  if (loading && events.length === 0) {
+    return <div className="route-state">Carregando eventos…</div>;
+  }
 
   async function handleCreate(formEvent: SyntheticEvent<HTMLFormElement>): Promise<void> {
     formEvent.preventDefault();
