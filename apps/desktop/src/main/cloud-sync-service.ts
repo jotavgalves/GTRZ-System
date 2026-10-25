@@ -1022,6 +1022,7 @@ export class CloudSyncService {
         inboxReceived: 0,
         inboxAwaitingApply: 0,
         conflictsOpen: 0,
+        printQueueError: null,
       },
       recentCommands: [],
       recentTransport: [],

@@ -24,7 +24,9 @@ let automaticBackupTimer: ReturnType<typeof setInterval> | null = null;
 let mainWindowWasCreated = false;
 const runtimeEnvironment = getRuntimeEnvironment();
 const visualQaRun = isVisualQaRun();
-const cloudSyncEnabledForRuntime = process.env.GTRZ_E2E_DISABLE_CLOUD_SYNC !== '1';
+const cloudSyncEnabledForRuntime =
+  process.env.GTRZ_E2E_DISABLE_CLOUD_SYNC !== '1' &&
+  (!visualQaRun || process.env.GTRZ_E2E_ALLOW_CLOUD_SYNC === '1');
 const installationEnrollment = process.env.GTRZ_INSTALL_ENROLLMENT === '1';
 
 if (visualQaRun) {
@@ -98,11 +100,7 @@ if (!hasSingleInstanceLock) {
       cloudSyncService = new CloudSyncService(
         visualQaRun
           ? (process.env.GTRZ_E2E_PAIRING_KEY_PATH?.trim() ??
-            path.join(
-              app.getPath('documents'),
-              'GTRZ System',
-              'Nuvem GTRZ - chave de pareamento.txt',
-            ))
+            path.join(documentsFolder, 'Nuvem GTRZ - chave de pareamento.txt'))
           : path.join(
               documentsFolder,
               runtimeEnvironment === 'test'

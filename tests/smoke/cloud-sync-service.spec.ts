@@ -172,6 +172,26 @@ afterEach((): void => {
 });
 
 describe('cloud replication invariants', () => {
+  it('parses the canonical monitor when the local print queue has no error', async () => {
+    const canonical = new CloudSyncService(
+      'audit-key',
+      'audit-device',
+      (): void => undefined,
+      'https://audit.supabase.co/functions/v1/gtrz-sync-fallback',
+    );
+    request.mockImplementation(
+      (url: string): Response =>
+        new Response(
+          JSON.stringify(url.includes('/snapshot') ? { activeDevices: [] } : { accepted: true }),
+          { status: 200 },
+        ),
+    );
+
+    await expect(canonical.getMonitor(null)).resolves.toMatchObject({
+      localQueue: { printQueueError: null },
+    });
+  });
+
   it('requires a one-time code for a new desktop without contacting the cloud', async () => {
     vi.mocked(readFile).mockRejectedValue(new Error('not enrolled'));
 
