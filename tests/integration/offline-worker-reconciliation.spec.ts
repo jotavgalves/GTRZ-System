@@ -80,7 +80,7 @@ integration(
       receiver = openDatabase(path.join(directory, 'receiver.sqlite'));
       ensureControlDefaults(receiver);
 
-    vi.stubGlobal('fetch', () => Promise.resolve(new Response('{}', { status: 503 })));
+      vi.stubGlobal('fetch', () => Promise.resolve(new Response('{}', { status: 503 })));
       const cashOrder = openOrder(source, table.id);
       addOrderItem(source, {
         orderId: cashOrder.id,

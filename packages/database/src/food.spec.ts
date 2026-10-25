@@ -94,7 +94,9 @@ describe('food suppliers', () => {
       initialQuantity: 8,
       comboOnly: true,
     });
-    const ingredient = getOperationState(database).catalog.find((item) => item.name === 'Tequeño de queijo');
+    const ingredient = getOperationState(database).catalog.find(
+      (item) => item.name === 'Tequeño de queijo',
+    );
     expect(ingredient).toBeUndefined();
     const productId = database.sqlite
       .prepare("SELECT id FROM products WHERE name = 'Tequeño de queijo'")
@@ -120,7 +122,9 @@ describe('food suppliers', () => {
       },
       financials: { costCents: 1_700, grossProfitCents: 700 },
     });
-    const counter = getOperationState(database).servicePoints.find((point) => point.type === 'counter');
+    const counter = getOperationState(database).servicePoints.find(
+      (point) => point.type === 'counter',
+    );
     if (counter === undefined) throw new Error('Balcão não encontrado.');
     const order = openOrder(database, counter.id);
     addOrderItem(database, { orderId: order.id, itemKind: 'combo', itemId: combo.id, quantity: 2 });
@@ -130,7 +134,12 @@ describe('food suppliers', () => {
       payments: [{ method: 'pix', amountCents: 4_800 }],
     });
     expect(getFoodState(database)).toMatchObject({
-      summary: { soldQuantity: 2, receivedCents: 4_800, supplierCents: 3_400, commissionCents: 1_400 },
+      summary: {
+        soldQuantity: 2,
+        receivedCents: 4_800,
+        supplierCents: 3_400,
+        commissionCents: 1_400,
+      },
       items: [
         expect.objectContaining({
           name: 'Tequefest parceiro',
@@ -174,13 +183,11 @@ describe('food suppliers', () => {
       reason: 'Fornecedor cadastrado incorretamente',
     });
 
+    expect(database.sqlite.prepare('SELECT active FROM combos WHERE id = ?').get(combo.id)).toEqual(
+      { active: 0 },
+    );
     expect(
-      database.sqlite.prepare('SELECT active FROM combos WHERE id = ?').get(combo.id),
-    ).toEqual({ active: 0 });
-    expect(
-      database.sqlite
-        .prepare('SELECT 1 FROM food_combo_terms WHERE combo_id = ?')
-        .get(combo.id),
+      database.sqlite.prepare('SELECT 1 FROM food_combo_terms WHERE combo_id = ?').get(combo.id),
     ).toBeUndefined();
   });
 });

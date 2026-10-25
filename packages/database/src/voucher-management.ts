@@ -315,7 +315,7 @@ export function setManagedVoucherTotal(
   const redeemedCents = voucher.initialBalanceCents - voucher.remainingBalanceCents;
   if (input.initialBalanceCents < redeemedCents) {
     throw new Error(
-      `O novo total não pode ser menor que o valor já utilizado (${redeemedCents} centavos).`,
+      `O novo total não pode ser menor que o valor já utilizado (${String(redeemedCents)} centavos).`,
     );
   }
 

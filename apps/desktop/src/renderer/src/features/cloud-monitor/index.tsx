@@ -255,7 +255,9 @@ export function CloudMonitorPage(): React.JSX.Element {
     }
   };
 
-  const exchangeEnrollment = async (event: React.FormEvent<HTMLFormElement>): Promise<void> => {
+  const exchangeEnrollment = async (
+    event: React.SyntheticEvent<HTMLFormElement>,
+  ): Promise<void> => {
     event.preventDefault();
     setEnrollmentBusy(true);
     setEnrollmentError(null);
@@ -381,7 +383,9 @@ export function CloudMonitorPage(): React.JSX.Element {
               <input
                 autoComplete="off"
                 disabled={enrollmentBusy}
-                onChange={(event) => setEnrollmentInput(event.target.value)}
+                onChange={(event) => {
+                  setEnrollmentInput(event.target.value);
+                }}
                 placeholder="Cole o código temporário"
                 value={enrollmentInput}
               />

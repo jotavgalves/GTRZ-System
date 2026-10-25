@@ -41,9 +41,9 @@ import type { DatabaseRuntime } from './database-runtime';
 
 type FetchInput = Parameters<typeof globalThis.fetch>[0];
 type FetchInit = Parameters<typeof globalThis.fetch>[1];
-type ElectronNet = {
+interface ElectronNet {
   fetch(input: FetchInput, init?: FetchInit): ReturnType<typeof globalThis.fetch>;
-};
+}
 
 const require = createRequire(import.meta.url);
 
@@ -53,7 +53,7 @@ const require = createRequire(import.meta.url);
  * Chromium network stack, while retaining the standard fetch response API.
  */
 function cloudFetch(input: FetchInput, init?: FetchInit): ReturnType<typeof globalThis.fetch> {
-  if (process.versions.electron !== undefined) {
+  if ('electron' in process.versions) {
     const electron = require('electron') as { readonly net?: ElectronNet };
     if (electron.net !== undefined) return electron.net.fetch(input, init);
   }
@@ -587,7 +587,7 @@ export class CloudSyncService {
       if (pairingKey === null) return;
 
       // Production uses the compact Postgres journal. The stream branch remains
-      // only for the legacy transport tests and an explicitly supplied legacy URL.
+      // only for the previous transport tests and an explicitly supplied Worker URL.
       const canonicalCloud = this.#endpoint.includes('.supabase.co/functions/');
       // Printing is a separate delivery concern. It must keep polling even if a
       // catalogue projection or another synchronisation step is temporarily rejected.
@@ -678,7 +678,7 @@ export class CloudSyncService {
       for (const item of pending) {
         try {
           // The canonical Edge endpoint stores an envelope around the local
-          // audit payload. The legacy Worker still accepts the raw payload.
+          // audit payload. The older Worker still accepts the raw payload.
           // Sending the raw form to Supabase made it reject `type`, leaving
           // the first failed row at the head of the outbox forever.
           let outgoingPayload: unknown = JSON.parse(item.payload_json);
@@ -1343,14 +1343,16 @@ export class CloudSyncService {
         return;
       }
       // A complete push frame contains commands. Fall back to the cursor-based
-      // recovery endpoint only for a malformed or legacy/incomplete frame.
+      // recovery endpoint only for a malformed or incomplete frame.
       const completePayload =
         isRecord(payload) && Array.isArray(payload.commands) ? payload : undefined;
       void this.#pullGlobalControl(database, pairingKey, deviceId, completePayload)
         .then((recovered) => {
           if (!recovered) this.#recordCloudFailure();
         })
-        .catch(() => this.#recordCloudFailure());
+        .catch(() => {
+          this.#recordCloudFailure();
+        });
     });
     stream.on('error', () => undefined);
     stream.on('close', () => {
@@ -1660,7 +1662,7 @@ export class CloudSyncService {
         return rawCredential.token;
       }
     } catch {
-      // A device credential is optional during the transition from the legacy key.
+      // A device credential is optional during the transition from the original key.
     }
     return this.#readLegacyPairingKey();
   }
@@ -2406,7 +2408,9 @@ export class CloudSyncService {
                   const nextEventId = getSessionState(database).activeEvent?.id ?? null;
                   void this.#ensureCanonicalRealtime(database, nextEventId, deviceId, pairingKey);
                 })
-                .catch(() => this.#recordCloudFailure());
+                .catch(() => {
+                  this.#recordCloudFailure();
+                });
               return;
             }
             const fastPath = envelope.fastPath === true;

@@ -624,7 +624,7 @@ class MonitorRoom extends DurableObject<Env> {
         );
       }
       if (request.method === 'GET' && replicaSnapshotMatch !== null) {
-        return this.#sendReplicaSnapshot(decodeURIComponent(replicaSnapshotMatch[1] ?? ''));
+        return await this.#sendReplicaSnapshot(decodeURIComponent(replicaSnapshotMatch[1] ?? ''));
       }
 
       const resetBackupMatch = /^\/v1\/monitor\/reset-backup\/([^/]+)$/.exec(url.pathname);
@@ -1678,11 +1678,7 @@ class MonitorRoom extends DurableObject<Env> {
           bootstrapSnapshotId,
         )
         .toArray()[0] as Record<string, unknown> | undefined;
-      if (
-        snapshot === undefined ||
-        snapshot.event_id !== eventId ||
-        snapshot.source_device_id !== snapshotSourceDeviceId
-      ) {
+      if (snapshot?.event_id !== eventId || snapshot.source_device_id !== snapshotSourceDeviceId) {
         throw new ApiError(
           409,
           'BOOTSTRAP_SNAPSHOT_UNAVAILABLE',
@@ -2715,7 +2711,6 @@ class EventRoom extends DurableObject<Env> {
       return false;
     }
 
-    if (next === null) return false;
     if (index < 0) vouchers.push(next);
     else vouchers[index] = next;
     const voucherCodes = [
@@ -3435,17 +3430,18 @@ class EventRoom extends DurableObject<Env> {
                 amountCents: positiveInteger(rawVoucherUse.amountCents, 'voucherUse.amountCents'),
               };
             })();
-      const contextVouchers = Array.isArray(context.vouchers) ? context.vouchers : [];
+      const contextVouchers: JsonRecord[] = Array.isArray(context.vouchers)
+        ? (context.vouchers as unknown[]).filter(isRecord)
+        : [];
       const selectedVoucher =
         voucherUse === null
-          ? null
+          ? undefined
           : contextVouchers.find(
               (raw) =>
-                isRecord(raw) &&
                 typeof raw.code === 'string' &&
                 raw.code.toLocaleUpperCase('pt-BR') === voucherUse.code,
             );
-      if (voucherUse !== null && !isRecord(selectedVoucher)) {
+      if (voucherUse !== null && selectedVoucher === undefined) {
         throw new ApiError(
           409,
           'VOUCHER_UNAVAILABLE',
@@ -3453,7 +3449,7 @@ class EventRoom extends DurableObject<Env> {
         );
       }
       const voucherBalance =
-        selectedVoucher === null
+        selectedVoucher === undefined
           ? 0
           : nonNegativeInteger(
               selectedVoucher.remainingBalanceCents,
@@ -3461,7 +3457,7 @@ class EventRoom extends DurableObject<Env> {
             );
       if (
         voucherUse !== null &&
-        (selectedVoucher.status !== 'active' ||
+        (selectedVoucher?.status !== 'active' ||
           selectedVoucher.servicePointId !== servicePointId ||
           voucherUse.amountCents > voucherBalance ||
           voucherUse.amountCents > totalCents)
@@ -5589,7 +5585,9 @@ export default {
       // transient failure. Deduplicate before waking the event Durable Object so retries do not
       // consume its free-tier row-read budget. Changed snapshots have a different hash and pass.
       const body = await request.text();
-      const deviceId = request.headers.get('X-GTRZ-Device-Id')?.slice(0, 160) || 'legacy';
+      const suppliedDeviceId = request.headers.get('X-GTRZ-Device-Id')?.slice(0, 160);
+      const deviceId =
+        suppliedDeviceId && suppliedDeviceId.length > 0 ? suppliedDeviceId : 'legacy';
       const cacheRequest = cashierPublicationCacheRequest(
         url.origin,
         eventId,

@@ -24,7 +24,7 @@ interface ThermalPrintServiceOptions {
   readonly getDatabase: () => DatabaseContext;
 }
 
-export interface CloudPrinterRegistration {
+interface CloudPrinterRegistration {
   readonly printerName: string;
   readonly enabled: boolean;
   readonly unavailableReason: string | null;

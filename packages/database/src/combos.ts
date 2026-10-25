@@ -607,7 +607,9 @@ export function deleteCombo(
   }
 
   database.sqlite.transaction(() => {
-    database.sqlite.prepare('DELETE FROM food_combo_sale_settlements WHERE combo_id = ?').run(combo.id);
+    database.sqlite
+      .prepare('DELETE FROM food_combo_sale_settlements WHERE combo_id = ?')
+      .run(combo.id);
     database.sqlite.prepare('DELETE FROM food_combo_terms WHERE combo_id = ?').run(combo.id);
     database.sqlite.prepare('DELETE FROM combo_components WHERE combo_id = ?').run(combo.id);
     database.sqlite.prepare('DELETE FROM combos WHERE id = ?').run(combo.id);

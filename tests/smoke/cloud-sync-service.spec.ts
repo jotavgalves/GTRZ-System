@@ -170,20 +170,24 @@ afterEach((): void => {
 describe('cloud replication invariants', () => {
   it('does not poll global control on every local outbox interval once a control stream exists', async () => {
     await service.flushOutbox(db, null);
-    const initialReads = request.mock.calls.filter(([url]) => String(url).includes('/global-control'));
+    const initialReads = request.mock.calls.filter(([url]) =>
+      String(url).includes('/global-control'),
+    );
 
     await service.flushOutbox(db, null);
 
-    expect(request.mock.calls.filter(([url]) => String(url).includes('/global-control'))).toHaveLength(
-      initialReads.length,
-    );
+    expect(
+      request.mock.calls.filter(([url]) => String(url).includes('/global-control')),
+    ).toHaveLength(initialReads.length);
   });
 
   it('applies a complete control WebSocket frame without an extra control read', async () => {
     await service.flushOutbox(db, null);
     const control = requireSocket('/monitor/');
     control.open();
-    const readsBefore = request.mock.calls.filter(([url]) => String(url).includes('/global-control')).length;
+    const readsBefore = request.mock.calls.filter(([url]) =>
+      String(url).includes('/global-control'),
+    ).length;
 
     control.message({
       type: 'global.sync',
@@ -195,17 +199,20 @@ describe('cloud replication invariants', () => {
     });
     await settle();
 
-    expect(request.mock.calls.filter(([url]) => String(url).includes('/global-control'))).toHaveLength(
-      readsBefore,
-    );
+    expect(
+      request.mock.calls.filter(([url]) => String(url).includes('/global-control')),
+    ).toHaveLength(readsBefore);
   });
 
   it('uses the legacy administrator key only to mint a one-time desktop enrollment code', async () => {
     request.mockImplementation((url: string): Response => {
       if (url.endsWith('/v1/desktop/enrollment')) {
-        return new Response(JSON.stringify({ enrollmentCode: 'gtrz-enroll-code', expiresAt: 123 }), {
-          status: 200,
-        });
+        return new Response(
+          JSON.stringify({ enrollmentCode: 'gtrz-enroll-code', expiresAt: 123 }),
+          {
+            status: 200,
+          },
+        );
       }
       return new Response(JSON.stringify({ currentSequence: 0, stock: [], events: [] }), {
         status: 200,
@@ -351,9 +358,7 @@ describe('cloud replication invariants', () => {
         .get(),
     ).toEqual({ quantity: 12 });
     expect(
-      db.sqlite
-        .prepare("SELECT value FROM sync_state WHERE key = 'inbox.sequence:_catalog'")
-        .get(),
+      db.sqlite.prepare("SELECT value FROM sync_state WHERE key = 'inbox.sequence:_catalog'").get(),
     ).toEqual({ value: '2' });
     expect(
       db.sqlite
@@ -419,13 +424,13 @@ describe('cloud replication invariants', () => {
 
     expect(
       db.sqlite
-        .prepare("SELECT COUNT(*) AS amount FROM product_categories WHERE id LIKE 'remote-category-%'")
+        .prepare(
+          "SELECT COUNT(*) AS amount FROM product_categories WHERE id LIKE 'remote-category-%'",
+        )
         .get(),
     ).toEqual({ amount: 41 });
     expect(
-      db.sqlite
-        .prepare("SELECT value FROM sync_state WHERE key = 'inbox.sequence:_catalog'")
-        .get(),
+      db.sqlite.prepare("SELECT value FROM sync_state WHERE key = 'inbox.sequence:_catalog'").get(),
     ).toEqual({ value: '41' });
   });
 
@@ -449,7 +454,9 @@ describe('cloud replication invariants', () => {
 
     expect(
       db.sqlite
-        .prepare("SELECT COUNT(*) AS amount FROM product_categories WHERE id LIKE 'socket-category-%'")
+        .prepare(
+          "SELECT COUNT(*) AS amount FROM product_categories WHERE id LIKE 'socket-category-%'",
+        )
         .get(),
     ).toEqual({ amount: 41 });
     expect(catalog.readyState).toBe(WebSocket.OPEN);
@@ -461,7 +468,7 @@ describe('cloud replication invariants', () => {
     let centralAvailable = false;
     request.mockImplementation((url: string, init?: RequestInit): Response => {
       if (url.includes('/journal')) {
-        sentCommands.push(String(init?.body));
+        sentCommands.push(typeof init?.body === 'string' ? init.body : '');
         return new Response(JSON.stringify({}), { status: centralAvailable ? 200 : 503 });
       }
       if (url.includes('/global-control')) {
@@ -704,7 +711,7 @@ describe('cloud replication invariants', () => {
   it('restores a verified database copy before a fresh paired PC consumes event sales', async () => {
     const snapshot = Buffer.from('verified SQLite replica');
     const checksum = createHash('sha256').update(snapshot).digest('hex');
-    const replaceWith = vi.fn(async (): Promise<void> => undefined);
+    const replaceWith = vi.fn((): Promise<void> => Promise.resolve());
     const databaseRuntime = {
       get: (): ReturnType<typeof openDatabase> => db,
       replaceWith,
@@ -784,7 +791,7 @@ describe('cloud replication invariants', () => {
     const temporaryDirectory = mkdtempSync(path.join(tmpdir(), 'gtrz-replica-test-'));
     const databaseRuntime = {
       get: (): ReturnType<typeof openDatabase> => db,
-      replaceWith: vi.fn(async (): Promise<void> => undefined),
+      replaceWith: vi.fn((): Promise<void> => Promise.resolve()),
     };
     service.stop();
     service = new CloudSyncService(
@@ -797,10 +804,10 @@ describe('cloud replication invariants', () => {
     );
     vi.mocked(mkdtemp).mockResolvedValue(temporaryDirectory);
     vi.mocked(readFile).mockImplementation((filePath) => {
-      if (String(filePath).endsWith('database.sqlite')) {
-        return Promise.resolve(Buffer.from('verified SQLite replica')) as never;
+      if (typeof filePath === 'string' && filePath.endsWith('database.sqlite')) {
+        return Promise.resolve(Buffer.from('verified SQLite replica'));
       }
-      return Promise.resolve(filePath === 'audit-key' ? 'isolated-audit-key' : 'audit-pc') as never;
+      return Promise.resolve(filePath === 'audit-key' ? 'isolated-audit-key' : 'audit-pc');
     });
     request.mockImplementation((url: string): Response => {
       if (url.endsWith('/v1/monitor/heartbeat')) return new Response('{}', { status: 200 });

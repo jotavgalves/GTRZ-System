@@ -1,2 +1,4 @@
 output/
 tmp/
+index.js
+supabase/.temp/

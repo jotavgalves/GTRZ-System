@@ -142,9 +142,7 @@ export function addOrderItem(
       input.itemKind,
       input.itemId,
       configurationKey(input.itemKind, selections),
-    ) as
-    | { readonly id: string; readonly quantity: number }
-    | undefined;
+    ) as { readonly id: string; readonly quantity: number } | undefined;
   const nextQuantity = (existing?.quantity ?? 0) + input.quantity;
   const item = requireAvailableCatalogItem(
     database,

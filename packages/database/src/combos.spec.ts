@@ -217,10 +217,12 @@ describe('combo database', () => {
       salePriceCents: 1_000,
       components: [{ productId: beerId, quantity: 1 }],
     });
-    expect(deleteCombo(database, { comboId: deletable.id, reason: 'Limpeza do catálogo' })).toEqual({
-      comboId: deletable.id,
-      deleted: true,
-    });
+    expect(deleteCombo(database, { comboId: deletable.id, reason: 'Limpeza do catálogo' })).toEqual(
+      {
+        comboId: deletable.id,
+        deleted: true,
+      },
+    );
     expect(listCombos(database)).toEqual([]);
 
     const protectedCombo = createCombo(database, {
@@ -240,8 +242,9 @@ describe('combo database', () => {
       deleteCombo(database, { comboId: protectedCombo.id, reason: 'Limpeza do catálogo' }),
     ).toThrow('vendas ou comandas registradas');
     cancelOrder(database, { orderId: order.id, reason: 'Teste de limpeza' });
-    expect(deleteCombo(database, { comboId: protectedCombo.id, reason: 'Limpeza do catálogo' }))
-      .toMatchObject({ comboId: protectedCombo.id, deleted: true });
+    expect(
+      deleteCombo(database, { comboId: protectedCombo.id, reason: 'Limpeza do catálogo' }),
+    ).toMatchObject({ comboId: protectedCombo.id, deleted: true });
     expect(event.name).toBe('Evento exclusão de combo');
     database.close();
   });

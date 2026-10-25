@@ -6,6 +6,11 @@
   "description": "Cliente de teste mobile para o GTRZ System.",
   "author": "GTRZ Eventos",
   "main": "out/main/index.js",
+  "devDependencies": {
+    "@supabase/supabase-js": "2.93.1",
+    "electron-vite": "5.0.0",
+    "playwright": "1.62.0"
+  },
   "scripts": {
     "dev": "electron-vite dev",
     "build": "electron-vite build",

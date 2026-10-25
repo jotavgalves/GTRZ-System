@@ -96,7 +96,9 @@ export function ComboForm(props: ComboFormProps): React.JSX.Element {
           current !== '' ? current : (next.suppliers.find((supplier) => supplier.active)?.id ?? ''),
         );
       })
-      .catch(() => setFoodState(null));
+      .catch(() => {
+        setFoodState(null);
+      });
   }, [kind]);
 
   const externalFood = kind === 'food' && foodState?.supplierMode === 'external';
@@ -179,9 +181,7 @@ export function ComboForm(props: ComboFormProps): React.JSX.Element {
           groups.push([component]);
           continue;
         }
-        const existing = groups.find(
-          (group) => group[0]?.choiceGroup === component.choiceGroup,
-        );
+        const existing = groups.find((group) => group[0]?.choiceGroup === component.choiceGroup);
         if (existing === undefined) groups.push([component]);
         else existing.push(component);
       }
@@ -190,7 +190,11 @@ export function ComboForm(props: ComboFormProps): React.JSX.Element {
       const groupIndex = groups.findIndex((group) => group.includes(target));
       const nextIndex = groupIndex + direction;
       if (groupIndex < 0 || nextIndex < 0 || nextIndex >= groups.length) return current;
-      [groups[groupIndex], groups[nextIndex]] = [groups[nextIndex]!, groups[groupIndex]!];
+      const currentGroup = groups[groupIndex];
+      const nextGroup = groups[nextIndex];
+      if (currentGroup === undefined || nextGroup === undefined) return current;
+      groups[groupIndex] = nextGroup;
+      groups[nextIndex] = currentGroup;
       return groups.flat();
     });
   }
@@ -211,7 +215,7 @@ export function ComboForm(props: ComboFormProps): React.JSX.Element {
       const baseInput: CreateComboInput = {
         name,
         kind,
-        salePriceCents: externalFood ? externalFoodSalePriceCents ?? 0 : inputToCents(salePrice),
+        salePriceCents: externalFood ? (externalFoodSalePriceCents ?? 0) : inputToCents(salePrice),
         components: orderedComponents,
         ...(externalFood
           ? {
@@ -294,9 +298,15 @@ export function ComboForm(props: ComboFormProps): React.JSX.Element {
         <div className="combo-form__main-fields">
           <label className="form-field">
             <span>Fornecedor</span>
-            <select onChange={(event) => setSupplierId(event.target.value)} required value={supplierId}>
+            <select
+              onChange={(event) => {
+                setSupplierId(event.target.value);
+              }}
+              required
+              value={supplierId}
+            >
               <option value="">Selecione</option>
-              {foodState?.suppliers
+              {foodState.suppliers
                 .filter((supplier) => supplier.active)
                 .map((supplier) => (
                   <option key={supplier.id} value={supplier.id}>
@@ -307,11 +317,31 @@ export function ComboForm(props: ComboFormProps): React.JSX.Element {
           </label>
           <label className="form-field">
             <span>Valor do fornecedor por combo</span>
-            <input inputMode="decimal" min="0" onChange={(event) => setSupplierUnit(event.target.value)} required step="0.01" type="number" value={supplierUnit} />
+            <input
+              inputMode="decimal"
+              min="0"
+              onChange={(event) => {
+                setSupplierUnit(event.target.value);
+              }}
+              required
+              step="0.01"
+              type="number"
+              value={supplierUnit}
+            />
           </label>
           <label className="form-field">
             <span>Comissão GTRZ por combo</span>
-            <input inputMode="decimal" min="0" onChange={(event) => setCommissionUnit(event.target.value)} required step="0.01" type="number" value={commissionUnit} />
+            <input
+              inputMode="decimal"
+              min="0"
+              onChange={(event) => {
+                setCommissionUnit(event.target.value);
+              }}
+              required
+              step="0.01"
+              type="number"
+              value={commissionUnit}
+            />
           </label>
         </div>
       ) : null}
@@ -436,7 +466,9 @@ export function ComboForm(props: ComboFormProps): React.JSX.Element {
                   aria-label={`Mover ${product?.name ?? 'produto'} para cima`}
                   className="icon-button"
                   disabled={props.busy || index === 0}
-                  onClick={() => moveComponent(index, -1)}
+                  onClick={() => {
+                    moveComponent(index, -1);
+                  }}
                   type="button"
                 >
                   <ChevronUp size={15} aria-hidden="true" />
@@ -445,7 +477,9 @@ export function ComboForm(props: ComboFormProps): React.JSX.Element {
                   aria-label={`Mover ${product?.name ?? 'produto'} para baixo`}
                   className="icon-button"
                   disabled={props.busy || index === components.length - 1}
-                  onClick={() => moveComponent(index, 1)}
+                  onClick={() => {
+                    moveComponent(index, 1);
+                  }}
                   type="button"
                 >
                   <ChevronDown size={15} aria-hidden="true" />
@@ -506,7 +540,8 @@ export function ComboForm(props: ComboFormProps): React.JSX.Element {
             props.busy ||
             name.trim().length < 2 ||
             components.length === 0 ||
-            (externalFood && (supplierId.length === 0 || supplierUnit.length === 0 || commissionUnit.length === 0))
+            (externalFood &&
+              (supplierId.length === 0 || supplierUnit.length === 0 || commissionUnit.length === 0))
           }
           type="submit"
         >
