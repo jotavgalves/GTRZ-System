@@ -666,7 +666,7 @@ export class CloudSyncService {
         this.#ensureControlStream(database, deviceId, pairingKey);
       }
       if (canonicalCloud && this.#pendingBootstrap === null) {
-        await this.#recoverEmptyReplica(database, pairingKey, deviceId);
+        await this.#recoverPartialReplica(database, pairingKey, deviceId);
       }
       const workingDatabase = await this.#applyPendingBootstrap(database, pairingKey, deviceId);
       this.#enqueueNewAudits(workingDatabase, deviceId);
@@ -1342,8 +1342,12 @@ export class CloudSyncService {
 
     const { command } = pending;
     if (this.#hasAppliedBootstrap(database, command.commandId)) return database;
-    if (!this.#isBootstrapEligible(database, command.eventId)) {
-      this.#markBootstrapApplied(database, command);
+    const repair = command.commandId.startsWith('replica-repair:');
+    const eligible = repair
+      ? this.#isPartialReplicaReplaceable(database, command.eventId)
+      : this.#isBootstrapEligible(database, command.eventId);
+    if (!eligible) {
+      if (!repair) this.#markBootstrapApplied(database, command);
       return database;
     }
     if (command.bootstrapSnapshotId === null) return database;
@@ -1436,7 +1440,23 @@ export class CloudSyncService {
     return eventData.amount === 0;
   }
 
-  async #recoverEmptyReplica(
+  #isPartialReplicaReplaceable(database: DatabaseContext, eventId: string): boolean {
+    const state = database.sqlite
+      .prepare(
+        `SELECT
+         (SELECT COUNT(*) FROM events WHERE id <> ?) AS other_events,
+         (SELECT COUNT(*) FROM orders WHERE event_id = ?) AS orders,
+         (SELECT COUNT(*) FROM sync_outbox WHERE status IN ('pending', 'failed')) AS unsent`,
+      )
+      .get(eventId, eventId) as {
+      readonly other_events: number;
+      readonly orders: number;
+      readonly unsent: number;
+    };
+    return state.other_events === 0 && state.orders === 0 && state.unsent === 0;
+  }
+
+  async #recoverPartialReplica(
     database: DatabaseContext,
     pairingKey: string,
     deviceId: string,
@@ -1449,18 +1469,7 @@ export class CloudSyncService {
     )
       return;
     const event = getSessionState(database).activeEvent;
-    if (event === null || !this.#isBootstrapEligible(database, event.id)) return;
-    const localData = database.sqlite
-      .prepare(
-        `SELECT
-        (SELECT COUNT(*) FROM products) +
-        MAX((SELECT COUNT(*) FROM product_categories) - 1, 0) +
-        (SELECT COUNT(*) FROM combos) +
-        (SELECT COUNT(*) FROM stock_movements) +
-        (SELECT COUNT(*) FROM sync_outbox WHERE status IN ('pending', 'failed')) AS amount`,
-      )
-      .get() as { readonly amount: number };
-    if (localData.amount !== 0) return;
+    if (event === null || !this.#isPartialReplicaReplaceable(database, event.id)) return;
     if (Date.now() - this.#lastEmptyReplicaCheckAt < 60_000) return;
     this.#lastEmptyReplicaCheckAt = Date.now();
     const response = await fetch(

@@ -1007,7 +1007,7 @@ describe('cloud replication invariants', () => {
     ).toEqual({ quantity: 50 });
   });
 
-  it('repairs an already paired but empty PC whose activation was marked applied', async () => {
+  it('repairs a paired PC with partial catalog and stock but no local orders', async () => {
     const snapshot = Buffer.from('verified source database');
     const replaceWith = vi.fn((): Promise<void> => Promise.resolve());
     const now = Date.now();
@@ -1018,6 +1018,21 @@ describe('cloud replication invariants', () => {
       )
       .run(now, now, now);
     setActiveEvent(db, 'remote-event');
+    const category = createProductCategory(db, 'Partial catalog');
+    const product = createInventoryProduct(db, {
+      categoryId: category.id,
+      name: 'Partial product',
+      kind: 'drink',
+      costCents: 100,
+      salePriceCents: 300,
+      lowStockThreshold: 0,
+    });
+    recordStockMovement(db, {
+      productId: product.id,
+      type: 'correction-positive',
+      quantity: 3,
+    });
+    createServicePoint(db, { label: 'Partial table', type: 'table' });
     db.sqlite
       .prepare(
         `INSERT INTO sync_state (key, value, updated_at)
@@ -1062,6 +1077,34 @@ describe('cloud replication invariants', () => {
         .prepare("SELECT value FROM sync_state WHERE key = 'replica.baseline.snapshotId'")
         .get(),
     ).toEqual({ value: 'verified-copy' });
+  });
+
+  it('does not replace a PC that has a local order', async () => {
+    const event = createEvent(db, { name: 'Local order', startsAt: Date.now() });
+    setActiveEvent(db, event.id);
+    const table = createServicePoint(db, { label: 'Local table', type: 'table' });
+    openOrder(db, table.id);
+    const replaceWith = vi.fn((): Promise<void> => Promise.resolve());
+    service.stop();
+    service = new CloudSyncService(
+      'audit-key',
+      'audit-device',
+      (): void => undefined,
+      'https://muhzjnveqrahccoisddo.supabase.co/functions/v1/gtrz-sync-fallback',
+      (): string => 'Audit PC',
+      { get: (): ReturnType<typeof openDatabase> => db, replaceWith } as never,
+    );
+    request.mockImplementation(
+      (url: string): Response =>
+        new Response(JSON.stringify(url.includes('/global-control') ? { commands: [] } : {})),
+    );
+
+    await service.flushOutbox(db, event.id);
+
+    expect(replaceWith).not.toHaveBeenCalled();
+    expect(
+      db.sqlite.prepare('SELECT COUNT(*) AS n FROM orders WHERE event_id = ?').get(event.id),
+    ).toEqual({ n: 1 });
   });
 
   it('uploads a verified cloud replica before globally activating an event', async () => {
