@@ -198,6 +198,9 @@ describe('cloud replication invariants', () => {
           status: 200,
         });
       }
+      if (url.includes('/v1/monitor/global-control')) {
+        return new Response(JSON.stringify({ commands: [], cursor: 0 }), { status: 200 });
+      }
       return new Response('{}', { status: 200 });
     });
 
@@ -207,6 +210,20 @@ describe('cloud replication invariants', () => {
       expect.objectContaining({
         headers: expect.objectContaining({ 'X-GTRZ-Key': `gtrz-device-${'a'.repeat(64)}` }),
       }),
+    );
+    expect(request.mock.calls[2]?.[0]).toBe(
+      'https://audit.invalid/v1/monitor/global-control?after=0',
+    );
+  });
+
+  it('does not claim a successful installation when shared event control is unavailable', async () => {
+    request.mockImplementation(
+      (url: string): Response =>
+        new Response('{}', { status: url.includes('/v1/monitor/global-control') ? 503 : 200 }),
+    );
+
+    await expect(service.verifyOrEnrollDesktop()).rejects.toThrow(
+      'A central não liberou o estado compartilhado dos eventos.',
     );
   });
 

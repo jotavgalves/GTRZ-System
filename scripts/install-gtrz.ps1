@@ -1,5 +1,5 @@
 param(
-  [string]$ReleaseTag = 'v0.1.1-auto-install.1',
+  [string]$ReleaseTag = 'v0.1.1-auto-install.2',
   [string]$EnrollmentCode = '',
   [switch]$SkipMobileSimulator,
   [switch]$PlanOnly

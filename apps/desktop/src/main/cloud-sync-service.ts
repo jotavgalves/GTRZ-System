@@ -494,6 +494,21 @@ export class CloudSyncService {
     if (!response.ok) {
       throw new Error('A central recusou a credencial deste computador.');
     }
+    const control = await fetch(`${this.#endpoint}/v1/monitor/global-control?after=0`, {
+      headers: await this.#cloudHeaders(credential),
+      signal: AbortSignal.timeout(CONNECTION_TIMEOUT_MS),
+    });
+    if (!control.ok) {
+      throw new Error('A central não liberou o estado compartilhado dos eventos.');
+    }
+    const controlPayload: unknown = await control.json();
+    if (
+      !isRecord(controlPayload) ||
+      !Array.isArray(controlPayload.commands) ||
+      typeof controlPayload.cursor !== 'number'
+    ) {
+      throw new Error('A central retornou um estado compartilhado inválido.');
+    }
     return 'connected';
   }
 

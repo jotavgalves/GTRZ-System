@@ -1,11 +1,11 @@
 # Instalar o GTRZ System em outro PC
 
 Use o Windows PowerShell 5.1 como Administrador, na conta Windows que vai operar o sistema. A
-release `v0.1.1-auto-install.1` publica o desktop, o simulador mobile e `install-gtrz.ps1`.
+release `v0.1.1-auto-install.2` publica o desktop, o simulador mobile e `install-gtrz.ps1`.
 
 ```powershell
 $script = Join-Path $env:TEMP 'install-gtrz.ps1'
-Invoke-WebRequest -UseBasicParsing -Uri 'https://github.com/jotavgalves/GTRZ-System/releases/download/v0.1.1-auto-install.1/install-gtrz.ps1' -OutFile $script
+Invoke-WebRequest -UseBasicParsing -Uri 'https://github.com/jotavgalves/GTRZ-System/releases/download/v0.1.1-auto-install.2/install-gtrz.ps1' -OutFile $script
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File $script
 ```
 
