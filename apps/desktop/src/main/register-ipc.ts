@@ -340,11 +340,10 @@ export function registerIpcHandlers(options: RegisterIpcOptions): ThermalPrintSe
   registerPrintingIpcHandlers({ printService });
   registerOperationsIpcHandlers({
     getDatabase: options.getDatabase,
-    printAfterSale: async () => {
-      const database = options.getDatabase();
-      await options.cloudSyncService.flushOutbox(
-        database,
-        getSessionState(database).activeEvent?.id ?? null,
+    printAfterSale: () => {
+      options.cloudSyncService.requestImmediateFlush(
+        options.getDatabase,
+        () => getSessionState(options.getDatabase()).activeEvent?.id ?? null,
       );
     },
   });

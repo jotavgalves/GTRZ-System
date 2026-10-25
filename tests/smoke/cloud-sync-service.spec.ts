@@ -271,6 +271,79 @@ describe('cloud replication invariants', () => {
     ).toHaveLength(initialReads.length);
   });
 
+  it('sends a sale-triggered audit immediately after a busy flush, without a timer tick', async () => {
+    let releaseSnapshot: ((response: Response) => void) | undefined;
+    let snapshotRequested: (() => void) | undefined;
+    const snapshotStarted = new Promise<void>((resolve) => {
+      snapshotRequested = resolve;
+    });
+    let delayFirstSnapshot = true;
+    request = vi.fn((url: string): Response | Promise<Response> => {
+      if (url.includes('/_catalog/snapshot') && delayFirstSnapshot) {
+        delayFirstSnapshot = false;
+        snapshotRequested?.();
+        return new Promise<Response>((resolve) => {
+          releaseSnapshot = resolve;
+        });
+      }
+      if (url.includes('/global-control')) {
+        return new Response(JSON.stringify({ commands: [], pendingReset: null }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ currentSequence: 0, stock: [], events: [] }), {
+        status: 200,
+      });
+    });
+    vi.stubGlobal('fetch', request);
+
+    const firstFlush = service.flushOutbox(db, null);
+    await snapshotStarted;
+    const event = createEvent(db, { name: 'Sale during sync', startsAt: Date.now() });
+    const category = createProductCategory(db, 'Drinks');
+    const product = createInventoryProduct(db, {
+      categoryId: category.id,
+      name: 'Water',
+      kind: 'drink',
+      costCents: 100,
+      salePriceCents: 500,
+      lowStockThreshold: 0,
+    });
+    recordStockMovement(db, { productId: product.id, type: 'purchase', quantity: 1 });
+    const table = createServicePoint(db, { label: 'Table 1', type: 'table' });
+    const order = openOrder(db, table.id);
+    addOrderItem(db, { orderId: order.id, itemKind: 'product', itemId: product.id, quantity: 1 });
+    closeOrder(db, {
+      orderId: order.id,
+      discountCents: 0,
+      payments: [{ method: 'cash', amountCents: 500 }],
+    });
+    service.requestImmediateFlush(
+      () => db,
+      () => event.id,
+    );
+    releaseSnapshot?.(
+      new Response(JSON.stringify({ currentSequence: 0, stock: [], events: [] }), {
+        status: 200,
+      }),
+    );
+    await firstFlush;
+    const paidWasSent = (): boolean =>
+      request.mock.calls.some(([url, init]) => {
+        const body: unknown = (init as RequestInit | undefined)?.body;
+        return (
+          String(url).includes('/journal') &&
+          typeof body === 'string' &&
+          body.includes('operations.order-paid')
+        );
+      });
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      if (paidWasSent()) break;
+      await settle();
+    }
+
+    expect(paidWasSent()).toBe(true);
+    expect(actions()).toContain('operations.order-paid');
+  });
+
   it('applies a complete control WebSocket frame without an extra control read', async () => {
     await service.flushOutbox(db, null);
     const control = requireSocket('/monitor/');

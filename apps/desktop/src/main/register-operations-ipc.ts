@@ -41,7 +41,7 @@ import {
 
 interface RegisterOperationsIpcOptions {
   readonly getDatabase: () => DatabaseContext;
-  readonly printAfterSale: (orderId: string) => Promise<void>;
+  readonly printAfterSale: (orderId: string) => void;
 }
 
 const OPERATION_CHANNELS = [
@@ -173,7 +173,7 @@ export function registerOperationsIpcHandlers(options: RegisterOperationsIpcOpti
         voucherUses: input.voucherUses,
       }),
     );
-    void options.printAfterSale(order.id);
+    options.printAfterSale(order.id);
     return order;
   });
 

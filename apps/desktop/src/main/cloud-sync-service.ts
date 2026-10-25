@@ -389,6 +389,9 @@ export class CloudSyncService {
   #printRegistrationUpdatedAt = 0;
   #replicationRunning = true;
   #flushInFlight = false;
+  #immediateFlushRequest:
+    | (() => { database: DatabaseContext; activeEventId: string | null })
+    | null = null;
   #cloudConnected = false;
   #lastLatencyMs = 0;
   #pendingBootstrap: PendingBootstrap | null = null;
@@ -423,6 +426,7 @@ export class CloudSyncService {
 
   stop(): void {
     this.#replicationRunning = false;
+    this.#immediateFlushRequest = null;
     if (this.#outboxTimer !== null) {
       clearInterval(this.#outboxTimer);
       this.#outboxTimer = null;
@@ -451,6 +455,29 @@ export class CloudSyncService {
     };
     flush();
     this.#outboxTimer = setInterval(flush, OUTBOX_INTERVAL_MS);
+  }
+
+  requestImmediateFlush(
+    getDatabase: () => DatabaseContext,
+    getActiveEventId: () => string | null,
+  ): void {
+    // A sale can finish while a periodic flush is awaiting the network. Keep
+    // the request so it runs immediately afterward instead of waiting for the
+    // next three-second interval. Resolve the database again after bootstrap.
+    this.#immediateFlushRequest = () => ({
+      database: getDatabase(),
+      activeEventId: getActiveEventId(),
+    });
+    this.#runImmediateFlush();
+  }
+
+  #runImmediateFlush(): void {
+    if (this.#flushInFlight || !this.#replicationRunning) return;
+    const request = this.#immediateFlushRequest;
+    if (request === null) return;
+    this.#immediateFlushRequest = null;
+    const { database, activeEventId } = request();
+    void this.flushOutbox(database, activeEventId).catch(() => undefined);
   }
 
   setPrintAgent(
@@ -848,6 +875,7 @@ export class CloudSyncService {
       this.#recordCloudFailure();
     } finally {
       this.#flushInFlight = false;
+      this.#runImmediateFlush();
     }
   }
 
