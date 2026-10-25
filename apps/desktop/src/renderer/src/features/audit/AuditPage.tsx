@@ -30,11 +30,11 @@ export function AuditPage(): React.JSX.Element {
   const [action, setAction] = useState('all');
   const [from, setFrom] = useState('');
   const [to, setTo] = useState('');
+  const records = useMemo(() => state?.records ?? [], [state?.records]);
+  const actions = useMemo(() => sortAuditActions(state?.actions ?? []), [state?.actions]);
   if (loading && state === null) {
     return <div className="route-state">Carregando auditoria…</div>;
   }
-  const records = useMemo(() => state?.records ?? [], [state?.records]);
-  const actions = useMemo(() => sortAuditActions(state?.actions ?? []), [state?.actions]);
   const productionRecords = records.filter((record) => record.profile === 'production').length;
   const cashierRecords = records.length - productionRecords;
   const activeFilterCount = [

@@ -35,6 +35,12 @@ test('SMK-BRD-001 — exibe marca oficial e insights operacionais', async () => 
     await expect(window.getByText('Nenhum filtro ativo', { exact: true })).toBeVisible();
     await expect(window.getByRole('option', { name: 'Evento criado' })).toBeAttached();
     await expect(window.getByText('Perfil Produção', { exact: true })).toBeVisible();
+
+    await window.getByRole('link', { name: 'Ingressos' }).click();
+    await expect(window.getByRole('heading', { name: 'Ingressos' }).first()).toBeVisible();
+    await window.getByRole('link', { name: 'Auditoria' }).click();
+    await expect(window.getByText('Nenhum filtro ativo', { exact: true })).toBeVisible();
+    await expect(window.getByText('Falha ao abrir esta área')).toHaveCount(0);
   } finally {
     await closeElectronApplication(electronApplication);
   }
