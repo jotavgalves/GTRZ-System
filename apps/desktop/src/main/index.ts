@@ -25,6 +25,7 @@ let mainWindowWasCreated = false;
 const runtimeEnvironment = getRuntimeEnvironment();
 const visualQaRun = isVisualQaRun();
 const cloudSyncEnabledForRuntime = process.env.GTRZ_E2E_DISABLE_CLOUD_SYNC !== '1';
+const installationEnrollment = process.env.GTRZ_INSTALL_ENROLLMENT === '1';
 
 if (visualQaRun) {
   const userDataPath = process.env.GTRZ_E2E_USER_DATA_PATH?.trim();
@@ -123,6 +124,19 @@ if (!hasSingleInstanceLock) {
         path.join(userDataPath, 'gtrz-cloud-device-credential.json'),
       );
 
+      if (installationEnrollment) {
+        if (runtimeEnvironment !== 'production' || visualQaRun) {
+          throw new Error('O vínculo automático está disponível somente na operação oficial.');
+        }
+        const result = await cloudSyncService.verifyOrEnrollDesktop(
+          process.env.GTRZ_INSTALL_ENROLLMENT_CODE,
+        );
+        databaseRuntime.close();
+        databaseRuntime = null;
+        app.exit(result === 'connected' ? 0 : 2);
+        return;
+      }
+
       const printService = registerIpcHandlers({
         getDatabase: () => requireDatabaseRuntime().get(),
         databaseReady: () => requireDatabaseRuntime().isReady(),
@@ -170,6 +184,13 @@ if (!hasSingleInstanceLock) {
     } catch (error: unknown) {
       const message =
         error instanceof Error ? error.message : 'Falha desconhecida na inicialização.';
+      if (installationEnrollment) {
+        console.error(message);
+        databaseRuntime?.close();
+        databaseRuntime = null;
+        app.exit(1);
+        return;
+      }
       dialog.showErrorBox(`${environmentLabel(runtimeEnvironment)} não pôde iniciar`, message);
       app.quit();
     }

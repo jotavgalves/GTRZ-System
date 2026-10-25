@@ -466,6 +466,37 @@ export class CloudSyncService {
     this.#resetBackupAgent = agent;
   }
 
+  async verifyOrEnrollDesktop(enrollmentCode?: string): Promise<'connected' | 'code-required'> {
+    let credential = await this.#readPairingKey();
+    if (credential === null) {
+      if (enrollmentCode === undefined || enrollmentCode.trim().length === 0) {
+        return 'code-required';
+      }
+      await this.exchangeDesktopEnrollment(enrollmentCode.trim());
+      credential = await this.#readPairingKey();
+      if (credential === null) {
+        throw new Error('O vínculo foi aceito, mas a credencial não foi salva neste computador.');
+      }
+    }
+
+    const deviceId = await this.#readOrCreateDeviceId();
+    const response = await fetch(`${this.#endpoint}/v1/monitor/heartbeat`, {
+      method: 'POST',
+      headers: await this.#cloudHeaders(credential, { 'Content-Type': 'application/json' }),
+      body: JSON.stringify({
+        deviceId,
+        label: this.#getDeviceLabel(),
+        activeEventId: null,
+        latencyMs: 0,
+      }),
+      signal: AbortSignal.timeout(CONNECTION_TIMEOUT_MS),
+    });
+    if (!response.ok) {
+      throw new Error('A central recusou a credencial deste computador.');
+    }
+    return 'connected';
+  }
+
   async createDesktopEnrollment(): Promise<{
     readonly enrollmentCode: string;
     readonly expiresAt: number;

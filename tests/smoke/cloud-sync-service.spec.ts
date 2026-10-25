@@ -135,6 +135,10 @@ const actions = (): string[] =>
 
 beforeEach((): void => {
   sockets().length = 0;
+  vi.mocked(readFile).mockImplementation((filePath) =>
+    Promise.resolve(filePath === 'audit-key' ? 'isolated-audit-key' : 'audit-pc'),
+  );
+  vi.mocked(writeFile).mockImplementation((): Promise<void> => Promise.resolve());
   vi.mocked(writeFile).mockClear();
   globalCommands = [];
   db = openDatabase(':memory:');
@@ -168,6 +172,54 @@ afterEach((): void => {
 });
 
 describe('cloud replication invariants', () => {
+  it('requires a one-time code for a new desktop without contacting the cloud', async () => {
+    vi.mocked(readFile).mockRejectedValue(new Error('not enrolled'));
+
+    await expect(service.verifyOrEnrollDesktop()).resolves.toBe('code-required');
+    expect(request).not.toHaveBeenCalled();
+  });
+
+  it('exchanges the code once and confirms the new desktop with a heartbeat', async () => {
+    let storedCredential: string | null = null;
+    vi.mocked(readFile).mockImplementation((filePath) => {
+      if (filePath === 'audit-device') return Promise.resolve('audit-pc');
+      if (filePath === 'gtrz-cloud-device-credential.json' && storedCredential !== null) {
+        return Promise.resolve(storedCredential);
+      }
+      return Promise.reject(new Error('not enrolled'));
+    });
+    vi.mocked(writeFile).mockImplementation((_filePath, contents) => {
+      if (typeof contents === 'string') storedCredential = contents;
+      return Promise.resolve();
+    });
+    request.mockImplementation((url: string): Response => {
+      if (url.endsWith('/v1/desktop/enrollment/exchange')) {
+        return new Response(JSON.stringify({ token: `gtrz-device-${'a'.repeat(64)}` }), {
+          status: 200,
+        });
+      }
+      return new Response('{}', { status: 200 });
+    });
+
+    await expect(service.verifyOrEnrollDesktop('one-time-code')).resolves.toBe('connected');
+    expect(request).toHaveBeenCalledWith(
+      'https://audit.invalid/v1/monitor/heartbeat',
+      expect.objectContaining({
+        headers: expect.objectContaining({ 'X-GTRZ-Key': `gtrz-device-${'a'.repeat(64)}` }),
+      }),
+    );
+  });
+
+  it('keeps an existing desktop credential and rejects a failed cloud verification', async () => {
+    request.mockImplementation((): Response => new Response('{}', { status: 401 }));
+
+    await expect(service.verifyOrEnrollDesktop()).rejects.toThrow(
+      'A central recusou a credencial deste computador.',
+    );
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(request.mock.calls[0]?.[0]).toBe('https://audit.invalid/v1/monitor/heartbeat');
+  });
+
   it('does not poll global control on every local outbox interval once a control stream exists', async () => {
     await service.flushOutbox(db, null);
     const initialReads = request.mock.calls.filter(([url]) =>
