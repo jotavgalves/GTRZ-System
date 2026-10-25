@@ -6,6 +6,7 @@ import {
   changeEventStatusInputSchema,
   changeProductionPasswordInputSchema,
   cloudSyncStatusSchema,
+  cloudSyncQueueSchema,
   cloudMonitorSchema,
   desktopEnrollmentSchema,
   desktopDeviceListSchema,
@@ -93,6 +94,7 @@ const CONTROL_CHANNELS = [
   IPC_CHANNELS.settingsUpdatePaymentTerminal,
   IPC_CHANNELS.settingsGetCloudSyncStatus,
   IPC_CHANNELS.settingsGetCloudMonitor,
+  IPC_CHANNELS.settingsGetLocalQueue,
   IPC_CHANNELS.settingsCreateDesktopEnrollment,
   IPC_CHANNELS.settingsExchangeDesktopEnrollment,
   IPC_CHANNELS.settingsListDesktopDevices,
@@ -223,6 +225,10 @@ export function registerIpcHandlers(options: RegisterIpcOptions): ThermalPrintSe
     });
   });
 
+  ipcMain.handle(IPC_CHANNELS.settingsGetLocalQueue, () =>
+    cloudSyncQueueSchema.parse(options.cloudSyncService.getQueueState(options.getDatabase())),
+  );
+
   ipcMain.handle(IPC_CHANNELS.settingsCreateDesktopEnrollment, async () => {
     if (getSessionState(options.getDatabase()).profile !== 'production') {
       throw new Error('Entre no perfil Produção para adicionar outro computador.');
@@ -230,12 +236,15 @@ export function registerIpcHandlers(options: RegisterIpcOptions): ThermalPrintSe
     return desktopEnrollmentSchema.parse(await options.cloudSyncService.createDesktopEnrollment());
   });
 
-  ipcMain.handle(IPC_CHANNELS.settingsExchangeDesktopEnrollment, async (_event, payload: unknown) => {
-    await options.cloudSyncService.exchangeDesktopEnrollment(
-      exchangeDesktopEnrollmentInputSchema.parse(payload).enrollmentCode,
-    );
-    return operationResultSchema.parse({ success: true });
-  });
+  ipcMain.handle(
+    IPC_CHANNELS.settingsExchangeDesktopEnrollment,
+    async (_event, payload: unknown) => {
+      await options.cloudSyncService.exchangeDesktopEnrollment(
+        exchangeDesktopEnrollmentInputSchema.parse(payload).enrollmentCode,
+      );
+      return operationResultSchema.parse({ success: true });
+    },
+  );
 
   ipcMain.handle(IPC_CHANNELS.settingsListDesktopDevices, async () => {
     if (getSessionState(options.getDatabase()).profile !== 'production') {

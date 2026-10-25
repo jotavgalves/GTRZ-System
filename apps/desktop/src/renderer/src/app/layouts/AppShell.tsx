@@ -1,8 +1,8 @@
-import { Cloud, Database, Shield, WifiOff } from 'lucide-react';
+import { AlertTriangle, Cloud, Database, Shield, WifiOff } from 'lucide-react';
 import { useEffect, useMemo, useState, type CSSProperties } from 'react';
 import { NavLink, Outlet } from 'react-router';
 
-import type { CloudSyncStatus, SystemInfo } from '@gtrz/contracts';
+import type { CloudSyncQueue, CloudSyncStatus, SystemInfo } from '@gtrz/contracts';
 
 import gtrzLockup from '../../assets/brand/gtrz-lockup.svg';
 import { navigationModules } from '../../shared/navigation/modules';
@@ -26,6 +26,7 @@ export function AppShell(): React.JSX.Element {
   const [systemInfo, setSystemInfo] = useState<SystemInfo | null>(null);
   const [systemError, setSystemError] = useState<string | null>(null);
   const [cloudStatus, setCloudStatus] = useState<CloudSyncStatus | null>(null);
+  const [localQueue, setLocalQueue] = useState<CloudSyncQueue | null>(null);
   const { state: sessionState, loading: sessionLoading, error: sessionError } = useSession();
   const activeProfile = sessionState?.profile ?? 'production';
   const activeEvent = sessionState?.activeEvent ?? null;
@@ -85,6 +86,14 @@ export function AppShell(): React.JSX.Element {
         })
         .catch(() => {
           if (mounted) setCloudStatus(null);
+        });
+      void window.gtrz.settings
+        .getLocalQueue()
+        .then((queue) => {
+          if (mounted) setLocalQueue(queue);
+        })
+        .catch(() => {
+          if (mounted) setLocalQueue(null);
         });
     };
 
@@ -186,6 +195,28 @@ export function AppShell(): React.JSX.Element {
           <div className="topbar-status" aria-live="polite">
             {systemInfo?.environment === 'test' ? (
               <span className="status-pill status-pill--test">Teste isolado</span>
+            ) : null}
+            {localQueue !== null &&
+            (localQueue.outboxPending > 0 ||
+              localQueue.outboxFailed > 0 ||
+              localQueue.inboxAwaitingApply > 0 ||
+              localQueue.conflictsOpen > 0 ||
+              localQueue.printQueueError !== null) ? (
+              <NavLink
+                className="status-pill status-pill--pending"
+                to="/nuvem"
+                title={
+                  localQueue.printQueueError ??
+                  `${String(localQueue.outboxPending)} para enviar, ${String(localQueue.outboxFailed)} com falha, ${String(localQueue.inboxAwaitingApply)} para aplicar, ${String(localQueue.conflictsOpen)} conflitos`
+                }
+              >
+                <AlertTriangle size={16} aria-hidden="true" />
+                {localQueue.printQueueError !== null
+                  ? 'Impressão requer atenção'
+                  : localQueue.outboxFailed > 0 || localQueue.conflictsOpen > 0
+                    ? 'Sincronização requer atenção'
+                    : `${String(localQueue.outboxPending + localQueue.inboxAwaitingApply)} na fila`}
+              </NavLink>
             ) : null}
             <span
               className={

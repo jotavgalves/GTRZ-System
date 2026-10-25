@@ -267,7 +267,9 @@ export function CloudMonitorPage(): React.JSX.Element {
       void load();
     } catch (exchangeError: unknown) {
       setEnrollmentError(
-        exchangeError instanceof Error ? exchangeError.message : 'Não foi possível vincular este computador.',
+        exchangeError instanceof Error
+          ? exchangeError.message
+          : 'Não foi possível vincular este computador.',
       );
     } finally {
       setEnrollmentBusy(false);
@@ -284,7 +286,9 @@ export function CloudMonitorPage(): React.JSX.Element {
       await loadDesktopDevices();
     } catch (revokeError: unknown) {
       setEnrollmentError(
-        revokeError instanceof Error ? revokeError.message : 'Não foi possível bloquear o computador.',
+        revokeError instanceof Error
+          ? revokeError.message
+          : 'Não foi possível bloquear o computador.',
       );
     } finally {
       setEnrollmentBusy(false);
@@ -388,7 +392,9 @@ export function CloudMonitorPage(): React.JSX.Element {
           </form>
         </div>
         {enrollmentError === null ? null : <p className="form-error">{enrollmentError}</p>}
-        {enrollmentNotice === null ? null : <p className="cloud-enrollment__notice">{enrollmentNotice}</p>}
+        {enrollmentNotice === null ? null : (
+          <p className="cloud-enrollment__notice">{enrollmentNotice}</p>
+        )}
       </section>
 
       <div className="cloud-monitor-summary">
@@ -618,6 +624,9 @@ export function CloudMonitorPage(): React.JSX.Element {
             <b>{monitor?.localQueue.conflictsOpen ?? 0}</b> conflitos abertos para auditoria
           </span>
         </div>
+        {monitor?.localQueue.printQueueError ? (
+          <p className="form-error">Impressão pendente: {monitor.localQueue.printQueueError}</p>
+        ) : null}
       </section>
 
       <section className="panel cloud-flow-panel">

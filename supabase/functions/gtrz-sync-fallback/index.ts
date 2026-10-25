@@ -1354,6 +1354,30 @@ Deno.serve(async (request) => {
       operator = current.operator as Obj,
       eventId = string(current.eventId, 'eventId'),
       allowed = operator.permissions as Record<Permission, boolean>;
+    if (path === '/v1/mobile/sales/status' && request.method === 'GET') {
+      if (!allowed.sales)
+        return bad(403, 'MOBILE_FORBIDDEN', 'Este perfil não possui esta permissão.');
+      const query = new URL(request.url).searchParams,
+        commandId = string(query.get('commandId'), 'commandId'),
+        saleId = string(query.get('saleId'), 'saleId');
+      const { data, error } = await store
+        .from('event_commands')
+        .select('response_json')
+        .eq('event_id', eventId)
+        .eq('command_id', commandId)
+        .maybeSingle();
+      if (error) throw error;
+      const response = asObj(data?.response_json) ? data.response_json : null,
+        event = response && asObj(response.event) ? response.event : null,
+        payload = event && asObj(event.payload) ? event.payload : null,
+        deviceId = `mobile:${String(operator.id)}:${String(current.deviceId)}`.slice(0, 80);
+      return ok({
+        accepted:
+          payload?.action === 'operations.order-paid' &&
+          payload.entityId === saleId &&
+          payload.deviceId === deviceId,
+      });
+    }
     if (path === '/v1/mobile/realtime-topic' && request.method === 'GET') {
       const raw = routeToken(request);
       if (!raw) throw new Error('A sessão móvel foi encerrada.');

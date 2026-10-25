@@ -20,6 +20,7 @@ import {
 let mainWindow: BrowserWindow | null = null;
 let databaseRuntime: DatabaseRuntime | null = null;
 let cloudSyncService: CloudSyncService | null = null;
+let automaticBackupTimer: ReturnType<typeof setInterval> | null = null;
 let mainWindowWasCreated = false;
 const runtimeEnvironment = getRuntimeEnvironment();
 const visualQaRun = isVisualQaRun();
@@ -149,7 +150,19 @@ if (!hasSingleInstanceLock) {
         );
       }
 
-      await backupService.createBackup('automatic').catch(() => undefined);
+      await backupService.createBackup('automatic').catch((error: unknown) => {
+        console.error('Falha no backup automático inicial:', error);
+      });
+      if (!isolatedDataRun) {
+        automaticBackupTimer = setInterval(
+          () => {
+            void backupService.createBackup('automatic').catch((error: unknown) => {
+              console.error('Falha no backup automático periódico:', error);
+            });
+          },
+          2 * 60 * 60 * 1000,
+        );
+      }
       mainWindowWasCreated = true;
       mainWindow = createMainWindow({
         title: visualQaRun ? 'GTRZ System - QA visual' : environmentLabel(runtimeEnvironment),
@@ -170,6 +183,7 @@ if (!hasSingleInstanceLock) {
   });
 
   app.on('before-quit', () => {
+    if (automaticBackupTimer !== null) clearInterval(automaticBackupTimer);
     cloudSyncService?.stop();
     databaseRuntime?.close();
     databaseRuntime = null;

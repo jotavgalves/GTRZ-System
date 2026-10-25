@@ -42,6 +42,7 @@ export const IPC_CHANNELS = {
   settingsUpdatePaymentTerminal: 'settings:update-payment-terminal',
   settingsGetCloudSyncStatus: 'settings:get-cloud-sync-status',
   settingsGetCloudMonitor: 'settings:get-cloud-monitor',
+  settingsGetLocalQueue: 'settings:get-local-queue',
   settingsCreateDesktopEnrollment: 'settings:create-desktop-enrollment',
   settingsExchangeDesktopEnrollment: 'settings:exchange-desktop-enrollment',
   settingsListDesktopDevices: 'settings:list-desktop-devices',
@@ -340,6 +341,7 @@ export const cloudSyncQueueSchema = z.object({
   inboxReceived: z.number().int().nonnegative(),
   inboxAwaitingApply: z.number().int().nonnegative(),
   conflictsOpen: z.number().int().nonnegative(),
+  printQueueError: z.string().nullable(),
 });
 
 export const cloudSyncConflictSchema = z.object({
@@ -448,6 +450,7 @@ export type UpdateMobileOperatorInput = z.infer<typeof updateMobileOperatorInput
 export type EndMobileOperatorSessionsInput = z.infer<typeof endMobileOperatorSessionsInputSchema>;
 export type DeleteMobileOperatorInput = z.infer<typeof deleteMobileOperatorInputSchema>;
 export type CloudMonitor = z.infer<typeof cloudMonitorSchema>;
+export type CloudSyncQueue = z.infer<typeof cloudSyncQueueSchema>;
 export type BackupKind = z.infer<typeof backupKindSchema>;
 export type BackupRecord = z.infer<typeof backupRecordSchema>;
 export type BackupState = z.infer<typeof backupStateSchema>;
@@ -485,6 +488,7 @@ export interface GtrzDesktopApi {
     ): Promise<PaymentTerminalSettings>;
     getCloudSyncStatus(): Promise<CloudSyncStatus>;
     getCloudMonitor(): Promise<CloudMonitor>;
+    getLocalQueue(): Promise<CloudSyncQueue>;
     createDesktopEnrollment(): Promise<DesktopEnrollment>;
     exchangeDesktopEnrollment(input: ExchangeDesktopEnrollmentInput): Promise<OperationResult>;
     listDesktopDevices(): Promise<readonly DesktopDevice[]>;

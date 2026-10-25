@@ -100,7 +100,7 @@ export function BackupsPage(): React.JSX.Element {
         </article>
         <article className="summary-card">
           <span>Proteção automática</span>
-          <strong>Ativa</strong>
+          <strong>A cada 2 h</strong>
         </article>
       </div>
 

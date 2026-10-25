@@ -598,10 +598,7 @@ class MonitorRoom extends DurableObject<Env> {
         return json(await this.#createDesktopEnrollment(await readJson(request)));
       }
 
-      if (
-        request.method === 'POST' &&
-        url.pathname === '/v1/monitor/desktop/enrollment/exchange'
-      ) {
+      if (request.method === 'POST' && url.pathname === '/v1/monitor/desktop/enrollment/exchange') {
         return json(await this.#exchangeDesktopEnrollment(await readJson(request)));
       }
 
@@ -856,12 +853,12 @@ class MonitorRoom extends DurableObject<Env> {
           codeHash,
         )
         .toArray()[0];
-      if (
-        code === undefined ||
-        Number(code.expires_at) < now ||
-        code.consumed_at !== null
-      ) {
-        throw new ApiError(401, 'INVALID_ENROLLMENT', 'O código de vínculo expirou ou já foi usado.');
+      if (code === undefined || Number(code.expires_at) < now || code.consumed_at !== null) {
+        throw new ApiError(
+          401,
+          'INVALID_ENROLLMENT',
+          'O código de vínculo expirou ou já foi usado.',
+        );
       }
       this.ctx.storage.sql
         .exec(
@@ -1101,7 +1098,9 @@ class MonitorRoom extends DurableObject<Env> {
         )
         .toArray();
       this.ctx.storage.sql
-        .exec('UPDATE monitor_metrics SET accepted_commands = accepted_commands + 1 WHERE metrics_id = 1')
+        .exec(
+          'UPDATE monitor_metrics SET accepted_commands = accepted_commands + 1 WHERE metrics_id = 1',
+        )
         .toArray();
       this.#trimObservationHistory();
     }
@@ -2164,6 +2163,19 @@ class EventRoom extends DurableObject<Env> {
             url.pathname.split('/')[3] ?? '',
           ),
         );
+      }
+
+      if (request.method === 'GET' && url.pathname.endsWith('/cashier/sales/status')) {
+        const commandId = requiredString(url.searchParams.get('commandId'), 'commandId');
+        const saleId = requiredString(url.searchParams.get('saleId'), 'saleId');
+        const existing = this.#existingCommand(commandId);
+        const payload = existing?.event.payload;
+        const accepted =
+          isRecord(payload) &&
+          payload.action === 'operations.order-paid' &&
+          payload.entityId === saleId &&
+          payload.deviceId === request.headers.get('X-GTRZ-Cashier-Device');
+        return json({ accepted });
       }
 
       if (request.method === 'POST' && url.pathname.endsWith('/cashier/stock')) {
@@ -5141,7 +5153,7 @@ function cashierApiRequest(url: URL): boolean {
 }
 
 function mobileApiRequest(url: URL): boolean {
-  return /^\/v1\/mobile\/(catalog|context|sales|stock|tickets|expenses|vouchers|stream|session|session\/stream)$/.test(
+  return /^\/v1\/mobile\/(catalog|context|sales(?:\/status)?|stock|tickets|expenses|vouchers|stream|session|session\/stream)$/.test(
     url.pathname,
   );
 }
@@ -5272,7 +5284,11 @@ export default {
         return json({ error: { code: 'UNAUTHORIZED', message: 'Chave de acesso inválida.' } }, 401);
       }
       const payload = await readJson(request);
-      const deviceId = requiredString(request.headers.get('X-GTRZ-Device-Id'), 'X-GTRZ-Device-Id', 80);
+      const deviceId = requiredString(
+        request.headers.get('X-GTRZ-Device-Id'),
+        'X-GTRZ-Device-Id',
+        80,
+      );
       const monitor = env.MONITOR_ROOM.get(env.MONITOR_ROOM.idFromName('gtrz-monitor'));
       return monitor.fetch(
         new Request('https://monitor.internal/v1/monitor/desktop/enrollment', {
@@ -5424,7 +5440,7 @@ export default {
         );
       }
       const permission =
-        url.pathname === '/v1/mobile/sales'
+        url.pathname === '/v1/mobile/sales' || url.pathname === '/v1/mobile/sales/status'
           ? 'sales'
           : url.pathname === '/v1/mobile/stock'
             ? 'inventory'

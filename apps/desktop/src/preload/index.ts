@@ -6,6 +6,7 @@ import {
   changeEventStatusInputSchema,
   changeProductionPasswordInputSchema,
   cloudSyncStatusSchema,
+  cloudSyncQueueSchema,
   cloudMonitorSchema,
   desktopEnrollmentSchema,
   desktopDeviceListSchema,
@@ -42,6 +43,7 @@ import {
   type ChangeEventStatusInput,
   type ChangeProductionPasswordInput,
   type CloudSyncStatus,
+  type CloudSyncQueue,
   type CloudMonitor,
   type DesktopEnrollment,
   type DesktopDevice,
@@ -188,6 +190,10 @@ const api: GtrzDesktopApi = {
     async getCloudMonitor(): Promise<CloudMonitor> {
       const payload: unknown = await ipcRenderer.invoke(IPC_CHANNELS.settingsGetCloudMonitor);
       return cloudMonitorSchema.parse(payload);
+    },
+    async getLocalQueue(): Promise<CloudSyncQueue> {
+      const payload: unknown = await ipcRenderer.invoke(IPC_CHANNELS.settingsGetLocalQueue);
+      return cloudSyncQueueSchema.parse(payload);
     },
     async createDesktopEnrollment(): Promise<DesktopEnrollment> {
       const payload: unknown = await ipcRenderer.invoke(

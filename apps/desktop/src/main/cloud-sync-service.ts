@@ -1092,6 +1092,12 @@ export class CloudSyncService {
       inboxReceived: counts.inbox_received,
       inboxAwaitingApply: counts.inbox_awaiting_apply,
       conflictsOpen: counts.conflicts_open,
+      printQueueError:
+        (
+          database.sqlite
+            .prepare("SELECT value FROM sync_state WHERE key = 'cloud.print-queue.last-error'")
+            .get() as { readonly value: string } | undefined
+        )?.value ?? null,
     };
   }
 
