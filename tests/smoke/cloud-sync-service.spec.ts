@@ -20,6 +20,7 @@ import {
   openOrder,
   recordStockMovement,
   renameEvent,
+  setActiveEvent,
   updateInventoryProduct,
 } from '@gtrz/database';
 import { CloudSyncService } from '../../apps/desktop/src/main/cloud-sync-service';
@@ -874,6 +875,193 @@ describe('cloud replication invariants', () => {
         )
         .get(),
     ).toEqual({ value: 'applied' });
+  });
+
+  it('chooses the newest verified cloud copy instead of the stale activation copy', async () => {
+    const snapshot = Buffer.from('newest verified SQLite replica');
+    const checksum = createHash('sha256').update(snapshot).digest('hex');
+    const replaceWith = vi.fn((): Promise<void> => Promise.resolve());
+    service.stop();
+    service = new CloudSyncService(
+      'audit-key',
+      'audit-device',
+      (): void => undefined,
+      'https://muhzjnveqrahccoisddo.supabase.co/functions/v1/gtrz-sync-fallback',
+      (): string => 'Audit PC',
+      { get: (): ReturnType<typeof openDatabase> => db, replaceWith } as never,
+    );
+    request.mockImplementation((url: string): Response => {
+      if (url.endsWith('/replica-snapshot/latest')) {
+        return new Response(
+          JSON.stringify({
+            snapshotId: 'new-copy',
+            eventId: 'remote-event',
+            sourceDeviceId: 'source-device',
+          }),
+          { status: 200 },
+        );
+      }
+      if (url.endsWith('/replica-snapshot/new-copy')) {
+        return new Response(snapshot, {
+          status: 200,
+          headers: {
+            'X-GTRZ-Snapshot-Event': 'remote-event',
+            'X-GTRZ-Snapshot-Sha256': checksum,
+            'X-GTRZ-Snapshot-Size': String(snapshot.byteLength),
+          },
+        });
+      }
+      if (url.includes('/global-control')) {
+        return new Response(
+          JSON.stringify({
+            commands: [
+              {
+                sequence: 47,
+                commandId: 'old-activation',
+                type: 'event.activated',
+                eventId: 'remote-event',
+                eventName: 'Remote event',
+                bootstrapSnapshotId: 'old-copy',
+                snapshotSourceDeviceId: 'source-device',
+                createdAt: Date.now(),
+              },
+            ],
+          }),
+          { status: 200 },
+        );
+      }
+      return new Response(JSON.stringify({ currentSequence: 0, events: [], stock: [] }), {
+        status: 200,
+      });
+    });
+
+    await service.flushOutbox(db, null);
+
+    expect(replaceWith).toHaveBeenCalledTimes(1);
+    expect(request).toHaveBeenCalledWith(
+      expect.stringContaining('/replica-snapshot/new-copy'),
+      expect.anything(),
+    );
+    expect(
+      request.mock.calls.some(([url]) => String(url).endsWith('/replica-snapshot/old-copy')),
+    ).toBe(false);
+  });
+
+  it('settles a legacy rejected stock entry already present in the source database', async () => {
+    const event = createEvent(db, { name: 'Stock event', startsAt: Date.now() });
+    setActiveEvent(db, event.id);
+    const category = createProductCategory(db, 'Food');
+    const product = createInventoryProduct(db, {
+      categoryId: category.id,
+      name: 'Arepa',
+      kind: 'food',
+      costCents: 100,
+      salePriceCents: 300,
+      lowStockThreshold: 0,
+    });
+    recordStockMovement(db, {
+      productId: product.id,
+      type: 'correction-positive',
+      quantity: 50,
+      note: 'Legacy entry',
+    });
+    const movement = db.sqlite
+      .prepare('SELECT id FROM stock_movements WHERE note = ?')
+      .get('Legacy entry') as { readonly id: string };
+    db.sqlite
+      .prepare(
+        `INSERT INTO sync_inbox
+       (event_id, sequence, command_id, payload_json, received_at, applied_at)
+       VALUES (?, ?, ?, ?, ?, NULL)`,
+      )
+      .run(
+        event.id,
+        500,
+        'old-rejection',
+        JSON.stringify({
+          action: 'inventory.stock-rejected',
+          deviceId: 'cloud-audit',
+          entityId: 'cloud-reject:old-rejection',
+          createdAt: Date.now(),
+          details: {
+            originalMovementId: movement.id,
+            rejectedDeviceId: 'audit-pc',
+            delta: 50,
+            reason: 'O movimento de estoque não contém uma quantidade válida.',
+          },
+        }),
+        Date.now(),
+      );
+
+    await service.flushOutbox(db, event.id);
+
+    expect(
+      db.sqlite
+        .prepare('SELECT applied_at FROM sync_inbox WHERE command_id = ?')
+        .get('old-rejection'),
+    ).toMatchObject({ applied_at: expect.any(Number) });
+    expect(
+      db.sqlite
+        .prepare('SELECT quantity FROM event_stock WHERE event_id = ? AND product_id = ?')
+        .get(event.id, product.id),
+    ).toEqual({ quantity: 50 });
+  });
+
+  it('repairs an already paired but empty PC whose activation was marked applied', async () => {
+    const snapshot = Buffer.from('verified source database');
+    const replaceWith = vi.fn((): Promise<void> => Promise.resolve());
+    const now = Date.now();
+    db.sqlite
+      .prepare(
+        `INSERT INTO events (id, name, status, starts_at, ends_at, created_at, updated_at)
+       VALUES ('remote-event', 'Remote event', 'open', ?, NULL, ?, ?)`,
+      )
+      .run(now, now, now);
+    setActiveEvent(db, 'remote-event');
+    db.sqlite
+      .prepare(
+        `INSERT INTO sync_state (key, value, updated_at)
+       VALUES ('global.event-control.cursor', '47', ?)`,
+      )
+      .run(now);
+    service.stop();
+    service = new CloudSyncService(
+      'audit-key',
+      'audit-device',
+      (): void => undefined,
+      'https://muhzjnveqrahccoisddo.supabase.co/functions/v1/gtrz-sync-fallback',
+      (): string => 'Audit PC',
+      { get: (): ReturnType<typeof openDatabase> => db, replaceWith } as never,
+    );
+    request.mockImplementation((url: string): Response => {
+      if (url.endsWith('/replica-snapshot/latest'))
+        return new Response(
+          JSON.stringify({
+            snapshotId: 'verified-copy',
+            eventId: 'remote-event',
+            sourceDeviceId: 'source-device',
+          }),
+        );
+      if (url.endsWith('/replica-snapshot/verified-copy'))
+        return new Response(snapshot, {
+          headers: {
+            'X-GTRZ-Snapshot-Event': 'remote-event',
+            'X-GTRZ-Snapshot-Sha256': createHash('sha256').update(snapshot).digest('hex'),
+            'X-GTRZ-Snapshot-Size': String(snapshot.length),
+          },
+        });
+      if (url.includes('/global-control')) return new Response(JSON.stringify({ commands: [] }));
+      return new Response(JSON.stringify({ currentSequence: 0, events: [], stock: [] }));
+    });
+
+    await service.flushOutbox(db, 'remote-event');
+
+    expect(replaceWith).toHaveBeenCalledTimes(1);
+    expect(
+      db.sqlite
+        .prepare("SELECT value FROM sync_state WHERE key = 'replica.baseline.snapshotId'")
+        .get(),
+    ).toEqual({ value: 'verified-copy' });
   });
 
   it('uploads a verified cloud replica before globally activating an event', async () => {

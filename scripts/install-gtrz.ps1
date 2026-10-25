@@ -1,5 +1,5 @@
 param(
-  [string]$ReleaseTag = 'v0.1.1-replica-repair.1',
+  [string]$ReleaseTag = 'v0.1.1-cloud-replica.1',
   [string]$EnrollmentCode = '',
   [switch]$SkipMobileSimulator,
   [switch]$PlanOnly

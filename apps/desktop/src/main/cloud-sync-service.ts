@@ -4,6 +4,7 @@ import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { createRequire } from 'node:module';
 import { WebSocket, type RawData } from 'ws';
+import BetterSqlite3 from 'better-sqlite3';
 import {
   createClient,
   REALTIME_SUBSCRIBE_STATES,
@@ -391,6 +392,8 @@ export class CloudSyncService {
   #cloudConnected = false;
   #lastLatencyMs = 0;
   #pendingBootstrap: PendingBootstrap | null = null;
+  #replicaUploadInFlight = false;
+  #lastEmptyReplicaCheckAt = 0;
 
   constructor(
     pairingKeyPath: string,
@@ -662,6 +665,9 @@ export class CloudSyncService {
         }
         this.#ensureControlStream(database, deviceId, pairingKey);
       }
+      if (canonicalCloud && this.#pendingBootstrap === null) {
+        await this.#recoverEmptyReplica(database, pairingKey, deviceId);
+      }
       const workingDatabase = await this.#applyPendingBootstrap(database, pairingKey, deviceId);
       this.#enqueueNewAudits(workingDatabase, deviceId);
 
@@ -824,6 +830,14 @@ export class CloudSyncService {
         this.#schedulePrintQueue(workingDatabase, effectiveActiveEventId, deviceId, pairingKey);
       }
       this.#clearSyncDiagnostic(workingDatabase);
+      if (canonicalCloud && effectiveActiveEventId !== null) {
+        this.#scheduleReplicaSnapshot(
+          workingDatabase,
+          effectiveActiveEventId,
+          pairingKey,
+          deviceId,
+        );
+      }
     } catch (error: unknown) {
       // Keep every business operation in SQLite and progressively slow retries when
       // the remote side is unavailable or has reached a free-tier limit.
@@ -894,6 +908,31 @@ export class CloudSyncService {
     const snapshotPath = path.join(temporaryDirectory, 'database.sqlite');
     try {
       await createDatabaseSnapshot(database, snapshotPath);
+      const snapshot = new BetterSqlite3(snapshotPath, { readonly: true, fileMustExist: true });
+      let catalogCursor: number;
+      let eventCursor: number;
+      let controlCursor: number;
+      try {
+        if (
+          snapshot
+            .prepare("SELECT 1 FROM sync_outbox WHERE status IN ('pending', 'failed') LIMIT 1")
+            .get() ||
+          snapshot.prepare('SELECT 1 FROM sync_inbox WHERE applied_at IS NULL LIMIT 1').get()
+        ) {
+          throw new Error('A cópia inicial contém operações locais ainda não sincronizadas.');
+        }
+        const cursor = (key: string): number => {
+          const row = snapshot.prepare('SELECT value FROM sync_state WHERE key = ?').get(key) as
+            | { readonly value: string }
+            | undefined;
+          return Number.parseInt(row?.value ?? '0', 10) || 0;
+        };
+        catalogCursor = cursor(`inbox.sequence:${CATALOG_EVENT_ID}`);
+        eventCursor = cursor(`inbox.sequence:${eventId}`);
+        controlCursor = cursor('global.event-control.cursor');
+      } finally {
+        snapshot.close();
+      }
       const contents = await readFile(snapshotPath);
       if (contents.byteLength === 0 || contents.byteLength > 50 * 1024 * 1024) {
         throw new Error('A cópia inicial do evento precisa ter entre 1 byte e 50 MB.');
@@ -908,6 +947,9 @@ export class CloudSyncService {
             'X-GTRZ-Device-Id': deviceId,
             'X-GTRZ-Snapshot-Sha256': checksum,
             'X-GTRZ-Snapshot-Size': String(contents.byteLength),
+            'X-GTRZ-Catalog-Cursor': String(catalogCursor),
+            'X-GTRZ-Event-Cursor': String(eventCursor),
+            'X-GTRZ-Control-Cursor': String(controlCursor),
           }),
           body: new Uint8Array(contents),
           signal: AbortSignal.timeout(30_000),
@@ -925,6 +967,84 @@ export class CloudSyncService {
     } finally {
       await rm(temporaryDirectory, { force: true, recursive: true });
     }
+  }
+
+  #scheduleReplicaSnapshot(
+    database: DatabaseContext,
+    eventId: string,
+    pairingKey: string,
+    deviceId: string,
+  ): void {
+    if (this.#databaseRuntime === null || this.#replicaUploadInFlight) return;
+    if (
+      database.sqlite
+        .prepare("SELECT 1 FROM sync_outbox WHERE status IN ('pending', 'failed') LIMIT 1")
+        .get()
+    )
+      return;
+    if (database.sqlite.prepare('SELECT 1 FROM sync_inbox WHERE applied_at IS NULL LIMIT 1').get())
+      return;
+    if (
+      !database.sqlite
+        .prepare('SELECT 1 FROM sync_state WHERE key = ?')
+        .get(`replica.reconciled:${eventId}`)
+    )
+      return;
+    if (
+      !database.sqlite
+        .prepare('SELECT 1 FROM sync_state WHERE key = ?')
+        .get(`replica.reconciled:${CATALOG_EVENT_ID}`)
+    )
+      return;
+    const stateKey = `replica.last-upload:${eventId}`;
+    const last = database.sqlite
+      .prepare('SELECT value FROM sync_state WHERE key = ?')
+      .get(stateKey) as { readonly value: string } | undefined;
+    const readCursor = (key: string): number => {
+      const row = database.sqlite.prepare('SELECT value FROM sync_state WHERE key = ?').get(key) as
+        | { readonly value: string }
+        | undefined;
+      return Number(row?.value ?? 0);
+    };
+    const cursors = {
+      catalog: readCursor(`inbox.sequence:${CATALOG_EVENT_ID}`),
+      event: readCursor(`inbox.sequence:${eventId}`),
+      control: readCursor('global.event-control.cursor'),
+    };
+    let lastUpload: unknown = null;
+    try {
+      lastUpload = JSON.parse(last?.value ?? 'null') as unknown;
+    } catch {
+      /* old state */
+    }
+    if (
+      isRecord(lastUpload) &&
+      lastUpload.catalog === cursors.catalog &&
+      lastUpload.event === cursors.event &&
+      lastUpload.control === cursors.control
+    )
+      return;
+    const lastAt = isRecord(lastUpload) ? Number(lastUpload.at ?? 0) : Number(last?.value ?? 0);
+    if (Date.now() - lastAt < 24 * 60 * 60 * 1000) return;
+    this.#replicaUploadInFlight = true;
+    void this.#publishReplicaSnapshot(database, eventId, pairingKey, deviceId)
+      .then(() => {
+        database.sqlite
+          .prepare(
+            `INSERT INTO sync_state (key, value, updated_at) VALUES (?, ?, ?)
+           ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+          )
+          .run(stateKey, JSON.stringify({ at: Date.now(), ...cursors }), Date.now());
+      })
+      .catch((error: unknown) => {
+        this.#writeSyncDiagnostic(
+          database,
+          error instanceof Error ? error.message : 'Falha ao publicar a cópia inicial.',
+        );
+      })
+      .finally(() => {
+        this.#replicaUploadInFlight = false;
+      });
   }
 
   async resetGlobalEvent(
@@ -1259,6 +1379,9 @@ export class CloudSyncService {
 
     const temporaryDirectory = await mkdtemp(path.join(tmpdir(), 'gtrz-replica-import-'));
     const snapshotPath = path.join(temporaryDirectory, 'database.sqlite');
+    const localPrinting = database.sqlite
+      .prepare("SELECT key, value, updated_at FROM app_meta WHERE key LIKE 'printing.%'")
+      .all() as { readonly key: string; readonly value: string; readonly updated_at: number }[];
     try {
       await writeFile(snapshotPath, contents, { flag: 'wx' });
       await this.#databaseRuntime.replaceWith(snapshotPath);
@@ -1267,6 +1390,13 @@ export class CloudSyncService {
     }
 
     const restored = this.#databaseRuntime.get();
+    restored.sqlite.transaction(() => {
+      restored.sqlite.prepare("DELETE FROM app_meta WHERE key LIKE 'printing.%'").run();
+      const insert = restored.sqlite.prepare(
+        'INSERT INTO app_meta (key, value, updated_at) VALUES (?, ?, ?)',
+      );
+      for (const row of localPrinting) insert.run(row.key, row.value, row.updated_at);
+    })();
     const event = restored.sqlite
       .prepare("SELECT id FROM events WHERE id = ? AND status = 'open'")
       .get(command.eventId);
@@ -1274,6 +1404,12 @@ export class CloudSyncService {
       throw new Error('A cópia inicial não contém o evento global selecionado.');
     }
     setActiveEvent(restored, command.eventId);
+    restored.sqlite
+      .prepare(
+        `INSERT INTO sync_state (key, value, updated_at) VALUES ('replica.baseline.snapshotId', ?, ?)
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+      )
+      .run(command.bootstrapSnapshotId, Date.now());
     this.#markBootstrapApplied(restored, command);
     this.#restartStreamsAfterDatabaseRestore();
     this.#ensureEventStreams(restored, command.eventId, deviceId, pairingKey);
@@ -1298,6 +1434,68 @@ export class CloudSyncService {
       )
       .get(eventId, eventId, eventId, eventId, eventId, eventId) as { readonly amount: number };
     return eventData.amount === 0;
+  }
+
+  async #recoverEmptyReplica(
+    database: DatabaseContext,
+    pairingKey: string,
+    deviceId: string,
+  ): Promise<void> {
+    if (this.#databaseRuntime === null) return;
+    if (
+      database.sqlite
+        .prepare("SELECT 1 FROM sync_state WHERE key = 'replica.baseline.snapshotId'")
+        .get()
+    )
+      return;
+    const event = getSessionState(database).activeEvent;
+    if (event === null || !this.#isBootstrapEligible(database, event.id)) return;
+    const localData = database.sqlite
+      .prepare(
+        `SELECT
+        (SELECT COUNT(*) FROM products) +
+        MAX((SELECT COUNT(*) FROM product_categories) - 1, 0) +
+        (SELECT COUNT(*) FROM combos) +
+        (SELECT COUNT(*) FROM stock_movements) +
+        (SELECT COUNT(*) FROM sync_outbox WHERE status IN ('pending', 'failed')) AS amount`,
+      )
+      .get() as { readonly amount: number };
+    if (localData.amount !== 0) return;
+    if (Date.now() - this.#lastEmptyReplicaCheckAt < 60_000) return;
+    this.#lastEmptyReplicaCheckAt = Date.now();
+    const response = await fetch(
+      `${this.#endpoint}/v1/events/${encodeURIComponent(event.id)}/replica-snapshot/latest`,
+      {
+        headers: await this.#cloudHeaders(pairingKey),
+        signal: AbortSignal.timeout(CONNECTION_TIMEOUT_MS),
+      },
+    );
+    if (!response.ok) return;
+    const manifest: unknown = await response.json();
+    if (
+      !isRecord(manifest) ||
+      manifest.eventId !== event.id ||
+      typeof manifest.snapshotId !== 'string' ||
+      typeof manifest.sourceDeviceId !== 'string' ||
+      manifest.sourceDeviceId === deviceId
+    )
+      return;
+    const cursor = database.sqlite
+      .prepare("SELECT value FROM sync_state WHERE key = 'global.event-control.cursor'")
+      .get() as { readonly value: string } | undefined;
+    this.#pendingBootstrap = {
+      command: {
+        sequence: Number(cursor?.value ?? 0),
+        commandId: `replica-repair:${manifest.snapshotId}`,
+        type: 'event.activated',
+        eventId: event.id,
+        eventName: event.name,
+        reason: null,
+        bootstrapSnapshotId: manifest.snapshotId,
+        snapshotSourceDeviceId: manifest.sourceDeviceId,
+        createdAt: Date.now(),
+      },
+    };
   }
 
   #hasAppliedBootstrap(database: DatabaseContext, commandId: string): boolean {
@@ -1484,7 +1682,7 @@ export class CloudSyncService {
         typeof candidate.createdAt !== 'number'
       )
         continue;
-      const command: GlobalEventCommand = {
+      let command: GlobalEventCommand = {
         sequence: candidate.sequence,
         commandId: candidate.commandId,
         type: candidate.type,
@@ -1526,6 +1724,37 @@ export class CloudSyncService {
         event = { id: command.eventId, name: command.eventName };
       }
       if (event !== undefined && command.type === 'event.activated') {
+        if (
+          this.#endpoint.includes('.supabase.co/functions/') &&
+          this.#databaseRuntime !== null &&
+          this.#isBootstrapEligible(database, command.eventId) &&
+          !this.#hasAppliedBootstrap(database, command.commandId)
+        ) {
+          const latest = await fetch(
+            `${this.#endpoint}/v1/events/${encodeURIComponent(command.eventId)}/replica-snapshot/latest`,
+            {
+              headers: await this.#cloudHeaders(pairingKey),
+              signal: AbortSignal.timeout(CONNECTION_TIMEOUT_MS),
+            },
+          );
+          const manifest: unknown = await latest.json().catch(() => null);
+          if (
+            !latest.ok ||
+            !isRecord(manifest) ||
+            typeof manifest.snapshotId !== 'string' ||
+            manifest.eventId !== command.eventId ||
+            typeof manifest.sourceDeviceId !== 'string'
+          ) {
+            throw new Error(
+              'A nuvem ainda não possui uma cópia completa e verificada deste evento.',
+            );
+          }
+          command = {
+            ...command,
+            bootstrapSnapshotId: manifest.snapshotId,
+            snapshotSourceDeviceId: manifest.sourceDeviceId,
+          };
+        }
         if (
           command.bootstrapSnapshotId !== null &&
           command.snapshotSourceDeviceId !== null &&
@@ -2959,6 +3188,35 @@ export class CloudSyncService {
       if (payload.deviceId === deviceId) {
         markProcessed.run(Date.now(), row.event_id, row.sequence);
         continue;
+      }
+
+      // A 2026-09 server build rejected five valid positive entries because its
+      // envelope omitted `quantity`. Those entries already exist in the source
+      // SQLite and later sales consumed them. Reversing them would invent a
+      // negative stock balance; the verified full replica preserves the entry.
+      if (payload.action === 'inventory.stock-rejected') {
+        const details = payload.details;
+        const originalId = stringField(details, 'originalMovementId');
+        const original =
+          originalId === null
+            ? undefined
+            : (database.sqlite
+                .prepare('SELECT quantity, delta FROM stock_movements WHERE id = ?')
+                .get(originalId) as
+                | { readonly quantity: number; readonly delta: number }
+                | undefined);
+        if (
+          stringField(details, 'rejectedDeviceId') === deviceId &&
+          stringField(details, 'reason')?.includes('não contém uma quantidade válida') &&
+          integerField(details, 'quantity') === null &&
+          original !== undefined &&
+          original.delta > 0 &&
+          original.quantity === integerField(details, 'delta')
+        ) {
+          markProcessed.run(Date.now(), row.event_id, row.sequence);
+          resolveConflict.run(Date.now(), row.command_id);
+          continue;
+        }
       }
 
       try {

@@ -831,6 +831,21 @@ Deno.serve(async (request) => {
         });
       }
       const snapshotId = crypto.randomUUID();
+      const cursorHeaders = [
+        request.headers.get('X-GTRZ-Catalog-Cursor'),
+        request.headers.get('X-GTRZ-Event-Cursor'),
+        request.headers.get('X-GTRZ-Control-Cursor'),
+      ];
+      const verified = cursorHeaders.every((value) => value !== null);
+      if (!verified && cursorHeaders.some((value) => value !== null)) {
+        throw Object.assign(new Error('Os cursores da cópia inicial estão incompletos.'), {
+          status: 400,
+          code: 'INVALID_REPLICA_CURSOR',
+        });
+      }
+      const cursors = verified
+        ? cursorHeaders.map((value, index) => integer(Number(value), `cursor ${index}`))
+        : [];
       const storagePath = `replicas/${encodeURIComponent(eventId)}/${snapshotId}.sqlite`;
       const { error: uploadError } = await db.storage
         .from('gtrz-replica-snapshots')
@@ -839,19 +854,48 @@ Deno.serve(async (request) => {
           upsert: false,
         });
       if (uploadError) throw uploadError;
-      const { data, error } = await db.rpc('gtrz_record_replica_snapshot', {
-        p_snapshot_id: snapshotId,
-        p_event_id: eventId,
-        p_source_device_id: sourceDeviceId,
-        p_storage_path: storagePath,
-        p_sha256: expectedSha256,
-        p_size_bytes: sizeBytes,
-        p_created_at: Date.now(),
-      });
+      const { data, error } = await db.rpc(
+        verified ? 'gtrz_record_verified_replica_snapshot' : 'gtrz_record_replica_snapshot',
+        {
+          p_snapshot_id: snapshotId,
+          p_event_id: eventId,
+          p_source_device_id: sourceDeviceId,
+          p_storage_path: storagePath,
+          p_sha256: expectedSha256,
+          p_size_bytes: sizeBytes,
+          p_created_at: Date.now(),
+          ...(verified
+            ? {
+                p_catalog_cursor: cursors[0],
+                p_event_cursor: cursors[1],
+                p_control_cursor: cursors[2],
+              }
+            : {}),
+        },
+      );
       if (error) {
         await db.storage.from('gtrz-replica-snapshots').remove([storagePath]);
+        if (error.message.includes('REPLICA_CURSOR_STALE')) {
+          return bad(
+            409,
+            'REPLICA_CURSOR_STALE',
+            'A cópia ficou atrás do diário; sincronize antes de publicar.',
+          );
+        }
         throw error;
       }
+      return ok(data);
+    }
+    const latestReplicaRoute = /^\/v1\/events\/([^/]+)\/replica-snapshot\/latest$/.exec(path);
+    if (latestReplicaRoute && request.method === 'GET') {
+      await authorizeDesktop();
+      const eventId = string(decodeURIComponent(latestReplicaRoute[1]), 'eventId', 160);
+      const { data, error } = await db.rpc('gtrz_read_latest_verified_replica_snapshot', {
+        p_event_id: eventId,
+      });
+      if (error) throw error;
+      if (!asObj(data))
+        return bad(404, 'REPLICA_SNAPSHOT_NOT_FOUND', 'Ainda não há uma cópia inicial verificada.');
       return ok(data);
     }
     const replicaSnapshotDownloadRoute = /^\/v1\/monitor\/replica-snapshot\/([^/]+)$/.exec(path);
