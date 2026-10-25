@@ -43,6 +43,10 @@ export const IPC_CHANNELS = {
   settingsGetCloudSyncStatus: 'settings:get-cloud-sync-status',
   settingsGetCloudMonitor: 'settings:get-cloud-monitor',
   settingsGetLocalQueue: 'settings:get-local-queue',
+  settingsGetOwnerSession: 'settings:get-owner-session',
+  settingsRegisterOwner: 'settings:register-owner',
+  settingsSignInOwner: 'settings:sign-in-owner',
+  settingsSignOutOwner: 'settings:sign-out-owner',
   settingsCreateDesktopEnrollment: 'settings:create-desktop-enrollment',
   settingsExchangeDesktopEnrollment: 'settings:exchange-desktop-enrollment',
   settingsListDesktopDevices: 'settings:list-desktop-devices',
@@ -268,6 +272,11 @@ export const desktopDeviceSchema = z.object({
 });
 export const desktopDeviceListSchema = z.array(desktopDeviceSchema);
 export const revokeDesktopDeviceInputSchema = z.object({ deviceId: z.string().min(1).max(80) });
+export const ownerCredentialsSchema = z.object({
+  email: z.email().trim().max(254),
+  password: z.string().min(6).max(128),
+});
+export const ownerSessionSchema = z.object({ email: z.email() }).nullable();
 
 export const mobilePermissionsSchema = z.object({
   sales: z.boolean(),
@@ -443,6 +452,8 @@ export type DesktopEnrollment = z.infer<typeof desktopEnrollmentSchema>;
 export type ExchangeDesktopEnrollmentInput = z.infer<typeof exchangeDesktopEnrollmentInputSchema>;
 export type DesktopDevice = z.infer<typeof desktopDeviceSchema>;
 export type RevokeDesktopDeviceInput = z.infer<typeof revokeDesktopDeviceInputSchema>;
+export type OwnerCredentials = z.infer<typeof ownerCredentialsSchema>;
+export type OwnerSession = z.infer<typeof ownerSessionSchema>;
 export type MobilePermissions = z.infer<typeof mobilePermissionsSchema>;
 export type MobileOperator = z.infer<typeof mobileOperatorSchema>;
 export type CreateMobileOperatorInput = z.infer<typeof createMobileOperatorInputSchema>;
@@ -489,6 +500,10 @@ export interface GtrzDesktopApi {
     getCloudSyncStatus(): Promise<CloudSyncStatus>;
     getCloudMonitor(): Promise<CloudMonitor>;
     getLocalQueue(): Promise<CloudSyncQueue>;
+    getOwnerSession(): Promise<OwnerSession>;
+    registerOwner(input: OwnerCredentials): Promise<OperationResult>;
+    signInOwner(input: OwnerCredentials): Promise<OwnerSession>;
+    signOutOwner(): Promise<OperationResult>;
     createDesktopEnrollment(): Promise<DesktopEnrollment>;
     exchangeDesktopEnrollment(input: ExchangeDesktopEnrollmentInput): Promise<OperationResult>;
     listDesktopDevices(): Promise<readonly DesktopDevice[]>;

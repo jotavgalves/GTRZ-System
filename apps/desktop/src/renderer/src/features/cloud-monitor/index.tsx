@@ -12,7 +12,7 @@ import {
 } from 'lucide-react';
 import { useCallback, useEffect, useState } from 'react';
 
-import type { CloudMonitor, DesktopDevice } from '@gtrz/contracts';
+import type { CloudMonitor, DesktopDevice, OwnerSession } from '@gtrz/contracts';
 
 import { MobileOperatorsPanel } from './MobileOperatorsPanel';
 import { CloudEventSelector } from './CloudEventSelector';
@@ -193,6 +193,12 @@ export function CloudMonitorPage(): React.JSX.Element {
   const [enrollmentError, setEnrollmentError] = useState<string | null>(null);
   const [enrollmentNotice, setEnrollmentNotice] = useState<string | null>(null);
   const [desktopDevices, setDesktopDevices] = useState<readonly DesktopDevice[]>([]);
+  const [ownerSession, setOwnerSession] = useState<OwnerSession>(null);
+  const [ownerEmail, setOwnerEmail] = useState('');
+  const [ownerPassword, setOwnerPassword] = useState('');
+  const [ownerBusy, setOwnerBusy] = useState(false);
+  const [ownerError, setOwnerError] = useState<string | null>(null);
+  const [ownerNotice, setOwnerNotice] = useState<string | null>(null);
 
   const load = useCallback(async (): Promise<void> => {
     setLoading(true);
@@ -224,6 +230,60 @@ export function CloudMonitorPage(): React.JSX.Element {
   useEffect(() => {
     void loadDesktopDevices();
   }, [loadDesktopDevices]);
+
+  useEffect(() => {
+    void window.gtrz.settings.getOwnerSession().then(setOwnerSession);
+  }, []);
+
+  const signInOwner = async (event: React.SyntheticEvent<HTMLFormElement>): Promise<void> => {
+    event.preventDefault();
+    setOwnerBusy(true);
+    setOwnerError(null);
+    setOwnerNotice(null);
+    try {
+      const owner = await window.gtrz.settings.signInOwner({
+        email: ownerEmail.trim(),
+        password: ownerPassword,
+      });
+      setOwnerSession(owner);
+      setOwnerPassword('');
+      setOwnerNotice('Conta proprietária ativa neste computador.');
+      void loadDesktopDevices();
+    } catch (loginError: unknown) {
+      setOwnerError(loginError instanceof Error ? loginError.message : 'Não foi possível entrar.');
+    } finally {
+      setOwnerBusy(false);
+    }
+  };
+
+  const registerOwner = async (): Promise<void> => {
+    setOwnerBusy(true);
+    setOwnerError(null);
+    setOwnerNotice(null);
+    try {
+      await window.gtrz.settings.registerOwner({
+        email: ownerEmail.trim(),
+        password: ownerPassword,
+      });
+      setOwnerNotice('Conta criada. Se receber um e-mail de confirmação, confirme antes de entrar.');
+      setOwnerPassword('');
+    } catch (registrationError: unknown) {
+      setOwnerError(
+        registrationError instanceof Error
+          ? registrationError.message
+          : 'Não foi possível criar a conta.',
+      );
+    } finally {
+      setOwnerBusy(false);
+    }
+  };
+
+  const signOutOwner = async (): Promise<void> => {
+    await window.gtrz.settings.signOutOwner();
+    setOwnerSession(null);
+    setOwnerNotice('Sessão proprietária encerrada neste computador.');
+    void loadDesktopDevices();
+  };
 
   const averageLatency =
     monitor === null || monitor.activeDevices.length === 0
@@ -317,6 +377,73 @@ export function CloudMonitorPage(): React.JSX.Element {
       </header>
 
       {error === null ? null : <p className="form-error">{error}</p>}
+
+      <section className="panel cloud-enrollment">
+        <div className="panel__heading">
+          <KeyRound size={20} aria-hidden="true" />
+          <div>
+            <h2>Conta proprietária</h2>
+            <p>
+              Use a mesma conta em qualquer computador vinculado. A senha desta conta pode ser
+              diferente da usada no painel Supabase.
+            </p>
+          </div>
+        </div>
+        {ownerSession === null ? (
+          <form className="cloud-owner-form" onSubmit={(event) => void signInOwner(event)}>
+            <label className="form-field">
+              <span>E-mail</span>
+              <input
+                autoComplete="username"
+                disabled={ownerBusy}
+                onChange={(event) => {
+                  setOwnerEmail(event.target.value);
+                }}
+                type="email"
+                value={ownerEmail}
+              />
+            </label>
+            <label className="form-field">
+              <span>Senha</span>
+              <input
+                autoComplete="current-password"
+                disabled={ownerBusy}
+                onChange={(event) => {
+                  setOwnerPassword(event.target.value);
+                }}
+                type="password"
+                value={ownerPassword}
+              />
+            </label>
+            <div className="cloud-owner-actions">
+              <button className="button button--primary" disabled={ownerBusy} type="submit">
+                Entrar como proprietário
+              </button>
+              <button
+                className="button button--ghost"
+                disabled={ownerBusy}
+                onClick={() => void registerOwner()}
+                type="button"
+              >
+                Criar conta
+              </button>
+            </div>
+          </form>
+        ) : (
+          <div className="cloud-owner-actions">
+            <strong>{ownerSession.email}</strong>
+            <button
+              className="button button--ghost"
+              onClick={() => void signOutOwner()}
+              type="button"
+            >
+              Sair
+            </button>
+          </div>
+        )}
+        {ownerError === null ? null : <p className="form-error">{ownerError}</p>}
+        {ownerNotice === null ? null : <p className="cloud-enrollment__notice">{ownerNotice}</p>}
+      </section>
 
       <EnvironmentSelector />
       <CloudEventSelector />

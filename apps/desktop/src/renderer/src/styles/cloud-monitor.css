@@ -165,6 +165,23 @@
   padding: var(--space-5);
 }
 
+.cloud-owner-form {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-3);
+}
+
+.cloud-owner-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+}
+
+.cloud-owner-form .cloud-owner-actions {
+  grid-column: 1 / -1;
+}
+
 .cloud-enrollment__grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -811,6 +828,10 @@
 }
 
 @media (max-width: 560px) {
+  .cloud-owner-form {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
   .cloud-enrollment__grid {
     grid-template-columns: minmax(0, 1fr);
   }

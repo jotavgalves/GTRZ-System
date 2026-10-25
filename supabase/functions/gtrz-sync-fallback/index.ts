@@ -207,19 +207,13 @@ Deno.serve(async (request) => {
   const db = createClient(endpoint, serviceKey, { auth: { persistSession: false } });
   const store = db.schema('gtrz');
   const pairingKey = Deno.env.get('GTRZ_FALLBACK_KEY') ?? '';
+  const ownerEmail = Deno.env.get('GTRZ_OWNER_EMAIL')?.trim().toLowerCase() ?? '';
   const master =
     pairingKey.length > 0 && secretEqual(request.headers.get('X-GTRZ-Key') ?? '', pairingKey);
   const body = async (): Promise<Obj> => {
     const value: unknown = await request.json();
     if (!asObj(value)) throw new Error('O corpo deve ser um objeto JSON.');
     return value;
-  };
-  const denyAdministrator = () => {
-    if (!master)
-      throw Object.assign(new Error('Chave de acesso inválida.'), {
-        status: 401,
-        code: 'UNAUTHORIZED',
-      });
   };
   const authorizeDesktop = async (): Promise<string | null> => {
     if (master) return null;
@@ -242,6 +236,32 @@ Deno.serve(async (request) => {
       });
     }
     return deviceId;
+  };
+  const authorizeOwner = async (): Promise<string> => {
+    await authorizeDesktop();
+    const authorization = request.headers.get('Authorization') ?? '';
+    const token = authorization.startsWith('Bearer ') ? authorization.slice(7).trim() : '';
+    if (!token || !ownerEmail)
+      throw Object.assign(new Error('Entre com a conta proprietária para administrar a nuvem.'), {
+        status: 401,
+        code: 'OWNER_LOGIN_REQUIRED',
+      });
+    const { data, error } = await db.auth.getUser(token);
+    const user = data.user;
+    if (
+      error ||
+      !user ||
+      !user.email_confirmed_at ||
+      user.email?.trim().toLowerCase() !== ownerEmail
+    )
+      throw Object.assign(new Error('Esta conta não é a proprietária do GTRZ System.'), {
+        status: 403,
+        code: 'OWNER_FORBIDDEN',
+      });
+    return user.email;
+  };
+  const denyAdministrator = async (): Promise<void> => {
+    if (!master) await authorizeOwner();
   };
   const assertDeviceClaim = (actorDeviceId: string | null, claimedDeviceId: string): void => {
     if (actorDeviceId !== null && actorDeviceId !== claimedDeviceId) {
@@ -720,7 +740,7 @@ Deno.serve(async (request) => {
       return ok({ accepted: true, serverTime: now });
     }
     if (path === '/v1/desktop/enrollment' && request.method === 'POST') {
-      denyAdministrator();
+      await denyAdministrator();
       const deviceId = string(request.headers.get('X-GTRZ-Device-Id') ?? '', 'deviceId');
       const enrollmentCode = `gtrz-enroll-${crypto.randomUUID()}-${crypto.randomUUID()}`;
       const { data, error } = await db.rpc('gtrz_create_desktop_enrollment', {
@@ -747,13 +767,13 @@ Deno.serve(async (request) => {
       return ok({ deviceId, token: credential });
     }
     if (path === '/v1/desktop/devices' && request.method === 'GET') {
-      denyAdministrator();
+      await denyAdministrator();
       const { data, error } = await db.rpc('gtrz_list_desktop_devices');
       if (error) throw error;
       return ok(data);
     }
     if (path === '/v1/desktop/devices/revoke' && request.method === 'POST') {
-      denyAdministrator();
+      await denyAdministrator();
       const input = await body();
       const { data, error } = await db.rpc('gtrz_revoke_desktop_device', {
         p_device_id: string(input.deviceId, 'deviceId'),
@@ -761,6 +781,9 @@ Deno.serve(async (request) => {
       });
       if (error) throw error;
       return ok(data);
+    }
+    if (path === '/v1/owner/me' && request.method === 'GET') {
+      return ok({ email: await authorizeOwner(), owner: true });
     }
     const realtimeTopicRoute = /^\/v1\/events\/([^/]+)\/realtime-topic$/.exec(path);
     if (realtimeTopicRoute && request.method === 'GET') {
@@ -946,7 +969,7 @@ Deno.serve(async (request) => {
       return ok(data);
     }
     if (path === '/v1/monitor/global-event' && request.method === 'POST') {
-      denyAdministrator();
+      await denyAdministrator();
       const input = await body();
       const { data, error } = await db.rpc('gtrz_set_global_event', {
         p_command_id: input.commandId ?? crypto.randomUUID(),
@@ -959,7 +982,7 @@ Deno.serve(async (request) => {
       return ok(data);
     }
     if (path === '/v1/monitor/realtime-ping' && request.method === 'POST') {
-      denyAdministrator();
+      await denyAdministrator();
       const input = await body(),
         eventId = string(input.eventId, 'eventId');
       await notifyRealtime(
@@ -973,7 +996,7 @@ Deno.serve(async (request) => {
       return ok({ accepted: true });
     }
     if (path === '/v1/monitor/realtime-snapshot-ping' && request.method === 'POST') {
-      denyAdministrator();
+      await denyAdministrator();
       const input = await body(),
         eventId = string(input.eventId, 'eventId'),
         current = await state(eventId),
@@ -991,7 +1014,7 @@ Deno.serve(async (request) => {
       return ok({ accepted: true, ...delivery });
     }
     if (path === '/v1/monitor/desktop-realtime-ping' && request.method === 'POST') {
-      denyAdministrator();
+      await denyAdministrator();
       const input = await body(),
         eventId = string(input.eventId, 'eventId');
       await notifyRealtime(
@@ -1004,7 +1027,7 @@ Deno.serve(async (request) => {
       return ok({ accepted: true });
     }
     if (path === '/v1/monitor/global-event/reset' && request.method === 'POST') {
-      denyAdministrator();
+      await denyAdministrator();
       const input = await body(),
         now = Date.now();
       const { data, error } = await db.rpc('gtrz_request_global_reset', {
@@ -1084,7 +1107,7 @@ Deno.serve(async (request) => {
     }
 
     if (path === '/v1/mobile/operators') {
-      denyAdministrator();
+      await denyAdministrator();
       if (request.method === 'GET') {
         const { data, error } = await store
           .from('mobile_operators')
@@ -1140,7 +1163,7 @@ Deno.serve(async (request) => {
     }
     const operatorRoute = /^\/v1\/mobile\/operators\/([^/]+)(\/sessions)?$/.exec(path);
     if (operatorRoute) {
-      denyAdministrator();
+      await denyAdministrator();
       const id = string(decodeURIComponent(operatorRoute[1]), 'operatorId', 80),
         now = Date.now();
       if (operatorRoute[2] && request.method === 'POST') {

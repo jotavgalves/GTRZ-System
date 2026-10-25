@@ -8,6 +8,8 @@ import {
   cloudSyncStatusSchema,
   cloudSyncQueueSchema,
   cloudMonitorSchema,
+  ownerCredentialsSchema,
+  ownerSessionSchema,
   desktopEnrollmentSchema,
   desktopDeviceListSchema,
   exchangeDesktopEnrollmentInputSchema,
@@ -228,6 +230,25 @@ export function registerIpcHandlers(options: RegisterIpcOptions): ThermalPrintSe
   ipcMain.handle(IPC_CHANNELS.settingsGetLocalQueue, () =>
     cloudSyncQueueSchema.parse(options.cloudSyncService.getQueueState(options.getDatabase())),
   );
+
+  ipcMain.handle(IPC_CHANNELS.settingsGetOwnerSession, () =>
+    ownerSessionSchema.parse(options.cloudSyncService.getOwnerSession()),
+  );
+  ipcMain.handle(IPC_CHANNELS.settingsRegisterOwner, async (_event, payload: unknown) => {
+    const input = ownerCredentialsSchema.parse(payload);
+    await options.cloudSyncService.registerOwnerAccount(input.email, input.password);
+    return operationResultSchema.parse({ success: true });
+  });
+  ipcMain.handle(IPC_CHANNELS.settingsSignInOwner, async (_event, payload: unknown) => {
+    const input = ownerCredentialsSchema.parse(payload);
+    return ownerSessionSchema.parse(
+      await options.cloudSyncService.signInOwner(input.email, input.password),
+    );
+  });
+  ipcMain.handle(IPC_CHANNELS.settingsSignOutOwner, () => {
+    options.cloudSyncService.signOutOwner();
+    return operationResultSchema.parse({ success: true });
+  });
 
   ipcMain.handle(IPC_CHANNELS.settingsCreateDesktopEnrollment, async () => {
     if (getSessionState(options.getDatabase()).profile !== 'production') {

@@ -8,6 +8,8 @@ import {
   cloudSyncStatusSchema,
   cloudSyncQueueSchema,
   cloudMonitorSchema,
+  ownerCredentialsSchema,
+  ownerSessionSchema,
   desktopEnrollmentSchema,
   desktopDeviceListSchema,
   exchangeDesktopEnrollmentInputSchema,
@@ -45,6 +47,8 @@ import {
   type CloudSyncStatus,
   type CloudSyncQueue,
   type CloudMonitor,
+  type OwnerCredentials,
+  type OwnerSession,
   type DesktopEnrollment,
   type DesktopDevice,
   type ExchangeDesktopEnrollmentInput,
@@ -194,6 +198,28 @@ const api: GtrzDesktopApi = {
     async getLocalQueue(): Promise<CloudSyncQueue> {
       const payload: unknown = await ipcRenderer.invoke(IPC_CHANNELS.settingsGetLocalQueue);
       return cloudSyncQueueSchema.parse(payload);
+    },
+    async getOwnerSession(): Promise<OwnerSession> {
+      const payload: unknown = await ipcRenderer.invoke(IPC_CHANNELS.settingsGetOwnerSession);
+      return ownerSessionSchema.parse(payload);
+    },
+    async registerOwner(input: OwnerCredentials): Promise<OperationResult> {
+      const payload: unknown = await ipcRenderer.invoke(
+        IPC_CHANNELS.settingsRegisterOwner,
+        ownerCredentialsSchema.parse(input),
+      );
+      return operationResultSchema.parse(payload);
+    },
+    async signInOwner(input: OwnerCredentials): Promise<OwnerSession> {
+      const payload: unknown = await ipcRenderer.invoke(
+        IPC_CHANNELS.settingsSignInOwner,
+        ownerCredentialsSchema.parse(input),
+      );
+      return ownerSessionSchema.parse(payload);
+    },
+    async signOutOwner(): Promise<OperationResult> {
+      const payload: unknown = await ipcRenderer.invoke(IPC_CHANNELS.settingsSignOutOwner);
+      return operationResultSchema.parse(payload);
     },
     async createDesktopEnrollment(): Promise<DesktopEnrollment> {
       const payload: unknown = await ipcRenderer.invoke(

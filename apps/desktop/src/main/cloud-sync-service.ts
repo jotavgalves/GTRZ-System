@@ -9,6 +9,7 @@ import {
   createClient,
   REALTIME_SUBSCRIBE_STATES,
   type RealtimeChannel,
+  type Session,
   type SupabaseClient,
 } from '@supabase/supabase-js';
 
@@ -376,6 +377,8 @@ export class CloudSyncService {
   readonly #canonicalProjectionPublished = new Set<string>();
   readonly #canonicalProtectedProjectionFingerprints = new Map<string, string>();
   #canonicalRealtimeClient: SupabaseClient | null = null;
+  #ownerAuthClient: SupabaseClient | null = null;
+  #ownerSession: Session | null = null;
   #canonicalLastFallbackReconciliationAt = 0;
   #controlStream: WebSocket | null = null;
   #controlReconnectTimer: NodeJS.Timeout | null = null;
@@ -417,6 +420,89 @@ export class CloudSyncService {
     this.#endpoint = endpoint;
     this.#getDeviceLabel = getDeviceLabel;
     this.#databaseRuntime = databaseRuntime;
+  }
+
+  #getOwnerAuthClient(): SupabaseClient {
+    this.#ownerAuthClient ??= createClient(
+      CANONICAL_SUPABASE_URL,
+      CANONICAL_SUPABASE_PUBLISHABLE_KEY,
+      {
+        auth: { persistSession: false, autoRefreshToken: false },
+        global: { fetch: cloudFetch },
+      },
+    );
+    return this.#ownerAuthClient;
+  }
+
+  getOwnerSession(): { readonly email: string } | null {
+    return this.#ownerSession?.user.email ? { email: this.#ownerSession.user.email } : null;
+  }
+
+  async registerOwnerAccount(email: string, password: string): Promise<void> {
+    const { error } = await this.#getOwnerAuthClient().auth.signUp({ email, password });
+    if (error) throw new Error(`Não foi possível criar a conta: ${error.message}`);
+  }
+
+  async signInOwner(email: string, password: string): Promise<{ readonly email: string }> {
+    const { data, error } = await this.#getOwnerAuthClient().auth.signInWithPassword({
+      email,
+      password,
+    });
+    if (error) {
+      throw new Error('Login não concluído. Confira a senha e a confirmação do e-mail.');
+    }
+    this.#ownerSession = data.session;
+    try {
+      const pairingKey = await this.#readPairingKey();
+      if (pairingKey === null) throw new Error('Vincule este computador à nuvem antes de entrar.');
+      const response = await fetch(`${this.#endpoint}/v1/owner/me`, {
+        headers: await this.#ownerHeaders(pairingKey),
+        signal: AbortSignal.timeout(CONNECTION_TIMEOUT_MS),
+      });
+      if (!response.ok) throw new Error('Esta conta não está autorizada como proprietária.');
+      return { email: data.user.email ?? email };
+    } catch (error: unknown) {
+      this.#ownerSession = null;
+      throw error;
+    }
+  }
+
+  signOutOwner(): void {
+    this.#ownerSession = null;
+  }
+
+  async #ownerHeaders(
+    pairingKey: string,
+    headers: Record<string, string> = {},
+  ): Promise<Record<string, string>> {
+    let session = this.#ownerSession;
+    if (session === null) throw new Error('Entre com a conta proprietária neste computador.');
+    if (session.expires_at !== undefined && session.expires_at * 1000 < Date.now() + 30_000) {
+      const { data, error } = await this.#getOwnerAuthClient().auth.refreshSession({
+        refresh_token: session.refresh_token,
+      });
+      if (error || data.session === null) {
+        this.#ownerSession = null;
+        throw new Error('A sessão proprietária expirou. Entre novamente.');
+      }
+      session = data.session;
+      this.#ownerSession = session;
+    }
+    return this.#cloudHeaders(pairingKey, {
+      ...headers,
+      Authorization: `Bearer ${session.access_token}`,
+    });
+  }
+
+  async #administratorHeaders(
+    headers: Record<string, string> = {},
+  ): Promise<Record<string, string>> {
+    const pairingKey = await this.#readPairingKey();
+    if (pairingKey === null) throw new Error('Vincule este computador à nuvem primeiro.');
+    if (this.#ownerSession !== null) return this.#ownerHeaders(pairingKey, headers);
+    const masterKey = await this.#readLegacyPairingKey();
+    if (masterKey !== null) return this.#cloudHeaders(masterKey, headers);
+    throw new Error('Entre com a conta proprietária para administrar a nuvem.');
   }
 
   start(getActiveEventId: () => string | null): void {
@@ -546,18 +632,9 @@ export class CloudSyncService {
     readonly enrollmentCode: string;
     readonly expiresAt: number;
   }> {
-    const administratorKey = await this.#readLegacyPairingKey();
-    if (administratorKey === null) {
-      throw new Error('Somente o computador administrador pode gerar um código de vínculo.');
-    }
-    const deviceId = await this.#readOrCreateDeviceId();
     const response = await fetch(`${this.#endpoint}/v1/desktop/enrollment`, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-GTRZ-Key': administratorKey,
-        'X-GTRZ-Device-Id': deviceId,
-      },
+      headers: await this.#administratorHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify({}),
       signal: AbortSignal.timeout(CONNECTION_TIMEOUT_MS),
     });
@@ -601,12 +678,8 @@ export class CloudSyncService {
       readonly revokedAt: number | null;
     }[]
   > {
-    const administratorKey = await this.#readLegacyPairingKey();
-    if (administratorKey === null) {
-      throw new Error('Somente o computador administrador pode listar os dispositivos vinculados.');
-    }
     const response = await fetch(`${this.#endpoint}/v1/desktop/devices`, {
-      headers: { 'X-GTRZ-Key': administratorKey },
+      headers: await this.#administratorHeaders(),
       signal: AbortSignal.timeout(CONNECTION_TIMEOUT_MS),
     });
     const payload: unknown = await response.json();
@@ -637,13 +710,9 @@ export class CloudSyncService {
   }
 
   async revokeDesktopDevice(deviceId: string): Promise<void> {
-    const administratorKey = await this.#readLegacyPairingKey();
-    if (administratorKey === null) {
-      throw new Error('Somente o computador administrador pode bloquear outro computador.');
-    }
     const response = await fetch(`${this.#endpoint}/v1/desktop/devices/revoke`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-GTRZ-Key': administratorKey },
+      headers: await this.#administratorHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify({ deviceId }),
       signal: AbortSignal.timeout(CONNECTION_TIMEOUT_MS),
     });
@@ -1319,13 +1388,9 @@ export class CloudSyncService {
     body: unknown,
     schema: { parse(value: unknown): TResult } | undefined,
   ): Promise<TResult> {
-    const pairingKey = await this.#readPairingKey();
-    if (pairingKey === null) {
-      throw new Error('A chave da nuvem não foi encontrada neste computador.');
-    }
     const response = await fetch(`${this.#endpoint}${path}`, {
       method,
-      headers: await this.#cloudHeaders(pairingKey, { 'Content-Type': 'application/json' }),
+      headers: await this.#administratorHeaders({ 'Content-Type': 'application/json' }),
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
       signal: AbortSignal.timeout(CONNECTION_TIMEOUT_MS),
     });
@@ -1341,12 +1406,9 @@ export class CloudSyncService {
   }
 
   async #globalControlRequest(path: string, body: Record<string, unknown>): Promise<void> {
-    const pairingKey = await this.#readPairingKey();
-    if (pairingKey === null)
-      throw new Error('A chave da nuvem não foi encontrada neste computador.');
     const response = await fetch(`${this.#endpoint}${path}`, {
       method: 'POST',
-      headers: await this.#cloudHeaders(pairingKey, { 'Content-Type': 'application/json' }),
+      headers: await this.#administratorHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(CONNECTION_TIMEOUT_MS),
     });
