@@ -18,6 +18,7 @@ import {
 
 import { buildReceiptHtml, estimateReceiptHeightMm } from './receipt-html';
 import type { ClaimedCloudPrintJob } from './cloud-sync-service';
+import { normalizeCloudReceipt } from './normalize-cloud-receipt';
 
 interface ThermalPrintServiceOptions {
   readonly archiveDirectory: string;
@@ -111,7 +112,7 @@ export class ThermalPrintService {
       };
     }
     const receipt: DatabaseOrderReceipt = {
-      ...job.document,
+      ...normalizeCloudReceipt(job.document),
       printedByLabel: settings.machineName,
     };
     return this.#printReceipt(receipt, settings);
@@ -148,6 +149,17 @@ export class ThermalPrintService {
         enabled: false,
         unavailableReason:
           'Selecione uma impressora térmica nas Configurações antes de ativar a impressão automática.',
+      };
+      this.#printerRegistrationCache = { fingerprint, value, checkedAt: Date.now() };
+      return value;
+    }
+
+    if (/^(Microsoft Print to PDF|OneNote(?: \(Desktop\))?)$/iu.test(settings.deviceName)) {
+      const value = {
+        printerName: settings.deviceName,
+        enabled: false,
+        unavailableReason:
+          'A impressora configurada é virtual e não aceita impressão automática silenciosa. Selecione uma impressora térmica nas Configurações.',
       };
       this.#printerRegistrationCache = { fingerprint, value, checkedAt: Date.now() };
       return value;

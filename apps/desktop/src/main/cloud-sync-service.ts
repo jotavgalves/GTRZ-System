@@ -181,7 +181,8 @@ interface CloudPrintReceipt {
   readonly operatorName: string;
   readonly originLabel: string;
   readonly items: readonly {
-    readonly name: string;
+    readonly name?: string;
+    readonly itemName?: string;
     readonly quantity: number;
     readonly unitPriceCents: number;
     readonly totalCents: number;
@@ -189,6 +190,12 @@ interface CloudPrintReceipt {
       readonly label: string;
       readonly productName: string;
       readonly quantity: number;
+    }[];
+    readonly componentAllocations?: readonly {
+      readonly choiceGroup?: string | null;
+      readonly choiceLabel?: string | null;
+      readonly productName?: string;
+      readonly quantity?: number;
     }[];
   }[];
   readonly payments: readonly {
@@ -387,6 +394,7 @@ export class CloudSyncService {
   #cloudRetryDelayMs = 3_000;
   #cloudRetryNotBefore = 0;
   #printQueueInFlight: Promise<void> | null = null;
+  #printQueueRerunRequested = false;
   #queuedReceiptArchiveCheckComplete = false;
   #printRegistrationFingerprint: string | null = null;
   #printRegistrationUpdatedAt = 0;
@@ -2402,13 +2410,20 @@ export class CloudSyncService {
     deviceId: string,
     pairingKey: string,
   ): Promise<void> {
-    if (this.#printQueueInFlight !== null) return this.#printQueueInFlight;
+    if (this.#printQueueInFlight !== null) {
+      this.#printQueueRerunRequested = true;
+      return this.#printQueueInFlight;
+    }
     const processing = this.#drainPrintQueue(database, activeEventId, deviceId, pairingKey);
     this.#printQueueInFlight = processing;
     try {
       await processing;
     } finally {
       if (this.#printQueueInFlight === processing) this.#printQueueInFlight = null;
+      if (this.#printQueueRerunRequested) {
+        this.#printQueueRerunRequested = false;
+        this.#schedulePrintQueue(database, activeEventId, deviceId, pairingKey);
+      }
     }
   }
 
@@ -2797,7 +2812,7 @@ export class CloudSyncService {
                 eventId,
                 deviceId,
                 pairingKey,
-                fastPath ? 2_000 : CANONICAL_REALTIME_RECONCILIATION_DELAY_MS,
+                fastPath ? 100 : CANONICAL_REALTIME_RECONCILIATION_DELAY_MS,
               );
             }
           })
@@ -3117,11 +3132,19 @@ export class CloudSyncService {
     this.#storeRemoteJournalEvents(database, eventId, newEvents);
     this.#applyInbox(database, deviceId);
     if (eventId === getSessionState(database).activeEvent?.id) {
+      let paidOrderReceived = false;
       for (const journalEvent of newEvents) {
         const payload = journalPayload(journalEvent.payload);
         if (payload?.action === 'operations.order-paid' && payload.entityId !== null) {
+          paidOrderReceived = true;
           this.#scheduleReceiptArchive(database, payload.entityId);
         }
+      }
+      if (paidOrderReceived && this.#endpoint.includes('.supabase.co/functions/')) {
+        void this.#readPairingKey().then((pairingKey) => {
+          if (pairingKey !== null)
+            this.#schedulePrintQueue(database, eventId, deviceId, pairingKey);
+        });
       }
     }
     const nextCursor = this.#getInboxCursor(database, eventId);
