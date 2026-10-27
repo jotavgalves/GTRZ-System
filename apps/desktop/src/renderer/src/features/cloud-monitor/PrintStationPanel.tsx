@@ -71,6 +71,16 @@ export function PrintStationPanel({ devices, monitor, canConfigure }: Props): Re
   const printerReady =
     printer !== undefined && Date.now() - printer.lastSeenAt < 30_000 && printer.busyJobId === null;
   const ready = chosen !== null && present && printerReady;
+  const stationWarning =
+    chosen === null
+      ? 'Nenhum PC escolhido. Nenhuma nota será impressa automaticamente.'
+      : device === undefined || Date.now() - device.lastSeenAt >= 30_000
+        ? `Atenção: ${stationLabel(chosen, devices.find((item) => item.deviceId === chosen)?.label ?? 'PC escolhido')} está desconectado.`
+        : device.activeEventId !== eventId
+          ? `Atenção: ${stationLabel(device.id, device.label)} está fora deste evento.`
+          : printer === undefined
+            ? `Atenção: ${stationLabel(device.id, device.label)} está conectado, mas não há impressora automática disponível.`
+            : `Atenção: a impressora de ${stationLabel(device.id, device.label)} não está pronta.`;
 
   return (
     <section className="panel cloud-enrollment" aria-label="Estação de impressão">
@@ -88,11 +98,9 @@ export function PrintStationPanel({ devices, monitor, canConfigure }: Props): Re
       ) : (
         <>
           <p>
-            {chosen === null
-              ? 'Nenhum PC escolhido. Nenhuma nota será impressa automaticamente.'
-              : ready
-                ? `Pronto: ${stationLabel(device.id, device.label)} · ${printer.printerName}`
-                : `Atenção: ${stationLabel(chosen, device?.label ?? devices.find((item) => item.deviceId === chosen)?.label ?? 'PC escolhido')} está desconectado, fora deste evento ou sem impressora disponível.`}
+            {ready
+              ? `Pronto: ${stationLabel(device.id, device.label)} · ${printer.printerName}`
+              : stationWarning}
           </p>
           <p>
             {station?.queued ?? 0} nota(s) aguardando · {station?.needsAttention ?? 0} exigem

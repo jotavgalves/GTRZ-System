@@ -1,5 +1,5 @@
 param(
-  [string]$ReleaseTag = 'v0.1.1-print-station.2',
+  [string]$ReleaseTag = 'v0.1.1-print-station.3',
   [string]$EnrollmentCode = '',
   [switch]$SkipMobileSimulator,
   [switch]$PlanOnly

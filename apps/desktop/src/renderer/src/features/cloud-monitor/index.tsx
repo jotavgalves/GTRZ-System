@@ -630,7 +630,7 @@ export function CloudMonitorPage(): React.JSX.Element {
         </div>
         <div className="cloud-flow__node cloud-flow__node--central">
           <Server size={24} aria-hidden="true" />
-          <strong>Cloudflare</strong>
+          <strong>Nuvem</strong>
           <span>Diário idempotente</span>
         </div>
         <div className="cloud-flow__line" aria-hidden="true">
@@ -722,7 +722,7 @@ export function CloudMonitorPage(): React.JSX.Element {
         </section>
       </div>
 
-      <MobileOperatorsPanel />
+      {ownerSession === null ? null : <MobileOperatorsPanel />}
 
       <section className="panel cloud-flow-panel">
         <div className="panel__heading">
