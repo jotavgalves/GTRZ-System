@@ -51,6 +51,8 @@ export const IPC_CHANNELS = {
   settingsExchangeDesktopEnrollment: 'settings:exchange-desktop-enrollment',
   settingsListDesktopDevices: 'settings:list-desktop-devices',
   settingsRevokeDesktopDevice: 'settings:revoke-desktop-device',
+  settingsGetPrintStation: 'settings:get-print-station',
+  settingsSetPrintStation: 'settings:set-print-station',
   settingsSetGlobalEvent: 'settings:set-global-event',
   settingsResetGlobalEvent: 'settings:reset-global-event',
   settingsListMobileOperators: 'settings:list-mobile-operators',
@@ -272,6 +274,26 @@ export const desktopDeviceSchema = z.object({
 });
 export const desktopDeviceListSchema = z.array(desktopDeviceSchema);
 export const revokeDesktopDeviceInputSchema = z.object({ deviceId: z.string().min(1).max(80) });
+export const printStationInputSchema = z.object({
+  eventId: z.string().min(1).max(160),
+  deviceId: z.string().min(1).max(160).nullable(),
+});
+export const printStationSchema = z.object({
+  eventId: z.string(),
+  deviceId: z.string().nullable(),
+  printers: z.array(
+    z.object({
+      deviceId: z.string(),
+      deviceLabel: z.string(),
+      printerName: z.string(),
+      enabled: z.boolean(),
+      lastSeenAt: z.number(),
+      busyJobId: z.string().nullable(),
+    }),
+  ),
+  queued: z.number(),
+  needsAttention: z.number(),
+});
 export const ownerCredentialsSchema = z.object({
   email: z.email().trim().max(254),
   password: z.string().min(6).max(128),
@@ -452,6 +474,8 @@ export type DesktopEnrollment = z.infer<typeof desktopEnrollmentSchema>;
 export type ExchangeDesktopEnrollmentInput = z.infer<typeof exchangeDesktopEnrollmentInputSchema>;
 export type DesktopDevice = z.infer<typeof desktopDeviceSchema>;
 export type RevokeDesktopDeviceInput = z.infer<typeof revokeDesktopDeviceInputSchema>;
+export type PrintStation = z.infer<typeof printStationSchema>;
+export type PrintStationInput = z.infer<typeof printStationInputSchema>;
 export type OwnerCredentials = z.infer<typeof ownerCredentialsSchema>;
 export type OwnerSession = z.infer<typeof ownerSessionSchema>;
 export type MobilePermissions = z.infer<typeof mobilePermissionsSchema>;
@@ -508,6 +532,8 @@ export interface GtrzDesktopApi {
     exchangeDesktopEnrollment(input: ExchangeDesktopEnrollmentInput): Promise<OperationResult>;
     listDesktopDevices(): Promise<readonly DesktopDevice[]>;
     revokeDesktopDevice(input: RevokeDesktopDeviceInput): Promise<OperationResult>;
+    getPrintStation(eventId: string): Promise<PrintStation>;
+    setPrintStation(input: PrintStationInput): Promise<PrintStation>;
     setGlobalEvent(input: SetGlobalEventInput): Promise<SessionState>;
     resetGlobalEvent(input: ResetGlobalEventInput): Promise<OperationResult>;
     listMobileOperators(): Promise<readonly MobileOperator[]>;

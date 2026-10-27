@@ -154,7 +154,11 @@ export class ThermalPrintService {
       return value;
     }
 
-    if (/^(Microsoft Print to PDF|OneNote(?: \(Desktop\))?)$/iu.test(settings.deviceName)) {
+    if (
+      /^(Microsoft Print to PDF|OneNote(?: \(Desktop\))?|AnyDesk Printer|RustDesk Printer)$/iu.test(
+        settings.deviceName,
+      )
+    ) {
       const value = {
         printerName: settings.deviceName,
         enabled: false,
@@ -215,7 +219,7 @@ export class ThermalPrintService {
 
       try {
         await window.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`);
-        if (archive) await this.#archiveReceipt(window, receipt.orderId, receipt.closedAt);
+        if (archive) await this.#archiveReceipt(window, receipt);
         const success = await new Promise<boolean>((resolve) => {
           const printOptions = {
             silent: true,
@@ -259,14 +263,14 @@ export class ThermalPrintService {
     const window = createHiddenWindow();
     try {
       await window.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`);
-      await this.#archiveReceipt(window, receipt.orderId, receipt.closedAt);
+      await this.#archiveReceipt(window, receipt);
     } finally {
       if (!window.isDestroyed()) window.destroy();
     }
   }
 
-  async #archiveReceipt(window: BrowserWindow, orderId: string, closedAt: number): Promise<void> {
-    const occurredAt = new Date(closedAt);
+  async #archiveReceipt(window: BrowserWindow, receipt: DatabaseOrderReceipt): Promise<void> {
+    const occurredAt = new Date(receipt.closedAt);
     const folder = path.join(
       this.#archiveDirectory,
       String(occurredAt.getFullYear()),
@@ -274,8 +278,15 @@ export class ThermalPrintService {
     );
     await mkdir(folder, { recursive: true });
     await writeFile(
-      path.join(folder, `Pedido-${orderId}.pdf`),
-      await window.webContents.printToPDF({ printBackground: true }),
+      path.join(folder, `Pedido-${receipt.orderId}.pdf`),
+      await window.webContents.printToPDF({
+        printBackground: true,
+        pageSize: {
+          width: getPrintingSettings(this.#getDatabase()).paperWidthMm / 25.4,
+          height: estimateReceiptHeightMm(receipt) / 25.4,
+        },
+        preferCSSPageSize: false,
+      }),
     );
   }
 }

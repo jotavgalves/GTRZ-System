@@ -14,6 +14,8 @@ import {
   desktopDeviceListSchema,
   exchangeDesktopEnrollmentInputSchema,
   revokeDesktopDeviceInputSchema,
+  printStationInputSchema,
+  printStationSchema,
   createEventInputSchema,
   createMobileOperatorInputSchema,
   deleteMobileOperatorInputSchema,
@@ -101,6 +103,8 @@ const CONTROL_CHANNELS = [
   IPC_CHANNELS.settingsExchangeDesktopEnrollment,
   IPC_CHANNELS.settingsListDesktopDevices,
   IPC_CHANNELS.settingsRevokeDesktopDevice,
+  IPC_CHANNELS.settingsGetPrintStation,
+  IPC_CHANNELS.settingsSetPrintStation,
   IPC_CHANNELS.settingsSetGlobalEvent,
   IPC_CHANNELS.settingsResetGlobalEvent,
   IPC_CHANNELS.settingsListMobileOperators,
@@ -282,6 +286,21 @@ export function registerIpcHandlers(options: RegisterIpcOptions): ThermalPrintSe
       revokeDesktopDeviceInputSchema.parse(payload).deviceId,
     );
     return operationResultSchema.parse({ success: true });
+  });
+
+  ipcMain.handle(IPC_CHANNELS.settingsGetPrintStation, async (_event, eventId: unknown) => {
+    if (typeof eventId !== 'string') throw new Error('Evento inválido.');
+    return printStationSchema.parse(await options.cloudSyncService.getPrintStation(eventId));
+  });
+
+  ipcMain.handle(IPC_CHANNELS.settingsSetPrintStation, async (_event, payload: unknown) => {
+    if (getSessionState(options.getDatabase()).profile !== 'production') {
+      throw new Error('Entre no perfil Produção para escolher a estação de impressão.');
+    }
+    const input = printStationInputSchema.parse(payload);
+    return printStationSchema.parse(
+      await options.cloudSyncService.setPrintStation(input.eventId, input.deviceId),
+    );
   });
 
   ipcMain.handle(IPC_CHANNELS.settingsSetGlobalEvent, async (_event, payload: unknown) => {

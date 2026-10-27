@@ -66,7 +66,8 @@ const fetch = cloudFetch;
 
 const CONNECTION_TIMEOUT_MS = 5_000;
 const OUTBOX_INTERVAL_MS = 3_000;
-const PRINT_REGISTRATION_REFRESH_MS = 60_000;
+const PRINT_REGISTRATION_REFRESH_MS = 15_000;
+const DESKTOP_PRESENCE_REFRESH_MS = 10_000;
 const CANONICAL_FALLBACK_RECONCILIATION_INTERVAL_MS = 15_000;
 const CANONICAL_REALTIME_RECONCILIATION_DELAY_MS = 750;
 const CANONICAL_SUPABASE_URL = 'https://muhzjnveqrahccoisddo.supabase.co';
@@ -398,6 +399,8 @@ export class CloudSyncService {
   #queuedReceiptArchiveCheckComplete = false;
   #printRegistrationFingerprint: string | null = null;
   #printRegistrationUpdatedAt = 0;
+  #desktopPresenceUpdatedAt = 0;
+  #desktopPresenceEventId: string | null = null;
   #replicationRunning = true;
   #flushInFlight = false;
   #immediateFlushRequest:
@@ -727,6 +730,38 @@ export class CloudSyncService {
     if (!response.ok) throw new Error('A nuvem não conseguiu bloquear este computador.');
   }
 
+  async getPrintStation(eventId: string): Promise<unknown> {
+    const credential = await this.#readPairingKey();
+    if (credential === null) throw new Error('Vincule este computador à nuvem primeiro.');
+    const response = await fetch(
+      `${this.#endpoint}/v1/events/${encodeURIComponent(eventId)}/print/station`,
+      {
+        headers: await this.#cloudHeaders(credential),
+        signal: AbortSignal.timeout(CONNECTION_TIMEOUT_MS),
+      },
+    );
+    if (!response.ok)
+      throw new Error(
+        `Não foi possível consultar a estação de impressão (${String(response.status)}).`,
+      );
+    return response.json();
+  }
+
+  async setPrintStation(eventId: string, deviceId: string | null): Promise<unknown> {
+    const response = await fetch(
+      `${this.#endpoint}/v1/events/${encodeURIComponent(eventId)}/print/station`,
+      {
+        method: 'POST',
+        headers: await this.#administratorHeaders({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify({ deviceId }),
+        signal: AbortSignal.timeout(CONNECTION_TIMEOUT_MS),
+      },
+    );
+    if (!response.ok)
+      throw new Error(`Não foi possível escolher o PC de impressão (${String(response.status)}).`);
+    return response.json();
+  }
+
   async flushOutbox(database: DatabaseContext, activeEventId: string | null): Promise<void> {
     if (this.#flushInFlight) return;
     this.#flushInFlight = true;
@@ -738,6 +773,15 @@ export class CloudSyncService {
       const pairingKey = await this.#readPairingKey();
 
       if (pairingKey === null) return;
+
+      if (
+        Date.now() - this.#desktopPresenceUpdatedAt >= DESKTOP_PRESENCE_REFRESH_MS ||
+        this.#desktopPresenceEventId !== activeEventId
+      ) {
+        await this.#announceDesktopPresence(pairingKey, deviceId, activeEventId);
+        this.#desktopPresenceUpdatedAt = Date.now();
+        this.#desktopPresenceEventId = activeEventId;
+      }
 
       // Production uses the compact Postgres journal. The stream branch remains
       // only for the previous transport tests and an explicitly supplied Worker URL.

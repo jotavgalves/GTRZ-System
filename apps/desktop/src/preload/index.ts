@@ -14,6 +14,8 @@ import {
   desktopDeviceListSchema,
   exchangeDesktopEnrollmentInputSchema,
   revokeDesktopDeviceInputSchema,
+  printStationInputSchema,
+  printStationSchema,
   createMobileOperatorInputSchema,
   deleteMobileOperatorInputSchema,
   endMobileOperatorSessionsInputSchema,
@@ -53,6 +55,8 @@ import {
   type DesktopDevice,
   type ExchangeDesktopEnrollmentInput,
   type RevokeDesktopDeviceInput,
+  type PrintStation,
+  type PrintStationInput,
   type CreateMobileOperatorInput,
   type DeleteMobileOperatorInput,
   type EndMobileOperatorSessionsInput,
@@ -246,6 +250,20 @@ const api: GtrzDesktopApi = {
         revokeDesktopDeviceInputSchema.parse(input),
       );
       return operationResultSchema.parse(payload);
+    },
+    async getPrintStation(eventId: string): Promise<PrintStation> {
+      const payload: unknown = await ipcRenderer.invoke(
+        IPC_CHANNELS.settingsGetPrintStation,
+        eventId,
+      );
+      return printStationSchema.parse(payload);
+    },
+    async setPrintStation(input: PrintStationInput): Promise<PrintStation> {
+      const payload: unknown = await ipcRenderer.invoke(
+        IPC_CHANNELS.settingsSetPrintStation,
+        printStationInputSchema.parse(input),
+      );
+      return printStationSchema.parse(payload);
     },
     async setGlobalEvent(input: SetGlobalEventInput): Promise<SessionState> {
       const payload: unknown = await ipcRenderer.invoke(

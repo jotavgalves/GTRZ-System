@@ -15,6 +15,7 @@ import { useCallback, useEffect, useState } from 'react';
 import type { CloudMonitor, DesktopDevice, OwnerSession } from '@gtrz/contracts';
 
 import { MobileOperatorsPanel } from './MobileOperatorsPanel';
+import { PrintStationPanel } from './PrintStationPanel';
 import { CloudEventSelector } from './CloudEventSelector';
 import { EnvironmentSelector } from './EnvironmentSelector';
 
@@ -218,6 +219,18 @@ export function CloudMonitorPage(): React.JSX.Element {
     void load();
   }, [load]);
 
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      void window.gtrz.settings
+        .getCloudMonitor()
+        .then(setMonitor)
+        .catch(() => undefined);
+    }, 10_000);
+    return () => {
+      window.clearInterval(timer);
+    };
+  }, []);
+
   const loadDesktopDevices = useCallback(async (): Promise<void> => {
     try {
       setDesktopDevices(await window.gtrz.settings.listDesktopDevices());
@@ -265,7 +278,9 @@ export function CloudMonitorPage(): React.JSX.Element {
         email: ownerEmail.trim(),
         password: ownerPassword,
       });
-      setOwnerNotice('Conta criada. Se receber um e-mail de confirmação, confirme antes de entrar.');
+      setOwnerNotice(
+        'Conta criada. Se receber um e-mail de confirmação, confirme antes de entrar.',
+      );
       setOwnerPassword('');
     } catch (registrationError: unknown) {
       setOwnerError(
@@ -447,6 +462,11 @@ export function CloudMonitorPage(): React.JSX.Element {
 
       <EnvironmentSelector />
       <CloudEventSelector />
+      <PrintStationPanel
+        devices={desktopDevices}
+        monitor={monitor}
+        canConfigure={ownerSession !== null}
+      />
 
       <section className="panel cloud-enrollment">
         <div className="panel__heading">

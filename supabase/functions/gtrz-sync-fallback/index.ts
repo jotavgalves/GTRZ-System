@@ -1282,12 +1282,32 @@ Deno.serve(async (request) => {
       });
     }
 
-    const printRoute = /^\/v1\/events\/([^/]+)\/print\/(printers|claim|complete|jobs)$/.exec(path);
+    const printRoute =
+      /^\/v1\/events\/([^/]+)\/print\/(printers|claim|complete|jobs|station)$/.exec(path);
     if (printRoute) {
-      const actorDeviceId = await authorizeDesktop(),
-        eventId = string(decodeURIComponent(printRoute[1]), 'eventId'),
+      const eventId = string(decodeURIComponent(printRoute[1]), 'eventId'),
         operation = printRoute[2],
         now = Date.now();
+      if (operation === 'station' && request.method === 'GET') {
+        await authorizeDesktop();
+        const { data, error } = await db.rpc('gtrz_get_event_print_station', {
+          p_event_id: eventId,
+        });
+        if (error) throw error;
+        return ok(data);
+      }
+      if (operation === 'station' && request.method === 'POST') {
+        await denyAdministrator();
+        const input = await body();
+        const { data, error } = await db.rpc('gtrz_set_event_print_station', {
+          p_event_id: eventId,
+          p_device_id: input.deviceId === null ? null : string(input.deviceId, 'deviceId'),
+          p_now: now,
+        });
+        if (error) throw error;
+        return ok(data);
+      }
+      const actorDeviceId = await authorizeDesktop();
       if (operation === 'jobs' && request.method === 'GET') {
         const { data, error } = await db.rpc('gtrz_list_print_jobs', { p_event_id: eventId });
         if (error) throw error;
