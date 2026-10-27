@@ -950,15 +950,15 @@ class MonitorRoom extends DurableObject<Env> {
 
   #snapshot(): JsonRecord {
     const now = Date.now();
-    // Presence is carried by the persistent control WebSocket. Persisting a
-    // heartbeat every few seconds only burns SQL rows, so keep a generous window
-    // around the five-minute desktop heartbeat.
+    // Desktops renew their presence every ten seconds; an old registration is
+    // not a live connection. Mobile cashiers keep their separate expiry window.
+    const desktopActiveSince = now - 30_000;
     const activeSince = now - 600_000;
     const activeDevices = this.ctx.storage.sql
       .exec(
         `SELECT device_id, label, active_event_id, last_seen_at, latency_ms
          FROM devices WHERE last_seen_at >= ? ORDER BY last_seen_at DESC LIMIT 20`,
-        activeSince,
+        desktopActiveSince,
       )
       .toArray()
       .map((row) => ({

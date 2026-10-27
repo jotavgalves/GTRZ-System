@@ -224,7 +224,9 @@ export function CloudMonitorPage(): React.JSX.Element {
       void window.gtrz.settings
         .getCloudMonitor()
         .then(setMonitor)
-        .catch(() => undefined);
+        .catch(() => {
+          setMonitor(null);
+        });
     }, 10_000);
     return () => {
       window.clearInterval(timer);
@@ -300,15 +302,24 @@ export function CloudMonitorPage(): React.JSX.Element {
     void loadDesktopDevices();
   };
 
+  const connectedDevices =
+    monitor?.activeDevices.filter((device) => Date.now() - device.lastSeenAt < 30_000) ?? [];
+  const linkedDevices = desktopDevices.filter((device) => device.revokedAt === null);
+  const blockedDeviceCount = desktopDevices.length - linkedDevices.length;
+  const localDeviceId = monitor?.localDeviceId ?? null;
+  const displayDeviceLabel = (id: string, label: string): string =>
+    id === localDeviceId ? 'Este PC' : label;
   const averageLatency =
-    monitor === null || monitor.activeDevices.length === 0
+    connectedDevices.length === 0
       ? null
       : Math.round(
-          monitor.activeDevices.reduce((total, device) => total + device.latencyMs, 0) /
-            monitor.activeDevices.length,
+          connectedDevices.reduce((total, device) => total + device.latencyMs, 0) /
+            connectedDevices.length,
         );
 
-  const deviceLabels = new Map(monitor?.activeDevices.map((device) => [device.id, device.label]));
+  const deviceLabels = new Map(
+    connectedDevices.map((device) => [device.id, displayDeviceLabel(device.id, device.label)]),
+  );
 
   const createEnrollment = async (): Promise<void> => {
     setEnrollmentBusy(true);
@@ -500,16 +511,20 @@ export function CloudMonitorPage(): React.JSX.Element {
                 </small>
               </div>
             )}
-            {desktopDevices.length === 0 ? null : (
+            {linkedDevices.length === 0 ? null : (
               <div className="cloud-enrollment__devices">
                 <strong>Computadores vinculados</strong>
-                {desktopDevices.map((device) => (
+                {linkedDevices.map((device) => (
                   <div key={device.deviceId}>
                     <span>
-                      <b>{device.label}</b>
-                      <small>{device.revokedAt === null ? 'Ativo' : 'Bloqueado'}</small>
+                      <b>{displayDeviceLabel(device.deviceId, device.label)}</b>
+                      <small>
+                        {connectedDevices.some((item) => item.id === device.deviceId)
+                          ? 'Conectado agora'
+                          : 'Desconectado'}
+                      </small>
                     </span>
-                    {device.revokedAt !== null ? null : (
+                    {device.deviceId === localDeviceId ? null : (
                       <button
                         className="button button--danger"
                         disabled={enrollmentBusy}
@@ -523,6 +538,9 @@ export function CloudMonitorPage(): React.JSX.Element {
                 ))}
               </div>
             )}
+            {blockedDeviceCount > 0 ? (
+              <small>{blockedDeviceCount} computador(es) com vínculo revogado.</small>
+            ) : null}
           </div>
           <form onSubmit={(event) => void exchangeEnrollment(event)}>
             <label className="form-field">
@@ -555,8 +573,8 @@ export function CloudMonitorPage(): React.JSX.Element {
           </span>
           <div>
             <span>Dispositivos ativos</span>
-            <strong>{monitor?.activeDevices.length ?? 0}</strong>
-            <small>Atualização automática a cada 5 segundos</small>
+            <strong>{connectedDevices.length}</strong>
+            <small>Presença confirmada nos últimos 30 segundos</small>
           </div>
         </article>
         <article className="panel cloud-metric">
@@ -631,20 +649,23 @@ export function CloudMonitorPage(): React.JSX.Element {
             <Laptop size={20} aria-hidden="true" />
             <div>
               <h2>Máquinas conectadas</h2>
-              <p>Uma máquina desaparece da lista após dez minutos sem sinal.</p>
+              <p>Somente PCs com sinal nos últimos 30 segundos aparecem aqui.</p>
             </div>
           </div>
           <div className="cloud-device-list">
-            {monitor?.activeDevices.map((device) => (
+            {connectedDevices.map((device) => (
               <article className="cloud-device-row" key={device.id}>
                 <span className="cloud-device-row__signal" aria-hidden="true" />
                 <div>
-                  <strong>{device.label}</strong>
+                  <strong>{displayDeviceLabel(device.id, device.label)}</strong>
                   <small>{`ID ${shortDeviceId(device.id)} · visto ${formatTime(device.lastSeenAt)}`}</small>
                 </div>
                 <span>{`${String(device.latencyMs)} ms`}</span>
               </article>
-            )) ?? <p className="cloud-empty">Nenhum dispositivo respondeu ainda.</p>}
+            ))}
+            {connectedDevices.length === 0 ? (
+              <p className="cloud-empty">Nenhum PC conectado agora.</p>
+            ) : null}
           </div>
         </section>
 

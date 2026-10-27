@@ -367,7 +367,7 @@ describe('cloud replication invariants', () => {
     ).toHaveLength(readsBefore);
   });
 
-  it('uses the legacy administrator key only to mint a one-time desktop enrollment code', async () => {
+  it('does not use the legacy key for desktop enrollment administration', async () => {
     request.mockImplementation((url: string): Response => {
       if (url.endsWith('/v1/desktop/enrollment')) {
         return new Response(
@@ -382,18 +382,10 @@ describe('cloud replication invariants', () => {
       });
     });
 
-    await expect(service.createDesktopEnrollment()).resolves.toEqual({
-      enrollmentCode: 'gtrz-enroll-code',
-      expiresAt: 123,
-    });
-    expect(request).toHaveBeenCalledWith(
+    await expect(service.createDesktopEnrollment()).rejects.toThrow('conta proprietária');
+    expect(request).not.toHaveBeenCalledWith(
       'https://audit.invalid/v1/desktop/enrollment',
-      expect.objectContaining({
-        headers: expect.objectContaining({
-          'X-GTRZ-Key': 'isolated-audit-key',
-          'X-GTRZ-Device-Id': 'audit-pc',
-        }),
-      }),
+      expect.anything(),
     );
   });
 
@@ -1180,7 +1172,7 @@ describe('cloud replication invariants', () => {
     ).toEqual({ n: 1 });
   });
 
-  it('uploads a verified cloud replica before globally activating an event', async () => {
+  it('uploads a verified cloud replica but blocks global activation without owner login', async () => {
     const temporaryDirectory = mkdtempSync(path.join(tmpdir(), 'gtrz-replica-test-'));
     const databaseRuntime = {
       get: (): ReturnType<typeof openDatabase> => db,
@@ -1215,19 +1207,16 @@ describe('cloud replication invariants', () => {
     const event = createEvent(db, { name: 'Replica event', startsAt: Date.now() });
 
     try {
-      await service.setGlobalEvent(db, event.id);
+      await expect(service.setGlobalEvent(db, event.id)).rejects.toThrow('conta proprietária');
 
       const urls = request.mock.calls.map(([url]) => String(url));
       expect(urls).toEqual(
         expect.arrayContaining([
           expect.stringContaining('/v1/monitor/heartbeat'),
           expect.stringContaining(`/v1/events/${event.id}/replica-snapshot`),
-          expect.stringContaining('/v1/monitor/global-event'),
         ]),
       );
-      expect(
-        urls.findIndex((url) => url.endsWith(`/v1/events/${event.id}/replica-snapshot`)),
-      ).toBeLessThan(urls.findIndex((url) => url.endsWith('/v1/monitor/global-event')));
+      expect(urls.some((url) => url.endsWith('/v1/monitor/global-event'))).toBe(false);
       expect(request).toHaveBeenCalledWith(
         expect.stringContaining(`/v1/events/${event.id}/replica-snapshot`),
         expect.objectContaining({

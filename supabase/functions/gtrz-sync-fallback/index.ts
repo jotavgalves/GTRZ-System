@@ -206,17 +206,13 @@ Deno.serve(async (request) => {
     return bad(503, 'NOT_CONFIGURED', 'Banco canônico não configurado.');
   const db = createClient(endpoint, serviceKey, { auth: { persistSession: false } });
   const store = db.schema('gtrz');
-  const pairingKey = Deno.env.get('GTRZ_FALLBACK_KEY') ?? '';
   const ownerEmail = Deno.env.get('GTRZ_OWNER_EMAIL')?.trim().toLowerCase() ?? '';
-  const master =
-    pairingKey.length > 0 && secretEqual(request.headers.get('X-GTRZ-Key') ?? '', pairingKey);
   const body = async (): Promise<Obj> => {
     const value: unknown = await request.json();
     if (!asObj(value)) throw new Error('O corpo deve ser um objeto JSON.');
     return value;
   };
   const authorizeDesktop = async (): Promise<string | null> => {
-    if (master) return null;
     const deviceId = request.headers.get('X-GTRZ-Device-Id') ?? '';
     const credential = request.headers.get('X-GTRZ-Key') ?? '';
     if (!deviceId || !credential)
@@ -261,7 +257,7 @@ Deno.serve(async (request) => {
     return user.email;
   };
   const denyAdministrator = async (): Promise<void> => {
-    if (!master) await authorizeOwner();
+    await authorizeOwner();
   };
   const assertDeviceClaim = (actorDeviceId: string | null, claimedDeviceId: string): void => {
     if (actorDeviceId !== null && actorDeviceId !== claimedDeviceId) {
@@ -332,16 +328,16 @@ Deno.serve(async (request) => {
       throw new Error('A sessão móvel não retornou o contexto operacional.');
     return refreshed;
   };
-  // The mobile topic is a high-entropy capability derived from the server-only
-  // pairing secret. It carries only invalidation signals. A distinct topic,
+  // The mobile topic is a high-entropy capability derived from a server-only
+  // secret that never lived on an enrolled desktop. It carries only invalidation signals. A distinct topic,
   // never disclosed to a mobile session, carries committed journal entries to
   // enrolled desktops for an immediate, sequence-checked local apply.
   const realtimeTopic = async (eventId: string): Promise<string> =>
-    `gtrz-sync-${await sha(`${pairingKey}:${eventId}:realtime-v1`)}`;
+    `gtrz-sync-${await sha(`${serviceKey}:${eventId}:realtime-v2`)}`;
   const mobileRealtimeTopic = async (tokenHash: string): Promise<string> =>
-    `gtrz-mobile-${await sha(`${pairingKey}:${tokenHash}:realtime-v2`)}`;
+    `gtrz-mobile-${await sha(`${serviceKey}:${tokenHash}:realtime-v3`)}`;
   const desktopRealtimeTopic = async (eventId: string): Promise<string> =>
-    `gtrz-desktop-sync-${await sha(`${pairingKey}:${eventId}:desktop-realtime-v1`)}`;
+    `gtrz-desktop-sync-${await sha(`${serviceKey}:${eventId}:desktop-realtime-v2`)}`;
   const notifyRealtime = async (
     eventId: string,
     version: number,
@@ -352,7 +348,6 @@ Deno.serve(async (request) => {
     mobileProjection: MobileProjection | null = null,
     notifyDesktop = true,
   ): Promise<RealtimeDelivery> => {
-    if (!pairingKey) return { mobileRecipients: 0, failed: true };
     let mobileRecipients = 0;
     try {
       const notifications: Promise<Response>[] = [];
@@ -767,7 +762,7 @@ Deno.serve(async (request) => {
       return ok({ deviceId, token: credential });
     }
     if (path === '/v1/desktop/devices' && request.method === 'GET') {
-      await denyAdministrator();
+      await authorizeDesktop();
       const { data, error } = await db.rpc('gtrz_list_desktop_devices');
       if (error) throw error;
       return ok(data);
@@ -788,11 +783,6 @@ Deno.serve(async (request) => {
     const realtimeTopicRoute = /^\/v1\/events\/([^/]+)\/realtime-topic$/.exec(path);
     if (realtimeTopicRoute && request.method === 'GET') {
       await authorizeDesktop();
-      if (!pairingKey)
-        throw Object.assign(new Error('Canal de atualização não configurado.'), {
-          status: 503,
-          code: 'NOT_CONFIGURED',
-        });
       return ok({
         topic: await realtimeTopic(
           string(decodeURIComponent(realtimeTopicRoute[1]), 'eventId', 160),
@@ -802,11 +792,6 @@ Deno.serve(async (request) => {
     const desktopRealtimeTopicRoute = /^\/v1\/events\/([^/]+)\/desktop-realtime-topic$/.exec(path);
     if (desktopRealtimeTopicRoute && request.method === 'GET') {
       await authorizeDesktop();
-      if (!pairingKey)
-        throw Object.assign(new Error('Canal de atualização não configurado.'), {
-          status: 503,
-          code: 'NOT_CONFIGURED',
-        });
       return ok({
         topic: await desktopRealtimeTopic(
           string(decodeURIComponent(desktopRealtimeTopicRoute[1]), 'eventId', 160),
@@ -1085,6 +1070,7 @@ Deno.serve(async (request) => {
           .from('desktop_devices')
           .select('device_id,label,active_event_id,last_seen_at,revoked_at')
           .is('revoked_at', null)
+          .gte('last_seen_at', now - 30_000)
           .order('last_seen_at', { ascending: false });
       if (error) throw error;
       return ok({

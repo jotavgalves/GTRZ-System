@@ -511,8 +511,6 @@ export class CloudSyncService {
     const pairingKey = await this.#readPairingKey();
     if (pairingKey === null) throw new Error('Vincule este computador à nuvem primeiro.');
     if (this.#ownerSession !== null) return this.#ownerHeaders(pairingKey, headers);
-    const masterKey = await this.#readLegacyPairingKey();
-    if (masterKey !== null) return this.#cloudHeaders(masterKey, headers);
     throw new Error('Entre com a conta proprietária para administrar a nuvem.');
   }
 
@@ -689,8 +687,10 @@ export class CloudSyncService {
       readonly revokedAt: number | null;
     }[]
   > {
+    const credential = await this.#readPairingKey();
+    if (credential === null) throw new Error('Vincule este computador à nuvem primeiro.');
     const response = await fetch(`${this.#endpoint}/v1/desktop/devices`, {
-      headers: await this.#administratorHeaders(),
+      headers: await this.#cloudHeaders(credential),
       signal: AbortSignal.timeout(CONNECTION_TIMEOUT_MS),
     });
     const payload: unknown = await response.json();
@@ -1284,6 +1284,7 @@ export class CloudSyncService {
     const defaults = {
       endpoint: this.#endpoint,
       checkedAt: Date.now(),
+      localDeviceId: deviceId,
       localQueue: {
         outboxPending: 0,
         outboxAccepted: 0,
@@ -1304,6 +1305,7 @@ export class CloudSyncService {
       const monitor = cloudMonitorSchema.parse({
         ...defaults,
         ...(isRecord(payload) ? payload : {}),
+        localDeviceId: deviceId,
       });
       this.#recordCloudSuccess();
       return monitor;
@@ -1313,6 +1315,8 @@ export class CloudSyncService {
     const activeDevices = Array.isArray(remote.activeDevices)
       ? remote.activeDevices.flatMap((device) => {
           if (!isRecord(device)) return [];
+          const lastSeenAt = integerField(device, 'lastSeenAt');
+          if (lastSeenAt === null || lastSeenAt < Date.now() - 30_000) return [];
           const id = stringField(device, 'id') ?? stringField(device, 'deviceId');
           const label = stringField(device, 'label');
           if (id === null || label === null) return [];
@@ -1329,7 +1333,7 @@ export class CloudSyncService {
               id: id.slice(0, 80),
               label: label.slice(0, 80),
               activeEventId,
-              lastSeenAt: integerField(device, 'lastSeenAt') ?? defaults.checkedAt,
+              lastSeenAt,
               latencyMs:
                 integerField(device, 'latencyMs') ?? (id === deviceId ? this.#lastLatencyMs : 0),
             },

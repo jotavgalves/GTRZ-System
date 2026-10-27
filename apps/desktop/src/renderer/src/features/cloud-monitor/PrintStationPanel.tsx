@@ -60,6 +60,8 @@ export function PrintStationPanel({ devices, monitor, canConfigure }: Props): Re
   };
 
   const chosen = station?.deviceId ?? null;
+  const stationLabel = (id: string, label: string): string =>
+    id === monitor?.localDeviceId ? 'Este PC' : label;
   const device = monitor?.activeDevices.find((item) => item.id === chosen);
   const printer = station?.printers.find((item) => item.deviceId === chosen && item.enabled);
   const present =
@@ -89,8 +91,8 @@ export function PrintStationPanel({ devices, monitor, canConfigure }: Props): Re
             {chosen === null
               ? 'Nenhum PC escolhido. Nenhuma nota será impressa automaticamente.'
               : ready
-                ? `Pronto: ${device.label} · ${printer.printerName}`
-                : `Atenção: ${device?.label ?? devices.find((item) => item.deviceId === chosen)?.label ?? 'PC escolhido'} está desconectado, fora deste evento ou sem impressora disponível.`}
+                ? `Pronto: ${stationLabel(device.id, device.label)} · ${printer.printerName}`
+                : `Atenção: ${stationLabel(chosen, device?.label ?? devices.find((item) => item.deviceId === chosen)?.label ?? 'PC escolhido')} está desconectado, fora deste evento ou sem impressora disponível.`}
           </p>
           <p>
             {station?.queued ?? 0} nota(s) aguardando · {station?.needsAttention ?? 0} exigem
@@ -111,7 +113,7 @@ export function PrintStationPanel({ devices, monitor, canConfigure }: Props): Re
                     .filter((item) => item.revokedAt === null)
                     .map((item) => (
                       <option key={item.deviceId} value={item.deviceId}>
-                        {item.label}
+                        {stationLabel(item.deviceId, item.label)}
                       </option>
                     ))}
                 </select>

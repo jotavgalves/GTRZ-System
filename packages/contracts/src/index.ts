@@ -398,6 +398,7 @@ export const cloudMonitorConflictSchema = z.object({
 export const cloudMonitorSchema = z.object({
   endpoint: z.url(),
   checkedAt: z.number().int().nonnegative(),
+  localDeviceId: z.string().min(1).max(80),
   activeDevices: z.array(cloudMonitorDeviceSchema),
   recentCommands: z.array(cloudMonitorCommandSchema),
   recentTransport: z.array(cloudMonitorTransportSchema),
