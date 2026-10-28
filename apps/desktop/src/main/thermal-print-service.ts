@@ -1,5 +1,6 @@
-import { BrowserWindow } from 'electron';
-import { mkdir, writeFile } from 'node:fs/promises';
+import { BrowserWindow, shell } from 'electron';
+import { randomUUID } from 'node:crypto';
+import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
 import type {
@@ -42,9 +43,14 @@ function createHiddenWindow(): BrowserWindow {
   });
 }
 
+function isPdfOutput(settings: PrintingSettings): boolean {
+  return settings.deviceName === 'Microsoft Print to PDF';
+}
+
 export class ThermalPrintService {
   readonly #getDatabase: () => DatabaseContext;
   readonly #archiveDirectory: string;
+  readonly #archiveInFlight = new Map<string, Promise<void>>();
   #printerRegistrationCache: {
     readonly fingerprint: string;
     readonly value: CloudPrinterRegistration;
@@ -88,6 +94,7 @@ export class ThermalPrintService {
     // is commonly "Microsoft Print to PDF", which opens a save dialog and can
     // make a completed sale look as if it was printed by the thermal station.
     await this.archiveOrder(orderId).catch(() => undefined);
+    if (isPdfOutput(getPrintingSettings(this.#getDatabase()))) return;
     const registration = await this.getCloudPrinterRegistration();
     if (!registration.enabled) return;
     await this.#printOrder(orderId, false, false).catch(() => undefined);
@@ -96,6 +103,13 @@ export class ThermalPrintService {
   async archiveOrder(orderId: string): Promise<void> {
     const receipt = getOrderReceipt(this.#getDatabase(), orderId);
     await this.#archiveReceiptDocument(receipt);
+  }
+
+  async openReceiptFolder(): Promise<string> {
+    await mkdir(this.#archiveDirectory, { recursive: true });
+    const error = await shell.openPath(this.#archiveDirectory);
+    if (error) throw new Error(error);
+    return this.#archiveDirectory;
   }
 
   async reprintOrder(orderId: string): Promise<PrintOrderResult> {
@@ -115,6 +129,18 @@ export class ThermalPrintService {
       ...normalizeCloudReceipt(job.document),
       printedByLabel: settings.machineName,
     };
+    if (isPdfOutput(settings)) {
+      try {
+        await this.#archiveReceiptDocument(receipt);
+        return { success: true, skipped: false, message: 'PDF salvo na pasta de notas.' };
+      } catch (error: unknown) {
+        return {
+          success: false,
+          skipped: false,
+          message: error instanceof Error ? error.message : 'Não foi possível salvar o PDF.',
+        };
+      }
+    }
     return this.#printReceipt(receipt, settings);
   }
 
@@ -155,9 +181,7 @@ export class ThermalPrintService {
     }
 
     if (
-      /^(Microsoft Print to PDF|OneNote(?: \(Desktop\))?|AnyDesk Printer|RustDesk Printer)$/iu.test(
-        settings.deviceName,
-      )
+      /^(OneNote(?: \(Desktop\))?|AnyDesk Printer|RustDesk Printer)$/iu.test(settings.deviceName)
     ) {
       const value = {
         printerName: settings.deviceName,
@@ -198,6 +222,10 @@ export class ThermalPrintService {
 
     try {
       const receipt = getOrderReceipt(this.#getDatabase(), orderId);
+      if (isPdfOutput(settings)) {
+        await this.#archiveReceiptDocument(receipt);
+        return { success: true, skipped: false, message: 'PDF salvo na pasta de notas.' };
+      }
       return await this.#printReceipt(receipt, settings, archive);
     } catch (error: unknown) {
       return {
@@ -256,6 +284,20 @@ export class ThermalPrintService {
   }
 
   async #archiveReceiptDocument(receipt: DatabaseOrderReceipt): Promise<void> {
+    const existing = this.#archiveInFlight.get(receipt.orderId);
+    if (existing) return existing;
+    const saving = this.#renderAndArchiveReceipt(receipt);
+    this.#archiveInFlight.set(receipt.orderId, saving);
+    try {
+      await saving;
+    } finally {
+      if (this.#archiveInFlight.get(receipt.orderId) === saving) {
+        this.#archiveInFlight.delete(receipt.orderId);
+      }
+    }
+  }
+
+  async #renderAndArchiveReceipt(receipt: DatabaseOrderReceipt): Promise<void> {
     const html = await buildReceiptHtml(
       receipt,
       getPrintingSettings(this.#getDatabase()).paperWidthMm,
@@ -277,16 +319,31 @@ export class ThermalPrintService {
       `${String(occurredAt.getMonth() + 1).padStart(2, '0')}-${String(occurredAt.getDate()).padStart(2, '0')}`,
     );
     await mkdir(folder, { recursive: true });
-    await writeFile(
-      path.join(folder, `Pedido-${receipt.orderId}.pdf`),
-      await window.webContents.printToPDF({
-        printBackground: true,
-        pageSize: {
-          width: getPrintingSettings(this.#getDatabase()).paperWidthMm / 25.4,
-          height: estimateReceiptHeightMm(receipt) / 25.4,
-        },
-        preferCSSPageSize: false,
-      }),
-    );
+    const target = path.join(folder, `Pedido-${receipt.orderId}.pdf`);
+    const previous = await readFile(target).catch(() => null);
+    if (
+      previous !== null &&
+      previous.subarray(0, 5).toString() === '%PDF-' &&
+      previous.subarray(-16).toString().includes('%%EOF')
+    ) {
+      return;
+    }
+    const temporary = `${target}.${randomUUID()}.tmp`;
+    try {
+      await writeFile(
+        temporary,
+        await window.webContents.printToPDF({
+          printBackground: true,
+          pageSize: {
+            width: getPrintingSettings(this.#getDatabase()).paperWidthMm / 25.4,
+            height: estimateReceiptHeightMm(receipt) / 25.4,
+          },
+          preferCSSPageSize: false,
+        }),
+      );
+      await rename(temporary, target);
+    } finally {
+      await rm(temporary, { force: true });
+    }
   }
 }

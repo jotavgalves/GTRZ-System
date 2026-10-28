@@ -43,6 +43,7 @@ export type PrintOrderResult = z.infer<typeof printOrderResultSchema>;
 
 export interface PrintingApi {
   listPrinters(): Promise<readonly PrinterInfo[]>;
+  openReceiptFolder(): Promise<string>;
   getSettings(): Promise<PrintingSettings>;
   updateSettings(input: UpdatePrintingSettingsInput): Promise<PrintingSettings>;
   reprintOrder(input: PrintOrderInput): Promise<PrintOrderResult>;

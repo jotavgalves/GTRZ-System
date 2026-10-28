@@ -99,7 +99,9 @@ export function PrintStationPanel({ devices, monitor, canConfigure }: Props): Re
         <>
           <p>
             {ready
-              ? `Pronto: ${stationLabel(device.id, device.label)} · ${printer.printerName}`
+              ? printer.printerName === 'Microsoft Print to PDF'
+                ? `PDF ativo em ${stationLabel(device.id, device.label)} · arquivos na pasta de notas.`
+                : `Pronto: ${stationLabel(device.id, device.label)} · ${printer.printerName}`
               : stationWarning}
           </p>
           <p>

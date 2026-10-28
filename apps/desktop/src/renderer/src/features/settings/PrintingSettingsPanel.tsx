@@ -1,4 +1,4 @@
-import { Printer, RefreshCw } from 'lucide-react';
+import { FolderOpen, Printer, RefreshCw } from 'lucide-react';
 import { useCallback, useEffect, useState, type SyntheticEvent } from 'react';
 
 import type { PrinterInfo, PrintingSettings, ThermalPaperWidth } from '@gtrz/contracts';
@@ -51,7 +51,7 @@ export function PrintingSettingsPanel(): React.JSX.Element {
     try {
       const saved = await window.gtrz.printing.updateSettings(settings);
       setSettings(saved);
-      setMessage('Configuração da impressora térmica salva.');
+      setMessage('Configuração de saída das notas salva.');
     } catch (submitError: unknown) {
       setError(getErrorMessage(submitError));
     } finally {
@@ -68,8 +68,11 @@ export function PrintingSettingsPanel(): React.JSX.Element {
       <div className="panel__heading">
         <Printer size={20} aria-hidden="true" />
         <div>
-          <h2>Impressora térmica</h2>
-          <p>A nota é enviada depois que a venda já foi concluída no banco.</p>
+          <h2>Saída das notas</h2>
+          <p>
+            Escolha uma impressora física ou Microsoft Print to PDF para salvar os arquivos
+            automaticamente.
+          </p>
         </div>
       </div>
 
@@ -85,7 +88,7 @@ export function PrintingSettingsPanel(): React.JSX.Element {
           }}
           type="checkbox"
         />
-        Imprimir automaticamente após concluir a venda
+        Enviar notas automaticamente após concluir a venda
       </label>
 
       <label className="form-field">
@@ -105,7 +108,7 @@ export function PrintingSettingsPanel(): React.JSX.Element {
       <label className="form-field">
         <span>Impressora</span>
         <select
-          aria-label="Impressora térmica"
+          aria-label="Destino das notas"
           disabled={loading}
           onChange={(event) => {
             setSettings((current) => ({
@@ -130,6 +133,13 @@ export function PrintingSettingsPanel(): React.JSX.Element {
         </select>
       </label>
 
+      {settings.deviceName === 'Microsoft Print to PDF' ? (
+        <p>
+          Os PDFs serão salvos em Documentos → GTRZ System → Notas, sem abrir a janela de salvar do
+          Windows.
+        </p>
+      ) : null}
+
       <label className="form-field">
         <span>Largura da bobina</span>
         <select
@@ -152,6 +162,23 @@ export function PrintingSettingsPanel(): React.JSX.Element {
         <span>{printers.length} impressora(s) detectada(s)</span>
         <button
           className="button button--ghost button--compact"
+          onClick={() => {
+            void window.gtrz.printing.openReceiptFolder().then(
+              (path) => {
+                setMessage(`Pasta de notas aberta: ${path}`);
+              },
+              (reason: unknown) => {
+                setError(getErrorMessage(reason));
+              },
+            );
+          }}
+          type="button"
+        >
+          <FolderOpen size={15} aria-hidden="true" />
+          Abrir pasta de PDFs
+        </button>
+        <button
+          className="button button--ghost button--compact"
           disabled={loading || submitting}
           onClick={() => void load()}
           type="button"
@@ -166,7 +193,7 @@ export function PrintingSettingsPanel(): React.JSX.Element {
 
       <button className="button button--primary" disabled={loading || submitting} type="submit">
         <Printer size={17} aria-hidden="true" />
-        Salvar impressão térmica
+        Salvar saída das notas
       </button>
     </form>
   );

@@ -61,6 +61,7 @@ export const IPC_CHANNELS = {
   settingsEndMobileOperatorSessions: 'settings:end-mobile-operator-sessions',
   settingsDeleteMobileOperator: 'settings:delete-mobile-operator',
   printingListPrinters: 'printing:list-printers',
+  printingOpenReceiptFolder: 'printing:open-receipt-folder',
   printingGetSettings: 'printing:get-settings',
   printingUpdateSettings: 'printing:update-settings',
   printingReprintOrder: 'printing:reprint-order',
