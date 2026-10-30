@@ -2,7 +2,10 @@ import vm from 'node:vm';
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 
-const cashierClientScript = readFileSync('apps/cloud-sync/src/cashier-client.ts', 'utf8');
+const cashierClientScript = readFileSync('apps/cloud-sync/src/cashier-client.ts', 'utf8').replace(
+  /\r\n/g,
+  '\n',
+);
 
 const functions = [
   'pendingSaleKey',
