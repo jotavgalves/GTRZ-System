@@ -5187,7 +5187,7 @@ let accessKey='';let timer=null;const $=id=>document.getElementById(id);const es
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
-    let url = new URL(request.url);
+    const url = new URL(request.url);
     // The mobile alias must not send the isolated test Worker to production.
     if (isTestEnvironment(env) && url.pathname.startsWith('/cashier/api/v1/')) {
       url.pathname = url.pathname.slice('/cashier/api'.length);

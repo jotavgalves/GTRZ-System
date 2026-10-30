@@ -5,7 +5,7 @@ import { normalizeCloudReceipt } from '../../apps/desktop/src/main/normalize-clo
 import { buildReceiptHtml } from '../../apps/desktop/src/main/receipt-html';
 
 describe('cloud print receipt', () => {
-  it('renders a mobile sale document with journal item names and choices', async () => {
+  it('renders a mobile sale document with journal item names and choices', () => {
     const document: ClaimedCloudPrintJob['document'] = {
       orderId: 'sample-order',
       eventName: 'Evento teste',
@@ -39,7 +39,7 @@ describe('cloud print receipt', () => {
     };
 
     const normalized = normalizeCloudReceipt(document);
-    const html = await buildReceiptHtml(normalized, 80);
+    const html = buildReceiptHtml(normalized, 80);
     expect(normalized.items[0]?.name).toBe('Combo de comida');
     expect(html).toContain('Combo de comida');
     expect(html).toContain('Escolha o sabor: 1× Arepa de frango');

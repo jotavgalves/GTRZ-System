@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi, type Mock } from 'vitest';
 import { randomUUID } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import path from 'node:path';
@@ -19,7 +19,24 @@ afterEach(() => {
   for (const db of databases.splice(0)) db.close();
   for (const dir of directories.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
-async function setup() {
+interface SalePayload {
+  commandId: string;
+  saleId: string;
+  servicePointId: string;
+  items: { productId: string; itemKind: string; quantity: number }[];
+  paymentMethod: string;
+  receivedCents: number;
+}
+interface Harness {
+  db: DatabaseContext;
+  authenticate: Mock<() => Promise<unknown>>;
+  print: Mock;
+  sale: () => SalePayload;
+  request: (payload: unknown) => Promise<Response>;
+  restart: () => void;
+  session: { token: string };
+}
+async function setup(): Promise<Harness> {
   const dir = mkdtempSync(path.join(os.tmpdir(), 'gtrz-lan-'));
   directories.push(dir);
   const db = openDatabase(path.join(dir, 'db.sqlite'));
@@ -63,7 +80,7 @@ async function setup() {
   );
   const session = (await login.json()) as { token: string };
   expect(login.status).toBe(200);
-  const sale = () => ({
+  const sale = (): SalePayload => ({
     commandId: randomUUID(),
     saleId: randomUUID(),
     servicePointId: point.id,
@@ -71,7 +88,7 @@ async function setup() {
     paymentMethod: 'cash',
     receivedCents: 500,
   });
-  const request = (payload: unknown) =>
+  const request = (payload: unknown): Promise<Response> =>
     hub.handle(
       new Request('http://192.168.1.2:3210/cashier/api/v1/mobile/sales', {
         method: 'POST',

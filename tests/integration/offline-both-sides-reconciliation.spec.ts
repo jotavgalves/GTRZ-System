@@ -38,18 +38,21 @@ integration(
       endpoint,
     );
     const realFetch = globalThis.fetch;
-    const pending = () =>
+    const pending = (): { n: number } =>
       pc.sqlite
         .prepare("SELECT COUNT(*) AS n FROM sync_outbox WHERE status IN ('pending','failed')")
         .get() as { n: number };
-    const flush = async (eventId: string) => {
+    const flush = async (eventId: string): Promise<void> => {
       for (let attempt = 0; attempt < 12; attempt += 1) {
         await service.flushOutbox(pc, eventId);
         if (pending().n === 0) return;
         await new Promise((resolve) => setTimeout(resolve, 2_000));
       }
     };
-    const worker = (pathname: string, init: RequestInit = {}) =>
+    const worker = (
+      pathname: string,
+      init: { method?: string; body?: string; headers?: Record<string, string> } = {},
+    ): Promise<Response> =>
       realFetch(`${endpoint}${pathname}`, {
         ...init,
         headers: { 'X-GTRZ-Key': key, 'Content-Type': 'application/json', ...init.headers },
@@ -129,20 +132,18 @@ integration(
           .prepare("SELECT COUNT(*) AS n FROM orders WHERE event_id = ? AND status = 'paid'")
           .get(event.id),
       ).toEqual({ n: 3 });
-      expect(
-        pc.sqlite
-          .prepare('SELECT id FROM orders WHERE id = ?')
-          .get(sale.saleId),
-      ).toEqual({ id: sale.saleId });
+      expect(pc.sqlite.prepare('SELECT id FROM orders WHERE id = ?').get(sale.saleId)).toEqual({
+        id: sale.saleId,
+      });
       expect(
         pc.sqlite
           .prepare('SELECT quantity FROM event_stock WHERE event_id = ? AND product_id = ?')
           .get(event.id, product.id),
       ).toEqual({ quantity: 7 });
 
-      const catalog = (await (
-        await worker(`/v1/events/${event.id}/cashier/catalog`)
-      ).json()) as { products: { productId: string; quantity: number }[] };
+      const catalog = (await (await worker(`/v1/events/${event.id}/cashier/catalog`)).json()) as {
+        products: { productId: string; quantity: number }[];
+      };
       expect(catalog.products.find((p) => p.productId === product.id)?.quantity).toBe(7);
       for (const id of offlineOrders) {
         expect(pc.sqlite.prepare('SELECT status FROM orders WHERE id = ?').get(id)).toEqual({
