@@ -26,3 +26,5 @@ tmp-release-check/
 Thumbs.db
 .vscode/
 .idea/
+
+apps/desktop/resources/lan/

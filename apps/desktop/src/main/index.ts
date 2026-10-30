@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog } from 'electron';
+import { app, BrowserWindow, dialog, net } from 'electron';
 import path from 'node:path';
 
 import { IPC_EVENTS } from '@gtrz/contracts';
@@ -9,6 +9,8 @@ import { BackupService } from './backup-service';
 import { CloudSyncService } from './cloud-sync-service';
 import { createMainWindow } from './create-main-window';
 import { DatabaseRuntime } from './database-runtime';
+import { startLocalMobileServer } from './local-mobile-server';
+import type { Server } from 'node:http';
 import { registerIpcHandlers } from './register-ipc';
 import {
   cloudSyncEndpoint,
@@ -18,6 +20,7 @@ import {
 } from './runtime-environment';
 
 let mainWindow: BrowserWindow | null = null;
+let localMobileServer: Server | null = null;
 let databaseRuntime: DatabaseRuntime | null = null;
 let cloudSyncService: CloudSyncService | null = null;
 let automaticBackupTimer: ReturnType<typeof setInterval> | null = null;
@@ -152,6 +155,43 @@ if (!hasSingleInstanceLock) {
       );
       cloudSyncService.setReceiptArchiveAgent((orderId) => printService.archiveOrder(orderId));
       cloudSyncService.setResetBackupAgent(() => backupService.createBackup('pre-event-reset'));
+      const lanEnabled =
+        !isolatedDataRun &&
+        (
+          requireDatabaseRuntime()
+            .get()
+            .sqlite.prepare("SELECT value FROM app_meta WHERE key='lan.enabled'")
+            .get() as { value: string } | undefined
+        )?.value === 'true';
+      if (lanEnabled) {
+        try {
+          localMobileServer = await startLocalMobileServer({
+            getDatabase: () => requireDatabaseRuntime().get(),
+            htmlPath: path.join(
+              app.isPackaged ? process.resourcesPath : path.join(app.getAppPath(), 'resources'),
+              'lan',
+              'cashier.html',
+            ),
+            port: 3210,
+            cloudFetch: (input, init) => net.fetch(input, init),
+            onSale: (orderId) => {
+              void printService.printAfterSale(orderId).catch((error: unknown) => {
+                console.error('Falha na entrega da nota local:', error);
+              });
+              if (mainWindow && !mainWindow.isDestroyed())
+                mainWindow.webContents.send(IPC_EVENTS.dataChanged);
+            },
+          });
+        } catch (error: unknown) {
+          dialog.showErrorBox(
+            'Mobile local indisponível',
+            error instanceof Error
+              ? error.message
+              : 'Não foi possível iniciar o servidor local. O caixa do PC continua disponível.',
+          );
+        }
+      }
+
       if (cloudSyncEnabledForRuntime) {
         cloudSyncService.start(
           () => getSessionState(requireDatabaseRuntime().get()).activeEvent?.id ?? null,
@@ -203,6 +243,7 @@ if (!hasSingleInstanceLock) {
 
   app.on('before-quit', () => {
     if (automaticBackupTimer !== null) clearInterval(automaticBackupTimer);
+    localMobileServer?.close();
     cloudSyncService?.stop();
     databaseRuntime?.close();
     databaseRuntime = null;

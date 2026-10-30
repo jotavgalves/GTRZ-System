@@ -1098,6 +1098,8 @@ describe('cloud replication invariants', () => {
       quantity: 3,
     });
     createServicePoint(db, { label: 'Partial table', type: 'table' });
+    // This fixture represents an already-replicated partial baseline, not unsent local work.
+    db.sqlite.exec("UPDATE sync_outbox SET status='accepted',accepted_at=1");
     db.sqlite
       .prepare(
         `INSERT INTO sync_state (key, value, updated_at)
@@ -1205,6 +1207,8 @@ describe('cloud replication invariants', () => {
       return new Response('{}', { status: 200 });
     });
     const event = createEvent(db, { name: 'Replica event', startsAt: Date.now() });
+    // Snapshot activation is tested only after the event creation has been acknowledged.
+    db.sqlite.exec("UPDATE sync_outbox SET status='accepted',accepted_at=1");
 
     try {
       await expect(service.setGlobalEvent(db, event.id)).rejects.toThrow('conta proprietária');

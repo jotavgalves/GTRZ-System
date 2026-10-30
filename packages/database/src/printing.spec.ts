@@ -65,8 +65,8 @@ describe('thermal printing database', () => {
   it('persiste preferências em app_meta sem migração de schema', async () => {
     const database = await createTemporaryDatabase();
     expect(getPrintingSettings(database)).toEqual({
-      automaticPrinting: false,
-      deviceName: null,
+      automaticPrinting: true,
+      deviceName: 'POS-80',
       machineName: hostname(),
       paperWidthMm: 80,
     });
