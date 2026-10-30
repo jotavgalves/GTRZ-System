@@ -1,11 +1,11 @@
 {
-  "runId": 40140026234,
-  "runNumber": 246,
+  "runId": 40984417644,
+  "runNumber": 287,
   "runAttempt": 1,
-  "commitSha": "7517251d3e3d32f1971a56476251126887afbfd8",
+  "commitSha": "7bdd2d03403e634172dadc6f62e2eada279e6796",
   "artifactName": "GTRZ-System-Windows",
-  "installerFileName": "GTRZ-System-0.1.0-Setup.exe",
-  "sizeBytes": 113826445,
-  "sha256": "1db81be06bc2d7a12e07637bdf3195944586024751f0710f7a7c89e09e765bb3",
-  "publishedAt": "2026-10-24T22:49:50.7322534Z"
+  "installerFileName": "GTRZ-System-0.1.1-Setup.exe",
+  "sizeBytes": 114747534,
+  "sha256": "ad65fce551e1f4ae8231612a52191b5b56d0439a5f4f317936a9fce41cec5b19",
+  "publishedAt": "2026-10-30T01:14:45.2580257Z"
 }
