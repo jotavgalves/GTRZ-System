@@ -1,4 +1,5 @@
 import { DurableObject } from 'cloudflare:workers';
+import { canonicalDataRequest } from './canonical-data';
 import { cashierIcon, cashierManifest, cashierPage } from './cashier-page';
 import { monitorPage } from './monitor-page';
 import { printQueuePage } from './print-queue-page';
@@ -5186,7 +5187,14 @@ let accessKey='';let timer=null;const $=id=>document.getElementById(id);const es
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
-    const url = new URL(request.url);
+    let url = new URL(request.url);
+    // The mobile alias must not send the isolated test Worker to production.
+    if (isTestEnvironment(env) && url.pathname.startsWith('/cashier/api/v1/')) {
+      url.pathname = url.pathname.slice('/cashier/api'.length);
+      request = new Request(url, request);
+    }
+    const canonical = canonicalDataRequest(request, isTestEnvironment(env));
+    if (canonical !== null) return fetch(canonical);
 
     if (request.method === 'GET' && url.pathname === '/health') {
       return json({
@@ -5234,17 +5242,6 @@ export default {
 
     if (request.method === 'GET' && url.pathname === '/print-queue') {
       return printQueuePage();
-    }
-
-    // Keep the mobile's authenticated refresh on the same origin as the PWA.
-    // The canonical Edge Function still authorizes every request; this avoids a
-    // browser CORS preflight between a realtime signal and the confirmed refresh.
-    if (url.pathname.startsWith('/cashier/api/v1/')) {
-      const canonical = new URL(
-        `https://muhzjnveqrahccoisddo.supabase.co/functions/v1/gtrz-sync-fallback${url.pathname.slice('/cashier/api'.length)}`,
-      );
-      canonical.search = url.search;
-      return fetch(new Request(canonical, request));
     }
 
     if (request.method === 'GET' && url.pathname === '/cashier') {
