@@ -8,7 +8,17 @@ vm.runInNewContext(
   transpileModule(source, { compilerOptions: { module: ModuleKind.CommonJS } }).outputText,
   { exports: exported, Request, URL },
 );
-const route = exported.canonicalDataRequest!;
+function route(request: Request, test: boolean): Request | null {
+  if (exported.canonicalDataRequest === undefined) {
+    throw new Error('canonicalDataRequest was not exported.');
+  }
+  return exported.canonicalDataRequest(request, test);
+}
+function routed(request: Request): Request {
+  const target = route(request, false);
+  if (target === null) throw new Error('The request was not routed to the canonical database.');
+  return target;
+}
 
 describe('canonical production data routing', () => {
   it.each([
@@ -17,7 +27,7 @@ describe('canonical production data routing', () => {
     '/v1/monitor/global-control?after=47',
     '/cashier/api/v1/mobile/refresh',
   ])('uses the app production database for %s', (path) => {
-    const target = route(new Request('https://worker.example' + path), false)!;
+    const target = routed(new Request('https://worker.example' + path));
     expect(target.url).toBe(
       'https://muhzjnveqrahccoisddo.supabase.co/functions/v1/gtrz-sync-fallback' +
         path.replace('/cashier/api', ''),
@@ -25,14 +35,13 @@ describe('canonical production data routing', () => {
   });
   it('preserves the sale payload, session and idempotency command without rewriting it', async () => {
     const body = JSON.stringify({ commandId: 'stable-command', saleId: 'stable-sale' });
-    const target = route(
+    const target = routed(
       new Request('https://worker.example/cashier/api/v1/mobile/sales', {
         method: 'POST',
         headers: { 'X-GTRZ-Session': 'test-session', 'Content-Type': 'application/json' },
         body,
       }),
-      false,
-    )!;
+    );
     expect(target.method).toBe('POST');
     expect(target.headers.get('X-GTRZ-Session')).toBe('test-session');
     expect(await target.text()).toBe(body);

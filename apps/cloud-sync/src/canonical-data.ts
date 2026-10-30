@@ -1,4 +1,4 @@
-export const CANONICAL_PRODUCTION_ENDPOINT =
+const CANONICAL_PRODUCTION_ENDPOINT =
   'https://muhzjnveqrahccoisddo.supabase.co/functions/v1/gtrz-sync-fallback';
 
 /** Data APIs have one authority; relay sockets retain their transport-only route. */

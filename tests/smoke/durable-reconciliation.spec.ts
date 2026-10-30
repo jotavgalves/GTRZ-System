@@ -3,10 +3,14 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { openDatabase, type DatabaseContext } from '@gtrz/database';
-import { reconcileOperationIds } from '../../apps/desktop/src/main/operation-reconciliation';
+import {
+  reconcileOperationIds,
+  type IdReconciliationResult,
+  type ReconciliationEvent,
+} from '../../apps/desktop/src/main/operation-reconciliation';
 const files: string[] = [];
 const databases: DatabaseContext[] = [];
-function database() {
+function database(): DatabaseContext {
   const dir = mkdtempSync(path.join(os.tmpdir(), 'gtrz-durable-'));
   files.push(dir);
   const db = openDatabase(path.join(dir, 'test.sqlite'));
@@ -16,7 +20,7 @@ function database() {
   );
   return db;
 }
-function audit(db: DatabaseContext, details = {}) {
+function audit(db: DatabaseContext, details = {}): number | bigint {
   return db.sqlite
     .prepare(
       "INSERT INTO audit_log(event_id,profile,action,entity_type,entity_id,details_json,created_at) VALUES('event','production','cash.opened','cash','cash',?,?)",
@@ -127,13 +131,16 @@ describe('durable operation reconciliation', () => {
   it('keeps an intentionally retired ID excluded instead of receiving it or flagging a gap', async () => {
     const db = database();
     db.sqlite.prepare("insert into sync_state values('inbox.sequence:event','10',1)").run();
-    const cloudEvent = (sequence: number, commandId: string) => ({
+    const cloudEvent = (sequence: number, commandId: string): ReconciliationEvent => ({
       sequence,
       commandId,
       type: 'journal.committed',
       payload: { action: 'order.paid', entityId: 'order-' + commandId },
     });
-    const scan = async () => {
+    const scan = async (): Promise<{
+      result: IdReconciliationResult;
+      received: string[];
+    }> => {
       let call = 0;
       const received: string[] = [];
       const result = await reconcileOperationIds(

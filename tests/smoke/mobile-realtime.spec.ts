@@ -1,5 +1,5 @@
 import vm from 'node:vm';
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, vi, type Mock } from 'vitest';
 import { readFileSync } from 'node:fs';
 
 const cashierSource = readFileSync('apps/cloud-sync/src/cashier-client.ts', 'utf8');
@@ -8,32 +8,63 @@ const cashierClientScript = cashierSource.slice(
   cashierSource.lastIndexOf('`;'),
 );
 
-function client() {
+interface SentFrame {
+  topic: string;
+  event: string;
+  ref: string;
+}
+
+class Socket {
+  static OPEN = 1;
+  static sockets: Socket[] = [];
+  readyState = 1;
+  sent: SentFrame[] = [];
+  onopen: () => void = () => undefined;
+  onclose: () => void = () => undefined;
+  onmessage: (event: { data: string }) => void = () => undefined;
+  close = vi.fn(() => {
+    this.readyState = 3;
+    this.onclose();
+  });
+  constructor() {
+    Socket.sockets.push(this);
+  }
+  send(raw: string): void {
+    this.sent.push(JSON.parse(raw) as SentFrame);
+  }
+  reply(message: unknown): void {
+    this.onmessage({ data: JSON.stringify(message) });
+  }
+}
+
+interface RealtimeClient {
+  openRealtime: (generation: number, streamGeneration: number) => Promise<void>;
+  stopStreams: () => void;
+  state: Record<string, unknown>;
+  intervals: Map<number, () => void>;
+  timeouts: Map<number, () => void>;
+  refresh: Mock<() => Promise<void>>;
+  online: Mock;
+  sockets: Socket[];
+}
+
+function first<T>(items: readonly T[]): T {
+  const item = items[0];
+  if (item === undefined) throw new Error('Expected at least one item.');
+  return item;
+}
+
+function last<T>(items: readonly T[]): T {
+  const item = items.at(-1);
+  if (item === undefined) throw new Error('Expected at least one item.');
+  return item;
+}
+
+function client(): RealtimeClient {
+  Socket.sockets.length = 0;
   const intervals = new Map<number, () => void>();
   const timeouts = new Map<number, () => void>();
   let id = 0;
-  class Socket {
-    static OPEN = 1;
-    static sockets: Socket[] = [];
-    readyState = 1;
-    sent: { topic: string; event: string; ref: string }[] = [];
-    onopen = () => undefined;
-    onclose = () => undefined;
-    onmessage = (_event: { data: string }) => undefined;
-    close = vi.fn(() => {
-      this.readyState = 3;
-      this.onclose();
-    });
-    constructor() {
-      Socket.sockets.push(this);
-    }
-    send(raw: string) {
-      this.sent.push(JSON.parse(raw));
-    }
-    reply(message: unknown) {
-      this.onmessage({ data: JSON.stringify(message) });
-    }
-  }
   const state = {
     generation: 1,
     streamGeneration: 1,
@@ -86,11 +117,11 @@ describe('mobile realtime recovery', () => {
   it('sends Phoenix heartbeats and accepts their replies without refreshing sales data', async () => {
     const c = client();
     await c.openRealtime(1, 1);
-    const socket = c.sockets[0]!;
+    const socket = first(c.sockets);
     socket.onopen();
-    const tick = [...c.intervals.values()][0]!;
+    const tick = first([...c.intervals.values()]);
     tick();
-    const beat = socket.sent.at(-1)!;
+    const beat = last(socket.sent);
     expect(beat).toMatchObject({ topic: 'phoenix', event: 'heartbeat' });
     socket.reply({
       topic: 'phoenix',
@@ -101,14 +132,14 @@ describe('mobile realtime recovery', () => {
     tick();
     expect(socket.close).not.toHaveBeenCalled();
     expect(c.refresh).not.toHaveBeenCalled();
-    expect(socket.sent.at(-1)!.ref).not.toBe(beat.ref);
+    expect(last(socket.sent).ref).not.toBe(beat.ref);
   });
   it('reconnects when a heartbeat is not acknowledged and clears its timer', async () => {
     const c = client();
     await c.openRealtime(1, 1);
-    const socket = c.sockets[0]!;
+    const socket = first(c.sockets);
     socket.onopen();
-    const tick = [...c.intervals.values()][0]!;
+    const tick = first([...c.intervals.values()]);
     tick();
     tick();
     expect(socket.close).toHaveBeenCalledOnce();
@@ -126,7 +157,7 @@ describe('mobile realtime recovery', () => {
         }),
     );
     await c.openRealtime(1, 1);
-    const socket = c.sockets[0]!;
+    const socket = first(c.sockets);
     socket.onopen();
     socket.reply({ event: 'phx_reply', ref: '1', payload: { status: 'ok' } });
     expect(c.refresh).toHaveBeenCalledOnce();
@@ -134,12 +165,14 @@ describe('mobile realtime recovery', () => {
     resolve();
     await Promise.resolve();
     await Promise.resolve();
-    await vi.waitFor(() => expect(c.online).toHaveBeenCalledWith(true, 'Conectado'));
+    await vi.waitFor(() => {
+      expect(c.online).toHaveBeenCalledWith(true, 'Conectado');
+    });
   });
   it('cleans up timers on logout and ignores a stale socket close', async () => {
     const c = client();
     await c.openRealtime(1, 1);
-    const socket = c.sockets[0]!;
+    const socket = first(c.sockets);
     socket.onopen();
     c.stopStreams();
     expect(c.intervals.size).toBe(0);
