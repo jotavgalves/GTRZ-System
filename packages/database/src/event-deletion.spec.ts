@@ -175,7 +175,7 @@ describe('permanent event deletion', () => {
     const now = Date.now();
     database.sqlite
       .prepare(
-        `INSERT INTO sync_outbox
+        `INSERT OR REPLACE INTO sync_outbox
          (audit_id, operation_id, event_id, payload_json, status, attempts, last_error, accepted_at, created_at, updated_at)
          VALUES (?, ?, '_catalog', '{}', 'pending', 0, NULL, NULL, ?, ?)`,
       )

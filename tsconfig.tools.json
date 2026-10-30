@@ -17,7 +17,13 @@
     "apps/desktop/src/main/database-runtime.ts",
     "apps/desktop/src/main/backup-service.ts",
     "apps/desktop/src/main/cloud-sync-service.ts",
+    "apps/desktop/src/main/operation-reconciliation.ts",
+    "apps/desktop/src/main/replica-id-baseline.ts",
+    "apps/desktop/src/main/local-mobile-hub.ts",
+    "apps/desktop/src/main/local-mobile-server.ts",
     "apps/desktop/src/main/normalize-cloud-receipt.ts",
+    "apps/desktop/src/main/escpos-raster.ts",
+    "apps/desktop/src/main/raw-printer.ts",
     "apps/desktop/src/main/receipt-html.ts",
     "apps/desktop/src/main/thermal-print-service.ts"
   ],

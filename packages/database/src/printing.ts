@@ -65,6 +65,9 @@ const DEVICE_KEY = 'printing.device_name';
 const MACHINE_NAME_KEY = 'printing.machine_name';
 const PAPER_WIDTH_KEY = 'printing.paper_width_mm';
 
+/** A new installation starts with the thermal queue the app creates itself, already switched on. */
+export const DEFAULT_THERMAL_PRINTER_NAME = 'POS-80';
+
 function readMeta(database: DatabaseContext, key: string): string | null {
   const row = database.sqlite.prepare('SELECT value FROM app_meta WHERE key = ?').get(key) as
     | { readonly value: string }
@@ -83,14 +86,15 @@ function writeMeta(database: DatabaseContext, key: string, value: string): void 
 }
 
 export function getPrintingSettings(database: DatabaseContext): DatabasePrintingSettings {
-  const automaticPrinting = readMeta(database, AUTOMATIC_KEY) === '1';
-  const rawDeviceName = readMeta(database, DEVICE_KEY);
+  const rawAutomatic = readMeta(database, AUTOMATIC_KEY);
+  const automaticPrinting = rawAutomatic === null ? true : rawAutomatic === '1';
+  const rawDeviceName = readMeta(database, DEVICE_KEY) ?? DEFAULT_THERMAL_PRINTER_NAME;
   const rawMachineName = readMeta(database, MACHINE_NAME_KEY)?.trim();
   const rawPaperWidth = Number(readMeta(database, PAPER_WIDTH_KEY) ?? '80');
 
   return {
     automaticPrinting,
-    deviceName: rawDeviceName === null || rawDeviceName.length === 0 ? null : rawDeviceName,
+    deviceName: rawDeviceName.length === 0 ? null : rawDeviceName,
     machineName: rawMachineName && rawMachineName.length >= 2 ? rawMachineName : hostname(),
     paperWidthMm: rawPaperWidth === 58 ? 58 : 80,
   };

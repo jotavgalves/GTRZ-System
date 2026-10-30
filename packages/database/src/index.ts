@@ -1,4 +1,5 @@
 import BetterSqlite3 from 'better-sqlite3';
+import { durableOperationMigration } from './durable-operation-migration';
 import { drizzle } from 'drizzle-orm/better-sqlite3';
 
 import { expensePaymentStatusMigration } from './expense-payment-status-migration';
@@ -329,6 +330,7 @@ const migrations: readonly Migration[] = [
   comboComponentOccurrencesMigration,
   comboOrderAndFoodTermsMigration,
   legacyFoodComboClassificationMigration,
+  durableOperationMigration,
 ];
 
 function ensureMigrationTable(sqlite: BetterSqlite3.Database): void {
@@ -407,7 +409,7 @@ export function openDatabase(filePath: string): DatabaseContext {
   sqlite.pragma('foreign_keys = ON');
   sqlite.pragma('journal_mode = WAL');
   sqlite.pragma('busy_timeout = 5000');
-  sqlite.pragma('synchronous = NORMAL');
+  sqlite.pragma('synchronous = FULL');
 
   applyMigrations(sqlite);
   repairFinanceLedgerColumns(sqlite);

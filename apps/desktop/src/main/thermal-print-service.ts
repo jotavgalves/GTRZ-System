@@ -11,12 +11,15 @@ import type {
 } from '@gtrz/contracts';
 import type { DatabaseContext } from '@gtrz/database';
 import {
+  DEFAULT_THERMAL_PRINTER_NAME,
   type DatabaseOrderReceipt,
   getOrderReceipt,
   getPrintingSettings,
   updatePrintingSettings,
 } from '@gtrz/database/printing';
 
+import { buildEscPosJob, type BgraImage } from './escpos-raster';
+import { ensureThermalQueue, queueNeedsRawRaster, sendRawToPrinter } from './raw-printer';
 import { buildReceiptHtml, estimateReceiptHeightMm } from './receipt-html';
 import type { ClaimedCloudPrintJob } from './cloud-sync-service';
 import { normalizeCloudReceipt } from './normalize-cloud-receipt';
@@ -47,10 +50,44 @@ function isPdfOutput(settings: PrintingSettings): boolean {
   return settings.deviceName === 'Microsoft Print to PDF';
 }
 
+// 80 mm paper prints 72 mm (576 dots) and 58 mm paper prints 48 mm (384 dots) at 203 dpi.
+function printableDots(paperWidthMm: 58 | 80): number {
+  return paperWidthMm === 58 ? 384 : 576;
+}
+
+/** Captures each `.receipt` section (customer note, pickup voucher) as one bitmap per paper cut. */
+async function captureReceiptPages(
+  window: BrowserWindow,
+  paperWidthMm: 58 | 80,
+): Promise<readonly BgraImage[]> {
+  const cssWidth = Math.ceil((paperWidthMm * 96) / 25.4);
+  const contentHeight = Number(
+    await window.webContents.executeJavaScript('document.documentElement.scrollHeight'),
+  );
+  window.setContentSize(cssWidth, Math.max(Math.ceil(contentHeight), 200));
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  const rects: unknown = await window.webContents.executeJavaScript(
+    `[...document.querySelectorAll('section.receipt')].map((section) => {
+      const box = section.getBoundingClientRect();
+      return { x: Math.floor(box.x), y: Math.floor(box.y + window.scrollY), width: Math.ceil(box.width), height: Math.ceil(box.height) };
+    })`,
+  );
+  if (!Array.isArray(rects) || rects.length === 0) throw new Error('A nota não tem conteúdo.');
+  const pages: BgraImage[] = [];
+  for (const rect of rects as { x: number; y: number; width: number; height: number }[]) {
+    const captured = await window.webContents.capturePage(rect);
+    const scaled = captured.resize({ width: printableDots(paperWidthMm), quality: 'best' });
+    const size = scaled.getSize();
+    pages.push({ width: size.width, height: size.height, bgra: scaled.toBitmap() });
+  }
+  return pages;
+}
+
 export class ThermalPrintService {
   readonly #getDatabase: () => DatabaseContext;
   readonly #archiveDirectory: string;
   readonly #archiveInFlight = new Map<string, Promise<void>>();
+  #printChain: Promise<unknown> = Promise.resolve();
   #printerRegistrationCache: {
     readonly fingerprint: string;
     readonly value: CloudPrinterRegistration;
@@ -62,6 +99,20 @@ export class ThermalPrintService {
     this.#archiveDirectory = options.archiveDirectory;
   }
 
+  /**
+   * Creates the thermal queue on a computer that does not have it yet, so the app arrives ready on a
+   * new PC. Without a USB printer, or without the right to add printers, nothing changes and the
+   * printer can still be chosen by hand in the settings.
+   */
+  async prepareDefaultPrinter(): Promise<void> {
+    if (process.platform !== 'win32') return;
+    try {
+      await ensureThermalQueue(DEFAULT_THERMAL_PRINTER_NAME);
+    } catch {
+      return;
+    }
+    this.#printerRegistrationCache = null;
+  }
   getSettings(): PrintingSettings {
     return getPrintingSettings(this.#getDatabase());
   }
@@ -205,6 +256,8 @@ export class ThermalPrintService {
       return value;
     }
 
+    // Start the raw print host now so the first sale of the day does not pay for it.
+    void queueNeedsRawRaster(selectedPrinter.name);
     const value = {
       printerName: selectedPrinter.name,
       enabled: true,
@@ -236,18 +289,40 @@ export class ThermalPrintService {
     }
   }
 
-  async #printReceipt(
+  /**
+   * Notes reach this PC from several devices at once. They are printed strictly one after the
+   * other, in arrival order, so two notes can never be mixed or cancel each other, and the paper
+   * is cut between them. The PDF copy is made after the note has left for the printer.
+   */
+  #printReceipt(
     receipt: DatabaseOrderReceipt,
     settings: PrintingSettings,
     archive = true,
   ): Promise<PrintOrderResult> {
+    const run = this.#printChain.then(async () => {
+      const result = await this.#printReceiptNow(receipt, settings);
+      if (archive) void this.#archiveReceiptDocument(receipt).catch(() => undefined);
+      return result;
+    });
+    this.#printChain = run.catch(() => undefined);
+    return run;
+  }
+
+  async #printReceiptNow(
+    receipt: DatabaseOrderReceipt,
+    settings: PrintingSettings,
+  ): Promise<PrintOrderResult> {
     try {
-      const html = await buildReceiptHtml(receipt, settings.paperWidthMm);
+      const html = buildReceiptHtml(receipt, settings.paperWidthMm);
       const window = createHiddenWindow();
 
       try {
         await window.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`);
-        if (archive) await this.#archiveReceipt(window, receipt);
+        if (settings.deviceName !== null && (await queueNeedsRawRaster(settings.deviceName))) {
+          const pages = await captureReceiptPages(window, settings.paperWidthMm);
+          await sendRawToPrinter(settings.deviceName, buildEscPosJob(pages));
+          return { success: true, skipped: false, message: 'Nota enviada para a impressora.' };
+        }
         const success = await new Promise<boolean>((resolve) => {
           const printOptions = {
             silent: true,
@@ -298,10 +373,7 @@ export class ThermalPrintService {
   }
 
   async #renderAndArchiveReceipt(receipt: DatabaseOrderReceipt): Promise<void> {
-    const html = await buildReceiptHtml(
-      receipt,
-      getPrintingSettings(this.#getDatabase()).paperWidthMm,
-    );
+    const html = buildReceiptHtml(receipt, getPrintingSettings(this.#getDatabase()).paperWidthMm);
     const window = createHiddenWindow();
     try {
       await window.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`);

@@ -128,6 +128,7 @@ export function registerIpcHandlers(options: RegisterIpcOptions): ThermalPrintSe
     archiveDirectory: options.receiptArchiveDirectory,
     getDatabase: options.getDatabase,
   });
+  void printService.prepareDefaultPrinter();
   registerFoodIpcHandlers({ getDatabase: options.getDatabase });
 
   ipcMain.handle(IPC_CHANNELS.systemGetInfo, (): SystemInfo => {

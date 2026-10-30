@@ -156,7 +156,12 @@ export function resetEventData(
     database.sqlite
       .prepare('DELETE FROM stock_transfers WHERE source_event_id = ? OR destination_event_id = ?')
       .run(event.id, event.id);
-    database.sqlite.prepare('DELETE FROM sync_outbox WHERE event_id = ?').run(event.id);
+    database.sqlite
+      .prepare(
+        'DELETE FROM sync_outbox WHERE event_id = ? OR audit_id IN (SELECT id FROM audit_log WHERE event_id = ?)',
+      )
+      .run(event.id, event.id);
+    database.sqlite.prepare('DELETE FROM lan_sessions WHERE event_id = ?').run(event.id);
     database.sqlite.prepare('DELETE FROM sync_inbox WHERE event_id = ?').run(event.id);
     database.sqlite.prepare('DELETE FROM sync_conflicts WHERE event_id = ?').run(event.id);
     database.sqlite.prepare('DELETE FROM audit_log WHERE event_id = ?').run(event.id);

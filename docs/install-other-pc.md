@@ -25,5 +25,18 @@ Para inspecionar o que seria removido sem alterar o computador:
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File $script -PlanOnly
 ```
 
+## Impressora termica USB (POS-80)
+
+Nao ha driver de fabricante para instalar. Ao abrir, o GTRZ System cria sozinho a fila de impressao
+`POS-80` com o driver "Generic / Text Only", que ja vem no Windows, na porta USB da impressora.
+Uma instalacao nova ja vem com a impressora `POS-80` selecionada e a impressao automatica ligada.
+
+- Ligue a impressora e conecte o cabo USB antes de abrir o sistema. Sem ela, nada e criado e a
+  impressora pode ser escolhida a mao em Configuracoes.
+- Se o Windows recusar a criacao da fila, abra o GTRZ System uma vez como Administrador.
+- A nota e desenhada como imagem e enviada em ESC/POS direto a fila, com corte do papel apos cada
+  via. Se houver mais de uma porta USB de impressora, a de maior numero e usada; confira em
+  Impressoras e scanners.
+
 O teste automatico nao registra vendas de teste no evento real. Antes da operacao, confira uma
 impressao fisica e a atualizacao entre dois computadores de verdade.

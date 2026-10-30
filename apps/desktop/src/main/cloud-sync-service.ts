@@ -40,6 +40,8 @@ import { getProductPresentation } from '@gtrz/database/product-presentation';
 import { getPrintingSettings } from '@gtrz/database/printing';
 
 import type { DatabaseRuntime } from './database-runtime';
+import { reconcileOperationIds } from './operation-reconciliation';
+import { readReplicaIdBaseline, type ReplicaIdBaseline } from './replica-id-baseline';
 
 type FetchInput = Parameters<typeof globalThis.fetch>[0];
 type FetchInit = Parameters<typeof globalThis.fetch>[1];
@@ -64,8 +66,19 @@ function cloudFetch(input: FetchInput, init?: FetchInit): ReturnType<typeof glob
 
 const fetch = cloudFetch;
 
-const CONNECTION_TIMEOUT_MS = 5_000;
+const CONNECTION_TIMEOUT_MS = 20_000;
 const OUTBOX_INTERVAL_MS = 3_000;
+const PRINT_POLL_INTERVAL_MS = 1_000;
+const PRINT_POLL_BACKOFF_MS = 5_000;
+const MOBILE_NOTICE_TIMEOUT_MS = 8_000;
+const CHANGE_WATCH_INTERVAL_MS = 400;
+const CLOUD_PROBE_INTERVAL_MS = 5_000;
+const CLOUD_PROBE_TIMEOUT_MS = 8_000;
+const CLOUD_FRESH_MS = 20_000;
+const CLOUD_DISCONNECT_GRACE_MS = 30_000;
+const CLOUD_RETRY_MAX_MS = 10_000;
+const ID_RECONCILIATION_INTERVAL_MS = 300_000;
+const ID_RECONCILIATION_RETRY_MS = 60_000;
 const PRINT_REGISTRATION_REFRESH_MS = 15_000;
 const DESKTOP_PRESENCE_REFRESH_MS = 10_000;
 const CANONICAL_FALLBACK_RECONCILIATION_INTERVAL_MS = 15_000;
@@ -84,6 +97,7 @@ interface AuditRow {
   readonly entity_id: string | null;
   readonly details_json: string;
   readonly created_at: number;
+  readonly durable_operation_id?: string | null;
 }
 
 interface OutboxRow {
@@ -233,6 +247,7 @@ interface PrintQueueRegistration {
 
 const CATALOG_EVENT_ID = '_catalog';
 const SYNCHRONIZED_ACTIONS = new Set([
+  'sync.operations-retired',
   'event.created',
   'event.renamed',
   'event.open',
@@ -368,6 +383,13 @@ export class CloudSyncService {
   readonly #receiptArchivesInFlight = new Set<string>();
   #resetBackupAgent: (() => Promise<BackupRecord>) | null = null;
   #outboxTimer: NodeJS.Timeout | null = null;
+  #printPollTimer: NodeJS.Timeout | null = null;
+  #changeWatchTimer: NodeJS.Timeout | null = null;
+  #cloudProbeTimer: NodeJS.Timeout | null = null;
+  #cloudProbeInFlight = false;
+  #lastCloudResponseAt = 0;
+  #lastWatchedAuditId = 0;
+  #printPollNotBefore = 0;
   readonly #eventStreams = new Map<string, WebSocket>();
   readonly #eventReconnectTimers = new Map<string, NodeJS.Timeout>();
   readonly #eventReconnectDelays = new Map<string, number>();
@@ -394,6 +416,7 @@ export class CloudSyncService {
   #controlReconnectDelayMs = 1_000;
   #cloudRetryDelayMs = 3_000;
   #cloudRetryNotBefore = 0;
+  #cloudFailingSince: number | null = null;
   #printQueueInFlight: Promise<void> | null = null;
   #printQueueRerunRequested = false;
   #queuedReceiptArchiveCheckComplete = false;
@@ -407,6 +430,10 @@ export class CloudSyncService {
     | (() => { database: DatabaseContext; activeEventId: string | null })
     | null = null;
   #cloudConnected = false;
+  #lastIdReconciliationAt = 0;
+  #idReconciliationInFlight = false;
+  #idBaseline: ReplicaIdBaseline | null = null;
+  #syncIntegrityIssue: string | null = null;
   #lastLatencyMs = 0;
   #pendingBootstrap: PendingBootstrap | null = null;
   #replicaUploadInFlight = false;
@@ -526,6 +553,18 @@ export class CloudSyncService {
       clearInterval(this.#outboxTimer);
       this.#outboxTimer = null;
     }
+    if (this.#printPollTimer !== null) {
+      clearInterval(this.#printPollTimer);
+      this.#printPollTimer = null;
+    }
+    if (this.#changeWatchTimer !== null) {
+      clearInterval(this.#changeWatchTimer);
+      this.#changeWatchTimer = null;
+    }
+    if (this.#cloudProbeTimer !== null) {
+      clearInterval(this.#cloudProbeTimer);
+      this.#cloudProbeTimer = null;
+    }
     if (this.#controlReconnectTimer !== null) clearTimeout(this.#controlReconnectTimer);
     this.#controlReconnectTimer = null;
     if (this.#controlHeartbeatTimer !== null) clearInterval(this.#controlHeartbeatTimer);
@@ -550,6 +589,52 @@ export class CloudSyncService {
     };
     flush();
     this.#outboxTimer = setInterval(flush, OUTBOX_INTERVAL_MS);
+    // A note must not wait for a synchronisation cycle: claiming one is a small request, so the
+    // print queue has its own, faster clock.
+    this.#printPollTimer = setInterval(() => {
+      void this.#pollPrintQueue(getDatabase, getActiveEventId).catch(() => undefined);
+    }, PRINT_POLL_INTERVAL_MS);
+    // Any local change (a sale, a stock count, a purchase) is sent at once instead of waiting for
+    // the next cycle, so the phones see it within moments.
+    try {
+      this.#lastWatchedAuditId = this.#latestAuditId(getDatabase());
+    } catch {
+      this.#lastWatchedAuditId = 0;
+    }
+    this.#changeWatchTimer = setInterval(() => {
+      try {
+        const latest = this.#latestAuditId(getDatabase());
+        if (latest <= this.#lastWatchedAuditId) return;
+        this.#lastWatchedAuditId = latest;
+        this.requestImmediateFlush(getDatabase, getActiveEventId);
+      } catch {
+        // The database may still be opening; the next tick tries again.
+      }
+    }, CHANGE_WATCH_INTERVAL_MS);
+    void this.#probeCloud();
+    this.#cloudProbeTimer = setInterval(() => {
+      void this.#probeCloud();
+    }, CLOUD_PROBE_INTERVAL_MS);
+  }
+
+  async #pollPrintQueue(
+    getDatabase: () => DatabaseContext,
+    getActiveEventId: () => string | null,
+  ): Promise<void> {
+    if (
+      !this.#replicationRunning ||
+      this.#printQueueInFlight !== null ||
+      Date.now() < this.#printPollNotBefore ||
+      !this.#endpoint.includes('.supabase.co/functions/')
+    ) {
+      return;
+    }
+    const activeEventId = getActiveEventId();
+    if (activeEventId === null) return;
+    const pairingKey = await this.#readPairingKey();
+    if (pairingKey === null) return;
+    const deviceId = await this.#readOrCreateDeviceId();
+    this.#schedulePrintQueue(getDatabase(), activeEventId, deviceId, pairingKey);
   }
 
   requestImmediateFlush(
@@ -762,6 +847,229 @@ export class CloudSyncService {
     return response.json();
   }
 
+  /**
+   * Comparing every ID with the cloud is slow and secondary: it runs beside the outbox, never inside
+   * it, and a failure here is only a diagnostic. It must not mark the cloud as disconnected or hold
+   * back a sale that is waiting to be sent.
+   */
+  #startIdReconciliation(
+    database: DatabaseContext,
+    deviceId: string,
+    pairingKey: string,
+    activeEventId: string | null,
+  ): void {
+    if (
+      this.#idReconciliationInFlight ||
+      Date.now() - this.#lastIdReconciliationAt < ID_RECONCILIATION_INTERVAL_MS
+    ) {
+      return;
+    }
+    this.#idReconciliationInFlight = true;
+    void this.#reconcileIds(database, deviceId, pairingKey, activeEventId)
+      .then(() => {
+        this.#lastIdReconciliationAt = Date.now();
+        database.sqlite
+          .prepare("DELETE FROM sync_state WHERE key = 'cloud.id-reconciliation.last-error'")
+          .run();
+      })
+      .catch((error: unknown) => {
+        this.#lastIdReconciliationAt =
+          Date.now() - ID_RECONCILIATION_INTERVAL_MS + ID_RECONCILIATION_RETRY_MS;
+        database.sqlite
+          .prepare(
+            `INSERT INTO sync_state (key, value, updated_at) VALUES ('cloud.id-reconciliation.last-error', ?, ?)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+          )
+          .run(
+            (error instanceof Error ? error.message : 'Falha na conferência de IDs.').slice(0, 500),
+            Date.now(),
+          );
+      })
+      .finally(() => {
+        this.#idReconciliationInFlight = false;
+      });
+  }
+
+  async #reconcileIds(
+    database: DatabaseContext,
+    deviceId: string,
+    pairingKey: string,
+    activeEventId: string | null,
+  ): Promise<void> {
+    const eventIds = new Set([
+      CATALOG_EVENT_ID,
+      ...database.sqlite
+        .prepare('SELECT DISTINCT event_id FROM sync_outbox')
+        .all()
+        .map((row) => (row as { event_id: string }).event_id),
+    ]);
+    if (activeEventId !== null) eventIds.add(activeEventId);
+    if (activeEventId !== null)
+      this.#idBaseline = await readReplicaIdBaseline(
+        this.#endpoint,
+        activeEventId,
+        await this.#cloudHeaders(pairingKey),
+        fetch,
+        this.#idBaseline,
+      );
+    for (const eventId of eventIds) {
+      await reconcileOperationIds(
+        database,
+        eventId,
+        async (after) => {
+          const response = await fetch(
+            `${this.#endpoint}/v1/events/${encodeURIComponent(eventId)}/snapshot?after=${String(after)}`,
+            {
+              headers: await this.#cloudHeaders(pairingKey),
+              signal: AbortSignal.timeout(CONNECTION_TIMEOUT_MS),
+            },
+          );
+          if (!response.ok)
+            throw new Error(`Inventário de IDs indisponível (${String(response.status)}).`);
+          const page: unknown = await response.json();
+          if (
+            !isRecord(page) ||
+            !Array.isArray(page.events) ||
+            !page.events.every(isRemoteJournalEvent)
+          )
+            throw new Error('Inventário remoto inválido.');
+          return { events: page.events };
+        },
+        (events) => {
+          this.#storeRemoteJournalEvents(database, eventId, events);
+        },
+        this.#idBaseline?.idsByEvent.get(eventId),
+      );
+    }
+    this.#applyInbox(database, deviceId);
+  }
+  #hasWaitingOutbox(database: DatabaseContext): boolean {
+    return (
+      database.sqlite
+        .prepare("SELECT 1 FROM sync_outbox WHERE status IN ('pending', 'failed') LIMIT 1")
+        .get() !== undefined
+    );
+  }
+
+  /**
+   * Sends the oldest waiting operations to the central, one after another. It is also the first
+   * thing a synchronisation cycle does, so a sale or a stock change leaves this computer before any
+   * housekeeping. Returns false when the central refused one, leaving it queued for the next round.
+   */
+  async #pushOutbox(
+    database: DatabaseContext,
+    deviceId: string,
+    pairingKey: string,
+    canonicalCloud: boolean,
+  ): Promise<boolean> {
+    const pending = database.sqlite
+      .prepare(
+        `SELECT audit_id, operation_id, event_id, payload_json
+       FROM sync_outbox WHERE status IN ('pending', 'failed')
+       ORDER BY audit_id ASC LIMIT 30`,
+      )
+      .all() as OutboxRow[];
+
+    for (const item of pending) {
+      try {
+        // The canonical Edge endpoint stores an envelope around the local
+        // audit payload. The older Worker still accepts the raw payload.
+        // Sending the raw form to Supabase made it reject `type`, leaving
+        // the first failed row at the head of the outbox forever.
+        let outgoingPayload: unknown = JSON.parse(item.payload_json);
+        if (isRecord(outgoingPayload) && outgoingPayload.deviceId === 'unassigned') {
+          outgoingPayload = { ...outgoingPayload, deviceId };
+          database.sqlite
+            .prepare('UPDATE sync_outbox SET payload_json = ?, updated_at = ? WHERE audit_id = ?')
+            .run(JSON.stringify(outgoingPayload), Date.now(), item.audit_id);
+        }
+        if (
+          isRecord(outgoingPayload) &&
+          outgoingPayload.action === 'inventory.stock-moved' &&
+          isRecord(outgoingPayload.details) &&
+          integerField(outgoingPayload.details, 'quantity') === null
+        ) {
+          const delta = integerField(outgoingPayload.details, 'delta');
+          if (delta !== null && delta !== 0) {
+            outgoingPayload = {
+              ...outgoingPayload,
+              details: { ...outgoingPayload.details, quantity: Math.abs(delta) },
+            };
+            database.sqlite
+              .prepare('UPDATE sync_outbox SET payload_json = ?, updated_at = ? WHERE audit_id = ?')
+              .run(JSON.stringify(outgoingPayload), Date.now(), item.audit_id);
+          }
+        }
+        const canonicalCreatedAt = isRecord(outgoingPayload)
+          ? integerField(outgoingPayload, 'createdAt')
+          : null;
+        if (canonicalCloud && canonicalCreatedAt === null) {
+          throw new Error('A operação local não possui a data exigida pela central.');
+        }
+        const requestBody = canonicalCloud
+          ? JSON.stringify({
+              commandId: item.operation_id,
+              type: 'journal.committed',
+              payload: outgoingPayload,
+              createdAt: canonicalCreatedAt,
+            })
+          : JSON.stringify(outgoingPayload);
+        const response = await fetch(
+          `${this.#endpoint}/v1/events/${encodeURIComponent(item.event_id)}/journal`,
+          {
+            method: 'POST',
+            headers: await this.#cloudHeaders(pairingKey, { 'Content-Type': 'application/json' }),
+            body: requestBody,
+            signal: AbortSignal.timeout(CONNECTION_TIMEOUT_MS),
+          },
+        );
+
+        if (!response.ok) {
+          throw new Error(`A central respondeu ${String(response.status)}.`);
+        }
+
+        // A local action already exists in SQLite, but its canonical journal
+        // sequence does not. Persist the server acknowledgement so the next
+        // mobile event is expected as N + 1 instead of being rejected as a
+        // gap and deferred to the slow snapshot recovery path.
+        if (canonicalCloud) {
+          const acknowledgement: unknown = await response.json();
+          const journalEvent =
+            isRecord(acknowledgement) && isRemoteJournalEvent(acknowledgement.event)
+              ? acknowledgement.event
+              : null;
+          if (journalEvent?.commandId !== item.operation_id) {
+            throw new Error('A central confirmou a operação sem a sequência do diário.');
+          }
+          this.#storeRemoteJournalEvents(database, item.event_id, [journalEvent]);
+          this.#applyInbox(database, deviceId);
+        }
+
+        this.#recordCloudSuccess();
+
+        database.sqlite
+          .prepare(
+            `UPDATE sync_outbox
+           SET status = 'accepted', accepted_at = ?, attempts = attempts + 1,
+               last_error = NULL, updated_at = ?
+           WHERE audit_id = ?`,
+          )
+          .run(Date.now(), Date.now(), item.audit_id);
+      } catch (error: unknown) {
+        const message = error instanceof Error ? error.message.slice(0, 240) : 'Falha de rede.';
+        database.sqlite
+          .prepare(
+            `UPDATE sync_outbox
+           SET status = 'failed', attempts = attempts + 1, last_error = ?, updated_at = ?
+           WHERE audit_id = ?`,
+          )
+          .run(message, Date.now(), item.audit_id);
+        this.#recordCloudFailure();
+        return false;
+      }
+    }
+    return true;
+  }
   async flushOutbox(database: DatabaseContext, activeEventId: string | null): Promise<void> {
     if (this.#flushInFlight) return;
     this.#flushInFlight = true;
@@ -773,6 +1081,19 @@ export class CloudSyncService {
       const pairingKey = await this.#readPairingKey();
 
       if (pairingKey === null) return;
+
+      // Fast lane: a sale or a stock change leaves this computer, and the phones' stock is
+      // refreshed, before any of the housekeeping below can delay them.
+      if (
+        this.#endpoint.includes('.supabase.co/functions/') &&
+        this.#pendingBootstrap === null &&
+        this.#hasWaitingOutbox(database)
+      ) {
+        if (!(await this.#pushOutbox(database, deviceId, pairingKey, true))) return;
+        const liveEventId = getSessionState(database).activeEvent?.id ?? activeEventId;
+        await this.#publishCashierCatalog(database, liveEventId, pairingKey);
+        await this.#publishMobileContext(database, liveEventId, pairingKey);
+      }
 
       if (
         Date.now() - this.#desktopPresenceUpdatedAt >= DESKTOP_PRESENCE_REFRESH_MS ||
@@ -857,6 +1178,9 @@ export class CloudSyncService {
         if (canonicalCloud) this.#canonicalLastFallbackReconciliationAt = Date.now();
       }
       this.#applyInbox(workingDatabase, deviceId);
+      if (canonicalCloud) {
+        this.#startIdReconciliation(workingDatabase, deviceId, pairingKey, effectiveActiveEventId);
+      }
 
       if (!canonicalCloud) {
         await this.#publishCashierCatalog(
@@ -867,108 +1191,7 @@ export class CloudSyncService {
         );
       }
 
-      const pending = workingDatabase.sqlite
-        .prepare(
-          `SELECT audit_id, operation_id, event_id, payload_json
-         FROM sync_outbox WHERE status IN ('pending', 'failed')
-         ORDER BY audit_id ASC LIMIT 30`,
-        )
-        .all() as OutboxRow[];
-
-      for (const item of pending) {
-        try {
-          // The canonical Edge endpoint stores an envelope around the local
-          // audit payload. The older Worker still accepts the raw payload.
-          // Sending the raw form to Supabase made it reject `type`, leaving
-          // the first failed row at the head of the outbox forever.
-          let outgoingPayload: unknown = JSON.parse(item.payload_json);
-          if (
-            isRecord(outgoingPayload) &&
-            outgoingPayload.action === 'inventory.stock-moved' &&
-            isRecord(outgoingPayload.details) &&
-            integerField(outgoingPayload.details, 'quantity') === null
-          ) {
-            const delta = integerField(outgoingPayload.details, 'delta');
-            if (delta !== null && delta !== 0) {
-              outgoingPayload = {
-                ...outgoingPayload,
-                details: { ...outgoingPayload.details, quantity: Math.abs(delta) },
-              };
-              workingDatabase.sqlite
-                .prepare(
-                  'UPDATE sync_outbox SET payload_json = ?, updated_at = ? WHERE audit_id = ?',
-                )
-                .run(JSON.stringify(outgoingPayload), Date.now(), item.audit_id);
-            }
-          }
-          const canonicalCreatedAt = isRecord(outgoingPayload)
-            ? integerField(outgoingPayload, 'createdAt')
-            : null;
-          if (canonicalCloud && canonicalCreatedAt === null) {
-            throw new Error('A operação local não possui a data exigida pela central.');
-          }
-          const requestBody = canonicalCloud
-            ? JSON.stringify({
-                commandId: item.operation_id,
-                type: 'journal.committed',
-                payload: outgoingPayload,
-                createdAt: canonicalCreatedAt,
-              })
-            : JSON.stringify(outgoingPayload);
-          const response = await fetch(
-            `${this.#endpoint}/v1/events/${encodeURIComponent(item.event_id)}/journal`,
-            {
-              method: 'POST',
-              headers: await this.#cloudHeaders(pairingKey, { 'Content-Type': 'application/json' }),
-              body: requestBody,
-              signal: AbortSignal.timeout(CONNECTION_TIMEOUT_MS),
-            },
-          );
-
-          if (!response.ok) {
-            throw new Error(`A central respondeu ${String(response.status)}.`);
-          }
-
-          // A local action already exists in SQLite, but its canonical journal
-          // sequence does not. Persist the server acknowledgement so the next
-          // mobile event is expected as N + 1 instead of being rejected as a
-          // gap and deferred to the slow snapshot recovery path.
-          if (canonicalCloud) {
-            const acknowledgement: unknown = await response.json();
-            const journalEvent =
-              isRecord(acknowledgement) && isRemoteJournalEvent(acknowledgement.event)
-                ? acknowledgement.event
-                : null;
-            if (journalEvent === null) {
-              throw new Error('A central confirmou a operação sem a sequência do diário.');
-            }
-            this.#storeRemoteJournalEvents(workingDatabase, item.event_id, [journalEvent]);
-            this.#applyInbox(workingDatabase, deviceId);
-          }
-
-          this.#recordCloudSuccess();
-
-          workingDatabase.sqlite
-            .prepare(
-              `UPDATE sync_outbox
-             SET status = 'accepted', accepted_at = ?, attempts = attempts + 1,
-                 last_error = NULL, updated_at = ?
-             WHERE audit_id = ?`,
-            )
-            .run(Date.now(), Date.now(), item.audit_id);
-        } catch (error: unknown) {
-          const message = error instanceof Error ? error.message.slice(0, 240) : 'Falha de rede.';
-          workingDatabase.sqlite
-            .prepare(
-              `UPDATE sync_outbox
-             SET status = 'failed', attempts = attempts + 1, last_error = ?, updated_at = ?
-             WHERE audit_id = ?`,
-            )
-            .run(message, Date.now(), item.audit_id);
-          this.#recordCloudFailure();
-          return;
-        }
-      }
+      if (!(await this.#pushOutbox(workingDatabase, deviceId, pairingKey, canonicalCloud))) return;
 
       // Journalled business commands are authoritative. Publish the derived
       // mobile projections only after those commands have reached the central.
@@ -977,6 +1200,15 @@ export class CloudSyncService {
       if (canonicalCloud) {
         this.#schedulePrintQueue(workingDatabase, effectiveActiveEventId, deviceId, pairingKey);
       }
+      const unresolved = (
+        workingDatabase.sqlite
+          .prepare('SELECT COUNT(*) AS count FROM sync_conflicts WHERE resolved_at IS NULL')
+          .get() as { count: number }
+      ).count;
+      this.#syncIntegrityIssue =
+        unresolved > 0
+          ? `Conexão ativa, mas há ${String(unresolved)} conflitos: a reconciliação não está concluída.`
+          : null;
       this.#clearSyncDiagnostic(workingDatabase);
       if (canonicalCloud && effectiveActiveEventId !== null) {
         this.#scheduleReplicaSnapshot(
@@ -1234,15 +1466,18 @@ export class CloudSyncService {
       });
     }
 
+    // The indicator says whether the central is reachable, nothing else. Pending reconciliation
+    // items are reported in the message, but they never turn a working connection into "down".
+    const reachable = this.#isCloudReachable();
     return this.#status({
       checkedAt,
-      connection: this.#cloudConnected ? 'connected' : 'attention',
-      apiReachable: this.#cloudConnected,
+      connection: reachable ? 'connected' : 'attention',
+      apiReachable: reachable,
       credentialPresent: true,
-      credentialAccepted: this.#cloudConnected,
-      message: this.#cloudConnected
-        ? 'Nuvem conectada pelo canal em tempo real.'
-        : 'Aguardando a conexão segura com a nuvem.',
+      credentialAccepted: reachable,
+      message: reachable
+        ? (this.#syncIntegrityIssue ?? 'Nuvem conectada; consulte filas e reconciliação por IDs.')
+        : 'Sem conexão com a nuvem. O caixa local continua operando e mantém a fila de envio.',
     });
   }
 
@@ -1360,17 +1595,24 @@ export class CloudSyncService {
 
   async updateMobileOperator(input: UpdateMobileOperatorInput): Promise<MobileOperator> {
     const { operatorId, ...changes } = input;
-    return this.#mobileOperatorRequest(
+    // A deactivated operator or a new password ends the sessions, and a revoked session no longer
+    // receives notices. Warn the phones first so they re-read their session while it still exists.
+    const endsSessions = changes.active === false || changes.password !== undefined;
+    if (endsSessions) await this.#announceMobileChange();
+    const updated = await this.#mobileOperatorRequest(
       `/v1/mobile/operators/${encodeURIComponent(operatorId)}`,
       'PATCH',
       changes,
       mobileOperatorSchema,
     );
+    await this.#announceMobileChange();
+    return updated;
   }
 
   async endMobileOperatorSessions(
     input: EndMobileOperatorSessionsInput,
   ): Promise<{ readonly success: true }> {
+    await this.#announceMobileChange();
     await this.#mobileOperatorRequest(
       `/v1/mobile/operators/${encodeURIComponent(input.operatorId)}/sessions`,
       'POST',
@@ -1383,6 +1625,7 @@ export class CloudSyncService {
   async deleteMobileOperator(
     input: DeleteMobileOperatorInput,
   ): Promise<{ readonly success: true }> {
+    await this.#announceMobileChange();
     await this.#mobileOperatorRequest(
       `/v1/mobile/operators/${encodeURIComponent(input.operatorId)}`,
       'DELETE',
@@ -1390,6 +1633,24 @@ export class CloudSyncService {
       undefined,
     );
     return { success: true };
+  }
+
+  /**
+   * The central stores operators and sessions but only announces a change to the phones when asked.
+   * Without this notice a phone would keep an old permission until its next periodic refresh. The
+   * change itself already succeeded, so a failed notice is not an error.
+   */
+  async #announceMobileChange(): Promise<void> {
+    try {
+      await fetch(`${this.#endpoint}/v1/monitor/realtime-ping`, {
+        method: 'POST',
+        headers: await this.#administratorHeaders({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify({ eventId: CATALOG_EVENT_ID }),
+        signal: AbortSignal.timeout(MOBILE_NOTICE_TIMEOUT_MS),
+      });
+    } catch {
+      // Phones still catch up on their own refresh.
+    }
   }
 
   getQueueState(database: DatabaseContext): CloudMonitor['localQueue'] {
@@ -1962,19 +2223,70 @@ export class CloudSyncService {
     return true;
   }
 
+  /** True while the central has answered recently, whichever request it answered. */
+  #isCloudReachable(): boolean {
+    return this.#cloudConnected || Date.now() - this.#lastCloudResponseAt < CLOUD_FRESH_MS;
+  }
+
+  /**
+   * A cheap authenticated question to the central every few seconds, so the indicator reflects the
+   * real connection even when nothing is being sold. Any answer except a server error or a refused
+   * credential counts as reachable.
+   */
+  async #probeCloud(): Promise<void> {
+    if (this.#cloudProbeInFlight || !this.#replicationRunning) return;
+    this.#cloudProbeInFlight = true;
+    try {
+      const pairingKey = await this.#readPairingKey();
+      if (pairingKey === null) return;
+      const startedAt = Date.now();
+      const response = await fetch(
+        `${this.#endpoint}/v1/events/${CATALOG_EVENT_ID}/snapshot?after=2000000000`,
+        {
+          headers: await this.#cloudHeaders(pairingKey),
+          signal: AbortSignal.timeout(CLOUD_PROBE_TIMEOUT_MS),
+        },
+      );
+      if (response.status < 500 && response.status !== 401 && response.status !== 403) {
+        this.#lastLatencyMs = Date.now() - startedAt;
+        this.#recordCloudSuccess();
+      } else {
+        this.#recordCloudFailure();
+      }
+    } catch {
+      this.#recordCloudFailure();
+    } finally {
+      this.#cloudProbeInFlight = false;
+    }
+  }
+
+  #latestAuditId(database: DatabaseContext): number {
+    return (
+      database.sqlite.prepare('SELECT COALESCE(MAX(id), 0) AS id FROM audit_log').get() as {
+        readonly id: number;
+      }
+    ).id;
+  }
+
   #recordCloudSuccess(): void {
     // The canonical HTTP transport has no persistent WebSocket to flip this flag.
     // A completed authenticated request is the authoritative connectivity signal.
+    this.#lastCloudResponseAt = Date.now();
     this.#cloudConnected = true;
+    this.#cloudFailingSince = null;
     this.#cloudRetryDelayMs = 3_000;
     this.#cloudRetryNotBefore = 0;
   }
 
   #recordCloudFailure(): void {
-    this.#cloudConnected = false;
+    const now = Date.now();
+    this.#cloudFailingSince ??= now;
+    // One timeout or one rejected request is not a lost connection: report "disconnected" only
+    // after the cloud has been silent for a while, and keep retrying quickly meanwhile.
+    if (now - this.#cloudFailingSince >= CLOUD_DISCONNECT_GRACE_MS) this.#cloudConnected = false;
     const delay = this.#cloudRetryDelayMs;
-    this.#cloudRetryNotBefore = Date.now() + delay;
-    this.#cloudRetryDelayMs = Math.min(delay * 2, STREAM_RECONNECT_MAX_MS);
+    this.#cloudRetryNotBefore = now + delay;
+    this.#cloudRetryDelayMs = Math.min(delay * 2, CLOUD_RETRY_MAX_MS);
   }
 
   #pendingReset(value: unknown): PendingGlobalReset | null {
@@ -2483,6 +2795,7 @@ export class CloudSyncService {
   ): void {
     void this.#processPrintQueue(database, activeEventId, deviceId, pairingKey).catch(
       (error: unknown) => {
+        this.#printPollNotBefore = Date.now() + PRINT_POLL_BACKOFF_MS;
         this.#writePrintQueueDiagnostic(
           database,
           error instanceof Error
@@ -2700,8 +3013,9 @@ export class CloudSyncService {
     const floor = Number(floorRow.value);
     const audits = database.sqlite
       .prepare(
-        `SELECT id, event_id, profile, action, entity_type, entity_id, details_json, created_at
-         FROM audit_log WHERE id > ? ORDER BY id ASC`,
+        `SELECT audit_log.*, local_operation_ids.operation_id AS durable_operation_id
+         FROM audit_log LEFT JOIN local_operation_ids ON audit_log.id = local_operation_ids.audit_id
+         WHERE audit_log.id > ? ORDER BY audit_log.id ASC`,
       )
       .all(floor) as AuditRow[];
 
@@ -2732,7 +3046,7 @@ export class CloudSyncService {
                   .get(audit.event_id) as { readonly name: string } | undefined
               )?.name ?? null);
         const payload = {
-          commandId: `${deviceId}:${String(audit.id)}`,
+          commandId: audit.durable_operation_id ?? `${deviceId}:${String(audit.id)}`,
           deviceId,
           auditId: audit.id,
           profile: audit.profile,
@@ -3294,7 +3608,7 @@ export class CloudSyncService {
     );
     const updateCursor = database.sqlite.prepare(
       `INSERT INTO sync_state (key, value, updated_at) VALUES (?, ?, ?)
-       ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+       ON CONFLICT(key) DO UPDATE SET value = CAST(MAX(CAST(sync_state.value AS INTEGER), CAST(excluded.value AS INTEGER)) AS TEXT), updated_at = excluded.updated_at`,
     );
     database.sqlite.transaction(() => {
       for (const remote of journalEvents) {
@@ -3315,7 +3629,7 @@ export class CloudSyncService {
     const pending = database.sqlite
       .prepare(
         `SELECT event_id, sequence, command_id, payload_json
-         FROM sync_inbox WHERE applied_at IS NULL ORDER BY event_id, sequence LIMIT 100`,
+         FROM sync_inbox WHERE applied_at IS NULL ORDER BY CASE WHEN json_extract(payload_json, '$.action') = 'sync.operations-retired' THEN 0 ELSE 1 END, event_id, sequence LIMIT 100`,
       )
       .all() as InboxRow[];
     const markProcessed = database.sqlite.prepare(
@@ -3331,6 +3645,15 @@ export class CloudSyncService {
     );
 
     for (const row of pending) {
+      if (
+        database.sqlite
+          .prepare('SELECT 1 FROM sync_operation_tombstones WHERE event_id=? AND command_id=?')
+          .get(row.event_id, row.command_id)
+      ) {
+        markProcessed.run(Date.now(), row.event_id, row.sequence);
+        resolveConflict.run(Date.now(), row.command_id);
+        continue;
+      }
       const payload = journalPayload(JSON.parse(row.payload_json) as unknown);
       if (payload === null) {
         recordConflict.run(
@@ -3506,6 +3829,35 @@ export class CloudSyncService {
   }
 
   #applyRemoteAction(database: DatabaseContext, eventId: string, payload: JournalPayload): void {
+    if (payload.action === 'sync.operations-retired') {
+      const targets = payload.details.targets;
+      const reason = stringField(payload.details, 'reason');
+      if (!Array.isArray(targets) || targets.length > 100 || reason === null)
+        throw new Error('Confirmação de exclusão sem IDs ou motivo.');
+      for (const target of targets as unknown[]) {
+        if (!isRecord(target)) throw new Error('ID excluído inválido.');
+        const commandId = stringField(target, 'commandId');
+        const entityId = stringField(target, 'entityId');
+        if (commandId === null || entityId === null)
+          throw new Error('Exclusão sem identidade completa.');
+        if (database.sqlite.prepare('SELECT id FROM orders WHERE id=?').get(entityId))
+          throw new Error(
+            'A operação excluída ainda existe neste PC; exige conferência antes de consolidar a exclusão.',
+          );
+        database.sqlite
+          .prepare(
+            'INSERT OR IGNORE INTO sync_operation_tombstones(event_id,command_id,entity_id,reason,confirmed_at) VALUES(?,?,?,?,?)',
+          )
+          .run(eventId, commandId, entityId, reason, payload.createdAt);
+        database.sqlite
+          .prepare(
+            "UPDATE sync_conflicts SET resolved_at=? WHERE event_id=? AND command_id=? AND action='sync.identity-gap'",
+          )
+          .run(Date.now(), eventId, commandId);
+      }
+      return;
+    }
+
     if (payload.action === 'event.created') {
       const name = stringField(payload.details, 'name');
       const startsAt = integerField(payload.details, 'startsAt');

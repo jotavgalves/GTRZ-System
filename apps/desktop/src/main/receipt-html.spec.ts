@@ -38,8 +38,8 @@ const receipt: DatabaseOrderReceipt = {
 };
 
 describe('thermal receipt html', () => {
-  it('gera comprovante do cliente e vale de retirada na mesma impressão', async () => {
-    const html = await buildReceiptHtml(receipt, 58);
+  it('gera comprovante do cliente e vale de retirada na mesma impressão', () => {
+    const html = buildReceiptHtml(receipt, 58);
 
     expect(html).toContain('width: 58mm');
     expect(html).toContain('NOTA DE COMPRA');
