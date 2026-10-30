@@ -26,17 +26,59 @@ describe('combo contracts', () => {
     });
   });
 
-  it('rejeita o mesmo produto repetido na composição', () => {
+  it('aceita o mesmo produto em escolhas diferentes e rejeita repetição na mesma escolha', () => {
+    expect(
+      createComboInputSchema.parse({
+        name: 'Pasaporte Latino',
+        salePriceCents: 3_000,
+        components: [
+          {
+            productId: firstProductId,
+            quantity: 2,
+            choiceGroup: 'arepas-principais',
+            choiceLabel: 'Escolha as 2 arepas principais',
+          },
+          {
+            productId: secondProductId,
+            quantity: 2,
+            choiceGroup: 'arepas-principais',
+            choiceLabel: 'Escolha as 2 arepas principais',
+          },
+          {
+            productId: firstProductId,
+            quantity: 1,
+            choiceGroup: 'acompanhamento',
+            choiceLabel: 'Escolha o acompanhamento',
+          },
+          {
+            productId: secondProductId,
+            quantity: 1,
+            choiceGroup: 'acompanhamento',
+            choiceLabel: 'Escolha o acompanhamento',
+          },
+        ],
+      }),
+    ).toMatchObject({ name: 'Pasaporte Latino' });
     expect(() =>
       createComboInputSchema.parse({
         name: 'Combo inválido',
         salePriceCents: 1_800,
         components: [
-          { productId: firstProductId, quantity: 1 },
-          { productId: firstProductId, quantity: 2 },
+          {
+            productId: firstProductId,
+            quantity: 1,
+            choiceGroup: 'arepas',
+            choiceLabel: 'Escolha as arepas',
+          },
+          {
+            productId: firstProductId,
+            quantity: 1,
+            choiceGroup: 'arepas',
+            choiceLabel: 'Escolha as arepas',
+          },
         ],
       }),
-    ).toThrow('Um produto não pode aparecer duas vezes no mesmo combo.');
+    ).toThrow('Um produto não pode repetir dentro da mesma parte do combo.');
   });
 
   it('aceita a visão comercial do Caixa sem custos', () => {

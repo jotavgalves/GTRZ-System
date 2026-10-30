@@ -41,7 +41,7 @@ import {
 
 interface RegisterOperationsIpcOptions {
   readonly getDatabase: () => DatabaseContext;
-  readonly printAfterSale: (orderId: string) => Promise<void>;
+  readonly printAfterSale: (orderId: string) => void;
 }
 
 const OPERATION_CHANNELS = [
@@ -118,12 +118,32 @@ export function registerOperationsIpcHandlers(options: RegisterOperationsIpcOpti
 
   ipcMain.handle(IPC_CHANNELS.operationsStartOrderWithItem, (_event, payload: unknown) => {
     const input = startOrderWithItemInputSchema.parse(payload);
-    return orderSchema.parse(startOrderWithItem(options.getDatabase(), input));
+    return orderSchema.parse(
+      startOrderWithItem(options.getDatabase(), {
+        servicePointId: input.servicePointId,
+        itemKind: input.itemKind,
+        itemId: input.itemId,
+        quantity: input.quantity,
+        ...(input.componentSelections === undefined
+          ? {}
+          : { componentSelections: input.componentSelections }),
+      }),
+    );
   });
 
   ipcMain.handle(IPC_CHANNELS.operationsAddItem, (_event, payload: unknown) => {
     const input = addOrderItemInputSchema.parse(payload);
-    return orderSchema.parse(addOrderItem(options.getDatabase(), input));
+    return orderSchema.parse(
+      addOrderItem(options.getDatabase(), {
+        orderId: input.orderId,
+        itemKind: input.itemKind,
+        itemId: input.itemId,
+        quantity: input.quantity,
+        ...(input.componentSelections === undefined
+          ? {}
+          : { componentSelections: input.componentSelections }),
+      }),
+    );
   });
 
   ipcMain.handle(IPC_CHANNELS.operationsRemoveItem, (_event, payload: unknown) => {
@@ -153,12 +173,18 @@ export function registerOperationsIpcHandlers(options: RegisterOperationsIpcOpti
         voucherUses: input.voucherUses,
       }),
     );
-    void options.printAfterSale(order.id);
+    options.printAfterSale(order.id);
     return order;
   });
 
   ipcMain.handle(IPC_CHANNELS.operationsCancelOrder, (_event, payload: unknown) => {
     const input = cancelOrderInputSchema.parse(payload);
-    return orderSchema.parse(cancelOrder(options.getDatabase(), { orderId: input.orderId, reason: input.reason, ...(input.refunds === undefined ? {} : { refunds: input.refunds }) }));
+    return orderSchema.parse(
+      cancelOrder(options.getDatabase(), {
+        orderId: input.orderId,
+        reason: input.reason,
+        ...(input.refunds === undefined ? {} : { refunds: input.refunds }),
+      }),
+    );
   });
 }

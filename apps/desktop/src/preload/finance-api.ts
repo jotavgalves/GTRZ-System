@@ -89,7 +89,10 @@ export const expenseApi: ExpenseApi = {
     return expenseSchema.parse(payload);
   },
   async recordPayment(input) {
-    const payload: unknown = await ipcRenderer.invoke(IPC_CHANNELS.expensesRecordPayment, recordExpensePaymentInputSchema.parse(input));
+    const payload: unknown = await ipcRenderer.invoke(
+      IPC_CHANNELS.expensesRecordPayment,
+      recordExpensePaymentInputSchema.parse(input),
+    );
     return expenseSchema.parse(payload);
   },
 
@@ -107,8 +110,31 @@ export const expenseApi: ExpenseApi = {
 };
 
 export const capitalApi: CapitalApi = {
-  async getState() { return capitalStateSchema.parse(await ipcRenderer.invoke(IPC_CHANNELS.capitalGetState)); },
-  async create(input) { return capitalContributionSchema.parse(await ipcRenderer.invoke(IPC_CHANNELS.capitalCreate, createCapitalContributionInputSchema.parse(input))); },
-  async update(input) { return capitalContributionSchema.parse(await ipcRenderer.invoke(IPC_CHANNELS.capitalUpdate, updateCapitalContributionInputSchema.parse(input))); },
-  async reimburse(input) { return capitalStateSchema.parse(await ipcRenderer.invoke(IPC_CHANNELS.capitalReimburse, recordCapitalReimbursementInputSchema.parse(input))); },
+  async getState() {
+    return capitalStateSchema.parse(await ipcRenderer.invoke(IPC_CHANNELS.capitalGetState));
+  },
+  async create(input) {
+    return capitalContributionSchema.parse(
+      await ipcRenderer.invoke(
+        IPC_CHANNELS.capitalCreate,
+        createCapitalContributionInputSchema.parse(input),
+      ),
+    );
+  },
+  async update(input) {
+    return capitalContributionSchema.parse(
+      await ipcRenderer.invoke(
+        IPC_CHANNELS.capitalUpdate,
+        updateCapitalContributionInputSchema.parse(input),
+      ),
+    );
+  },
+  async reimburse(input) {
+    return capitalStateSchema.parse(
+      await ipcRenderer.invoke(
+        IPC_CHANNELS.capitalReimburse,
+        recordCapitalReimbursementInputSchema.parse(input),
+      ),
+    );
+  },
 };

@@ -5,7 +5,11 @@ export default defineConfig({
     environment: 'node',
     globals: true,
     testTimeout: 15_000,
-    include: ['packages/**/*.{test,spec}.ts', 'tests/smoke/**/*.{test,spec}.ts'],
+    include: [
+      'packages/**/*.{test,spec}.ts',
+      'tests/smoke/**/*.{test,spec}.ts',
+      'tests/integration/**/*.{test,spec}.ts',
+    ],
     coverage: {
       provider: 'v8',
       reporter: ['text', 'html'],

@@ -129,25 +129,26 @@ export const stockTransfers = sqliteTable('stock_transfers', {
 export const combos = sqliteTable('combos', {
   id: text('id').primaryKey(),
   name: text('name').notNull(),
+  kind: text('kind', { enum: ['food', 'drink'] }).notNull(),
   salePriceCents: integer('sale_price_cents').notNull(),
   active: integer('active', { mode: 'boolean' }).notNull(),
   createdAt: integer('created_at', { mode: 'timestamp_ms' }).notNull(),
   updatedAt: integer('updated_at', { mode: 'timestamp_ms' }).notNull(),
 });
 
-export const comboComponents = sqliteTable(
-  'combo_components',
-  {
-    comboId: text('combo_id')
-      .notNull()
-      .references(() => combos.id, { onDelete: 'cascade', onUpdate: 'cascade' }),
-    productId: text('product_id')
-      .notNull()
-      .references(() => products.id, { onDelete: 'restrict', onUpdate: 'cascade' }),
-    quantity: integer('quantity').notNull(),
-  },
-  (table) => [primaryKey({ columns: [table.comboId, table.productId] })],
-);
+export const comboComponents = sqliteTable('combo_components', {
+  id: text('id').primaryKey(),
+  comboId: text('combo_id')
+    .notNull()
+    .references(() => combos.id, { onDelete: 'cascade', onUpdate: 'cascade' }),
+  productId: text('product_id')
+    .notNull()
+    .references(() => products.id, { onDelete: 'restrict', onUpdate: 'cascade' }),
+  quantity: integer('quantity').notNull(),
+  choiceGroup: text('choice_group'),
+  choiceLabel: text('choice_label'),
+  sortOrder: integer('sort_order').notNull(),
+});
 
 export const servicePoints = sqliteTable('service_points', {
   id: text('id').primaryKey(),
@@ -187,6 +188,7 @@ export const orderItems = sqliteTable('order_items', {
   itemKind: text('item_kind', { enum: ['product', 'combo'] }).notNull(),
   itemId: text('item_id').notNull(),
   itemName: text('item_name').notNull(),
+  configurationKey: text('configuration_key').notNull(),
   quantity: integer('quantity').notNull(),
   unitPriceCents: integer('unit_price_cents').notNull(),
   totalCents: integer('total_cents').notNull(),

@@ -17,6 +17,7 @@ import {
   openDatabase,
   openOrder,
   recordStockMovement,
+  resetEventData,
   transferStockBetweenEvents,
   verifyDatabaseIntegrity,
   type DatabaseContext,
@@ -37,6 +38,56 @@ afterEach(async () => {
 });
 
 describe('permanent event deletion', () => {
+  it('zera os dados operacionais sem apagar o evento nem o catálogo', async () => {
+    const database = await createTemporaryDatabase();
+    const event = createEvent(database, { name: 'Evento limpo', startsAt: Date.now() });
+    const category = createProductCategory(database, 'Limpeza');
+    const product = createInventoryProduct(database, {
+      categoryId: category.id,
+      name: 'Produto preservado',
+      kind: 'drink',
+      costCents: 300,
+      salePriceCents: 900,
+      lowStockThreshold: 1,
+    });
+    recordStockMovement(database, { productId: product.id, type: 'purchase', quantity: 8 });
+    createExpense(database, {
+      category: 'Equipe',
+      description: 'Despesa removida',
+      amountCents: 1500,
+      paymentMethod: 'pix',
+    });
+    const table = createServicePoint(database, { label: 'Mesa limpa', type: 'table' });
+    openOrder(database, table.id);
+
+    const result = resetEventData(database, {
+      eventId: event.id,
+      confirmationName: event.name,
+      reason: 'Preparação para um novo dia de evento',
+    });
+
+    expect(result).toMatchObject({ eventId: event.id, reset: true, removedOrdersCount: 1 });
+    expect(listEvents(database)).toHaveLength(1);
+    expect(getSessionState(database).activeEvent?.id).toBe(event.id);
+    expect(
+      database.sqlite
+        .prepare('SELECT COUNT(*) AS amount FROM products WHERE id = ?')
+        .get(product.id),
+    ).toEqual({ amount: 1 });
+    expect(
+      database.sqlite
+        .prepare('SELECT COUNT(*) AS amount FROM event_stock WHERE event_id = ?')
+        .get(event.id),
+    ).toEqual({ amount: 0 });
+    expect(
+      database.sqlite
+        .prepare('SELECT COUNT(*) AS amount FROM orders WHERE event_id = ?')
+        .get(event.id),
+    ).toEqual({ amount: 0 });
+    expect(verifyDatabaseIntegrity(database)).toBe(true);
+    database.close();
+  });
+
   it('remove evento ativo mesmo com comanda aberta, despesa e estoque', async () => {
     const database = await createTemporaryDatabase();
     const event = createEvent(database, { name: 'Evento descartável', startsAt: Date.now() });
@@ -109,6 +160,39 @@ describe('permanent event deletion', () => {
       action: 'event.deleted-permanently',
       entity_id: event.id,
     });
+    database.close();
+  });
+
+  it('remove a fila de catálogo que referencia a auditoria do evento excluído', async () => {
+    const database = await createTemporaryDatabase();
+    const event = createEvent(database, {
+      name: 'Evento com fila de catálogo',
+      startsAt: Date.now(),
+    });
+    const audit = database.sqlite
+      .prepare("SELECT id FROM audit_log WHERE event_id = ? AND action = 'event.created'")
+      .get(event.id) as { readonly id: number };
+    const now = Date.now();
+    database.sqlite
+      .prepare(
+        `INSERT INTO sync_outbox
+         (audit_id, operation_id, event_id, payload_json, status, attempts, last_error, accepted_at, created_at, updated_at)
+         VALUES (?, ?, '_catalog', '{}', 'pending', 0, NULL, NULL, ?, ?)`,
+      )
+      .run(audit.id, `catalog-${String(audit.id)}`, now, now);
+
+    deleteEventPermanently(database, {
+      eventId: event.id,
+      confirmationName: event.name,
+      reason: 'Evento criado apenas para validar a limpeza da fila',
+    });
+
+    expect(
+      database.sqlite
+        .prepare('SELECT COUNT(*) AS amount FROM sync_outbox WHERE audit_id = ?')
+        .get(audit.id),
+    ).toEqual({ amount: 0 });
+    expect(verifyDatabaseIntegrity(database)).toBe(true);
     database.close();
   });
 

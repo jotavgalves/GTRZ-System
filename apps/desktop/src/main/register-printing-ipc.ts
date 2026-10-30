@@ -17,6 +17,7 @@ interface RegisterPrintingIpcOptions {
 
 const PRINTING_CHANNELS = [
   IPC_CHANNELS.printingListPrinters,
+  IPC_CHANNELS.printingOpenReceiptFolder,
   IPC_CHANNELS.printingGetSettings,
   IPC_CHANNELS.printingUpdateSettings,
   IPC_CHANNELS.printingReprintOrder,
@@ -30,6 +31,10 @@ export function registerPrintingIpcHandlers(options: RegisterPrintingIpcOptions)
   ipcMain.handle(IPC_CHANNELS.printingListPrinters, async () => {
     return printerListSchema.parse(await options.printService.listPrinters());
   });
+
+  ipcMain.handle(IPC_CHANNELS.printingOpenReceiptFolder, () =>
+    options.printService.openReceiptFolder(),
+  );
 
   ipcMain.handle(IPC_CHANNELS.printingGetSettings, () => {
     return printingSettingsSchema.parse(options.printService.getSettings());

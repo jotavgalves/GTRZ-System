@@ -6,7 +6,16 @@ import {
   changeEventStatusInputSchema,
   changeProductionPasswordInputSchema,
   cloudSyncStatusSchema,
+  cloudSyncQueueSchema,
   cloudMonitorSchema,
+  ownerCredentialsSchema,
+  ownerSessionSchema,
+  desktopEnrollmentSchema,
+  desktopDeviceListSchema,
+  exchangeDesktopEnrollmentInputSchema,
+  revokeDesktopDeviceInputSchema,
+  printStationInputSchema,
+  printStationSchema,
   createMobileOperatorInputSchema,
   deleteMobileOperatorInputSchema,
   endMobileOperatorSessionsInputSchema,
@@ -21,10 +30,12 @@ import {
   IPC_CHANNELS,
   operationResultSchema,
   paymentTerminalSettingsSchema,
+  resetGlobalEventInputSchema,
   renameEventInputSchema,
   restoreBackupResultSchema,
   sessionStateSchema,
   setActiveEventInputSchema,
+  setGlobalEventInputSchema,
   switchProfileInputSchema,
   switchRuntimeEnvironmentInputSchema,
   systemInfoSchema,
@@ -36,7 +47,16 @@ import {
   type ChangeEventStatusInput,
   type ChangeProductionPasswordInput,
   type CloudSyncStatus,
+  type CloudSyncQueue,
   type CloudMonitor,
+  type OwnerCredentials,
+  type OwnerSession,
+  type DesktopEnrollment,
+  type DesktopDevice,
+  type ExchangeDesktopEnrollmentInput,
+  type RevokeDesktopDeviceInput,
+  type PrintStation,
+  type PrintStationInput,
   type CreateMobileOperatorInput,
   type DeleteMobileOperatorInput,
   type EndMobileOperatorSessionsInput,
@@ -52,6 +72,8 @@ import {
   type RestoreBackupResult,
   type SessionState,
   type SetActiveEventInput,
+  type SetGlobalEventInput,
+  type ResetGlobalEventInput,
   type SwitchProfileInput,
   type SwitchRuntimeEnvironmentInput,
   type SystemInfo,
@@ -177,6 +199,86 @@ const api: GtrzDesktopApi = {
       const payload: unknown = await ipcRenderer.invoke(IPC_CHANNELS.settingsGetCloudMonitor);
       return cloudMonitorSchema.parse(payload);
     },
+    async getLocalQueue(): Promise<CloudSyncQueue> {
+      const payload: unknown = await ipcRenderer.invoke(IPC_CHANNELS.settingsGetLocalQueue);
+      return cloudSyncQueueSchema.parse(payload);
+    },
+    async getOwnerSession(): Promise<OwnerSession> {
+      const payload: unknown = await ipcRenderer.invoke(IPC_CHANNELS.settingsGetOwnerSession);
+      return ownerSessionSchema.parse(payload);
+    },
+    async registerOwner(input: OwnerCredentials): Promise<OperationResult> {
+      const payload: unknown = await ipcRenderer.invoke(
+        IPC_CHANNELS.settingsRegisterOwner,
+        ownerCredentialsSchema.parse(input),
+      );
+      return operationResultSchema.parse(payload);
+    },
+    async signInOwner(input: OwnerCredentials): Promise<OwnerSession> {
+      const payload: unknown = await ipcRenderer.invoke(
+        IPC_CHANNELS.settingsSignInOwner,
+        ownerCredentialsSchema.parse(input),
+      );
+      return ownerSessionSchema.parse(payload);
+    },
+    async signOutOwner(): Promise<OperationResult> {
+      const payload: unknown = await ipcRenderer.invoke(IPC_CHANNELS.settingsSignOutOwner);
+      return operationResultSchema.parse(payload);
+    },
+    async createDesktopEnrollment(): Promise<DesktopEnrollment> {
+      const payload: unknown = await ipcRenderer.invoke(
+        IPC_CHANNELS.settingsCreateDesktopEnrollment,
+      );
+      return desktopEnrollmentSchema.parse(payload);
+    },
+    async exchangeDesktopEnrollment(
+      input: ExchangeDesktopEnrollmentInput,
+    ): Promise<OperationResult> {
+      const payload: unknown = await ipcRenderer.invoke(
+        IPC_CHANNELS.settingsExchangeDesktopEnrollment,
+        exchangeDesktopEnrollmentInputSchema.parse(input),
+      );
+      return operationResultSchema.parse(payload);
+    },
+    async listDesktopDevices(): Promise<readonly DesktopDevice[]> {
+      const payload: unknown = await ipcRenderer.invoke(IPC_CHANNELS.settingsListDesktopDevices);
+      return desktopDeviceListSchema.parse(payload);
+    },
+    async revokeDesktopDevice(input: RevokeDesktopDeviceInput): Promise<OperationResult> {
+      const payload: unknown = await ipcRenderer.invoke(
+        IPC_CHANNELS.settingsRevokeDesktopDevice,
+        revokeDesktopDeviceInputSchema.parse(input),
+      );
+      return operationResultSchema.parse(payload);
+    },
+    async getPrintStation(eventId: string): Promise<PrintStation> {
+      const payload: unknown = await ipcRenderer.invoke(
+        IPC_CHANNELS.settingsGetPrintStation,
+        eventId,
+      );
+      return printStationSchema.parse(payload);
+    },
+    async setPrintStation(input: PrintStationInput): Promise<PrintStation> {
+      const payload: unknown = await ipcRenderer.invoke(
+        IPC_CHANNELS.settingsSetPrintStation,
+        printStationInputSchema.parse(input),
+      );
+      return printStationSchema.parse(payload);
+    },
+    async setGlobalEvent(input: SetGlobalEventInput): Promise<SessionState> {
+      const payload: unknown = await ipcRenderer.invoke(
+        IPC_CHANNELS.settingsSetGlobalEvent,
+        setGlobalEventInputSchema.parse(input),
+      );
+      return sessionStateSchema.parse(payload);
+    },
+    async resetGlobalEvent(input: ResetGlobalEventInput): Promise<OperationResult> {
+      const payload: unknown = await ipcRenderer.invoke(
+        IPC_CHANNELS.settingsResetGlobalEvent,
+        resetGlobalEventInputSchema.parse(input),
+      );
+      return operationResultSchema.parse(payload);
+    },
     async listMobileOperators(): Promise<readonly MobileOperator[]> {
       const payload: unknown = await ipcRenderer.invoke(IPC_CHANNELS.settingsListMobileOperators);
       return mobileOperatorListSchema.parse(payload);
@@ -195,7 +297,9 @@ const api: GtrzDesktopApi = {
       );
       return mobileOperatorSchema.parse(payload);
     },
-    async endMobileOperatorSessions(input: EndMobileOperatorSessionsInput): Promise<OperationResult> {
+    async endMobileOperatorSessions(
+      input: EndMobileOperatorSessionsInput,
+    ): Promise<OperationResult> {
       const payload: unknown = await ipcRenderer.invoke(
         IPC_CHANNELS.settingsEndMobileOperatorSessions,
         endMobileOperatorSessionsInputSchema.parse(input),

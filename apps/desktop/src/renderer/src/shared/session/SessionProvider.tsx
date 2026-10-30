@@ -30,6 +30,15 @@ export function SessionProvider({ children }: PropsWithChildren): React.JSX.Elem
     void refresh();
   }, [refresh]);
 
+  useEffect(() => {
+    return window.gtrz.realtime.onDataChanged(() => {
+      void window.gtrz.session
+        .getState()
+        .then(setState)
+        .catch(() => undefined);
+    });
+  }, []);
+
   const setActiveEvent = useCallback(async (eventId: string | null): Promise<void> => {
     setError(null);
 

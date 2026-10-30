@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 
 import type { CashState, RecordCashMovementInput } from '@gtrz/contracts';
 
 import { useRealtimeReload } from '../../shared/realtime/useRealtimeReload';
+import { getCachedViewState, setCachedViewState } from '../../shared/navigation/view-state-cache';
 
 interface CashViewState {
   readonly state: CashState | null;
@@ -21,8 +22,9 @@ function getErrorMessage(error: unknown): string {
 }
 
 export function useCash(): CashViewState {
-  const [state, setState] = useState<CashState | null>(null);
-  const [loading, setLoading] = useState(true);
+  const initialState = useRef(getCachedViewState<CashState>('cash')).current;
+  const [state, setState] = useState<CashState | null>(() => initialState);
+  const [loading, setLoading] = useState(() => initialState === null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
@@ -32,7 +34,7 @@ export function useCash(): CashViewState {
     setError(null);
 
     try {
-      setState(await window.gtrz.cash.getState());
+      setState(setCachedViewState('cash', await window.gtrz.cash.getState()));
     } catch (loadError: unknown) {
       setError(getErrorMessage(loadError));
     } finally {
@@ -41,8 +43,8 @@ export function useCash(): CashViewState {
   }, []);
 
   useEffect(() => {
-    void reload();
-  }, [reload]);
+    void reload(initialState !== null);
+  }, [initialState, reload]);
   useRealtimeReload(reload);
 
   const run = useCallback(
@@ -52,7 +54,7 @@ export function useCash(): CashViewState {
       setMessage(null);
 
       try {
-        setState(await operation());
+        setState(setCachedViewState('cash', await operation()));
         setMessage(successMessage);
       } catch (operationError: unknown) {
         setError(getErrorMessage(operationError));

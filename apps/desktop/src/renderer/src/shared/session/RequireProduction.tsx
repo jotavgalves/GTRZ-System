@@ -5,7 +5,7 @@ import { useSession } from './session-context';
 export function RequireProduction(): React.JSX.Element {
   const { state, loading, error } = useSession();
 
-  if (loading) {
+  if (loading && state === null) {
     return <div className="route-state">Carregando permissões…</div>;
   }
 

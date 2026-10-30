@@ -1,6 +1,7 @@
 import { ipcRenderer } from 'electron';
 import {
   archiveFoodSupplierInputSchema,
+  deleteFoodSupplierInputSchema,
   configureFoodInputSchema,
   createExternalFoodItemInputSchema,
   createFoodSupplierInputSchema,
@@ -9,6 +10,7 @@ import {
   IPC_CHANNELS,
   updateFoodSupplierInputSchema,
   type ArchiveFoodSupplierInput,
+  type DeleteFoodSupplierInput,
   type ConfigureFoodInput,
   type CreateExternalFoodItemInput,
   type CreateFoodSupplierInput,
@@ -46,6 +48,12 @@ export const foodApi: FoodApi = {
     await ipcRenderer.invoke(
       IPC_CHANNELS.foodArchiveSupplier,
       archiveFoodSupplierInputSchema.parse(input),
+    );
+  },
+  async deleteSupplier(input: DeleteFoodSupplierInput): Promise<void> {
+    await ipcRenderer.invoke(
+      IPC_CHANNELS.foodDeleteSupplier,
+      deleteFoodSupplierInputSchema.parse(input),
     );
   },
   async createExternalItem(input: CreateExternalFoodItemInput): Promise<FoodState> {

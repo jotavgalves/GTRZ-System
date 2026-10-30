@@ -2,13 +2,23 @@
 
 Servico de sincronizacao em tempo real do GTRZ. Cada evento possui um Durable Object proprio, que serializa comandos, grava um log ordenado e envia as alteracoes confirmadas por WebSocket.
 
-## Estado da entrega
+## Fonte de dados de produção
 
-O servico esta publicado e o nucleo de estoque/venda esta validado com idempotencia e
-concorrencia atomica. Esta primeira versao da API ainda nao esta ligada ao aplicativo Electron:
-o proximo passo e incluir o pareamento de dispositivos e encaminhar todas as operacoes do PDV
-(pedidos, vouchers, caixa, despesas e ingressos) para esta fonte central antes de confirmar a
-alteracao local. Enquanto isso nao for feito, o desktop continua oficialmente offline e local.
+A fonte canônica de dados do desktop e do mobile é o mesmo projeto Supabase:
+`muhzjnveqrahccoisddo`, pela Edge Function `gtrz-sync-fallback`.
+
+O Worker serve a interface mobile e encaminha as APIs HTTP de produção `/v1/*`
+e `/cashier/api/v1/*` à central canônica. Não há fallback para gravar em uma base
+Cloudflare separada quando a central falha. A autenticação e a validação dos
+comandos continuam na Edge Function. Os relays internos e WebSockets legados
+preservam suas rotas de transporte; o cliente canônico usa o Realtime do Supabase.
+O SQLite do desktop permanece como réplica operacional local, com fila de envio
+e aplicação auditada do diário remoto.
+
+O Worker de teste mantém os bindings e dados isolados. O alias `/cashier/api`
+nesse ambiente é resolvido localmente, sem redirecionamento para produção.
+A configuração local ou um PR aberto não altera o Worker publicado: siga o fluxo
+de integração e publicação documentado em `EDITING.md`.
 
 ## Segredo de acesso
 

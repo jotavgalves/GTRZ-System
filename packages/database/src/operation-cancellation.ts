@@ -3,7 +3,7 @@ import { appendAudit } from './audit';
 import { getSessionState } from './control';
 import { getOrder, requireActiveOperationEvent, requireOrderRow } from './operation-core';
 import { restoreOrderStock } from './operation-stock';
-import { clearExternalFoodSettlements } from './food';
+import { clearExternalFoodSettlements } from './food-settlements';
 import type { DatabaseOrder, DatabasePaymentMethod } from './operation-types';
 import { releaseOrderVoucher } from './operation-vouchers';
 import type { DatabaseContext } from './types';
@@ -44,7 +44,7 @@ export function cancelOrder(
   let refundedVoucherCents = 0;
   const paymentRows = database.sqlite
     .prepare('SELECT method, amount_cents FROM payments WHERE order_id = ? ORDER BY created_at, id')
-    .all(order.id) as Array<{ method: DatabasePaymentMethod; amount_cents: number }>;
+    .all(order.id) as { method: DatabasePaymentMethod; amount_cents: number }[];
   const refunds =
     input.refunds ??
     paymentRows.map((payment) => ({ method: payment.method, amountCents: payment.amount_cents }));

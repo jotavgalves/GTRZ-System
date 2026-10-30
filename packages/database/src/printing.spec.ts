@@ -1,5 +1,5 @@
 import { mkdtemp, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { hostname, tmpdir } from 'node:os';
 import path from 'node:path';
 
 import { afterEach, describe, expect, it } from 'vitest';
@@ -67,6 +67,7 @@ describe('thermal printing database', () => {
     expect(getPrintingSettings(database)).toEqual({
       automaticPrinting: false,
       deviceName: null,
+      machineName: hostname(),
       paperWidthMm: 80,
     });
 
@@ -74,13 +75,20 @@ describe('thermal printing database', () => {
       updatePrintingSettings(database, {
         automaticPrinting: true,
         deviceName: 'THERMAL-01',
+        machineName: 'Caixa principal',
         paperWidthMm: 58,
       }),
-    ).toEqual({ automaticPrinting: true, deviceName: 'THERMAL-01', paperWidthMm: 58 });
+    ).toEqual({
+      automaticPrinting: true,
+      deviceName: 'THERMAL-01',
+      machineName: 'Caixa principal',
+      paperWidthMm: 58,
+    });
 
     expect(getPrintingSettings(database)).toEqual({
       automaticPrinting: true,
       deviceName: 'THERMAL-01',
+      machineName: 'Caixa principal',
       paperWidthMm: 58,
     });
     database.close();
@@ -95,6 +103,7 @@ describe('thermal printing database', () => {
       updatePrintingSettings(database, {
         automaticPrinting: true,
         deviceName: null,
+        machineName: 'Caixa principal',
         paperWidthMm: 80,
       }),
     ).toThrow('A configuração de impressão exige o perfil Produção.');

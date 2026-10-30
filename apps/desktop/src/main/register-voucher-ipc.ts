@@ -7,6 +7,7 @@ import {
   deleteVoucherInputSchema,
   deleteVoucherResultSchema,
   IPC_CHANNELS,
+  setVoucherTotalInputSchema,
   updateVoucherInputSchema,
   voucherSchema,
   voucherStateSchema,
@@ -18,6 +19,7 @@ import {
   createManagedVoucher,
   deleteManagedVoucher,
   getManagedVoucherState,
+  setManagedVoucherTotal,
   updateManagedVoucher,
 } from '@gtrz/database/voucher-management';
 
@@ -31,6 +33,7 @@ const VOUCHER_CHANNELS = [
   IPC_CHANNELS.vouchersChangeStatus,
   IPC_CHANNELS.vouchersUpdate,
   IPC_CHANNELS.vouchersAddBalance,
+  IPC_CHANNELS.vouchersSetTotal,
   IPC_CHANNELS.vouchersDelete,
 ] as const;
 
@@ -74,6 +77,11 @@ export function registerVoucherIpcHandlers(options: RegisterVoucherIpcOptions): 
   ipcMain.handle(IPC_CHANNELS.vouchersAddBalance, (_event, payload: unknown) => {
     const input = addVoucherBalanceInputSchema.parse(payload);
     return voucherSchema.parse(addManagedVoucherBalance(options.getDatabase(), input));
+  });
+
+  ipcMain.handle(IPC_CHANNELS.vouchersSetTotal, (_event, payload: unknown) => {
+    const input = setVoucherTotalInputSchema.parse(payload);
+    return voucherSchema.parse(setManagedVoucherTotal(options.getDatabase(), input));
   });
 
   ipcMain.handle(IPC_CHANNELS.vouchersDelete, (_event, payload: unknown) => {

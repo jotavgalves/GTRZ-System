@@ -13,6 +13,7 @@ const KIND_LABELS: Readonly<Record<BackupKind, string>> = {
   'event-close': 'Encerramento do evento',
   manual: 'Manual',
   'pre-restore': 'Antes da restauração',
+  'pre-event-reset': 'Antes de zerar o evento',
 };
 
 function formatDate(timestamp: number): string {

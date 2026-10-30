@@ -37,17 +37,35 @@ export const updateFoodSupplierInputSchema = createFoodSupplierInputSchema.exten
   supplierId: z.uuid(),
 });
 export const archiveFoodSupplierInputSchema = z.object({ supplierId: z.uuid() });
+export const deleteFoodSupplierInputSchema = z.object({
+  supplierId: z.uuid(),
+  deleteLinkedSales: z.boolean(),
+  reason: z.string().trim().min(3).max(240),
+});
 export const createExternalFoodItemInputSchema = z
   .object({
     categoryId: z.uuid(),
-    supplierId: z.uuid(),
+    supplierId: z.uuid().optional(),
     name: z.string().trim().min(2).max(100),
-    supplierUnitCents: z.number().int().nonnegative(),
-    commissionUnitCents: z.number().int().nonnegative(),
+    supplierUnitCents: z.number().int().nonnegative().optional(),
+    commissionUnitCents: z.number().int().nonnegative().optional(),
     initialQuantity: z.number().int().positive(),
     comboOnly: z.boolean().default(false),
   })
   .superRefine((input, context) => {
+    if (input.comboOnly) return;
+    if (
+      input.supplierId === undefined ||
+      input.supplierUnitCents === undefined ||
+      input.commissionUnitCents === undefined
+    ) {
+      context.addIssue({
+        code: 'custom',
+        message: 'Informe fornecedor, valor e comissão para uma comida vendida diretamente.',
+        path: ['supplierId'],
+      });
+      return;
+    }
     if (input.supplierUnitCents + input.commissionUnitCents <= 0)
       context.addIssue({
         code: 'custom',
@@ -62,6 +80,7 @@ export type ConfigureFoodInput = z.infer<typeof configureFoodInputSchema>;
 export type CreateFoodSupplierInput = z.infer<typeof createFoodSupplierInputSchema>;
 export type UpdateFoodSupplierInput = z.infer<typeof updateFoodSupplierInputSchema>;
 export type ArchiveFoodSupplierInput = z.infer<typeof archiveFoodSupplierInputSchema>;
+export type DeleteFoodSupplierInput = z.infer<typeof deleteFoodSupplierInputSchema>;
 export type CreateExternalFoodItemInput = z.infer<typeof createExternalFoodItemInputSchema>;
 export interface FoodApi {
   getState(): Promise<FoodState>;
@@ -69,5 +88,6 @@ export interface FoodApi {
   createSupplier(input: CreateFoodSupplierInput): Promise<FoodSupplier>;
   updateSupplier(input: UpdateFoodSupplierInput): Promise<FoodSupplier>;
   archiveSupplier(input: ArchiveFoodSupplierInput): Promise<void>;
+  deleteSupplier(input: DeleteFoodSupplierInput): Promise<void>;
   createExternalItem(input: CreateExternalFoodItemInput): Promise<FoodState>;
 }

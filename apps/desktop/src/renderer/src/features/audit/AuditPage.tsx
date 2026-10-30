@@ -32,6 +32,9 @@ export function AuditPage(): React.JSX.Element {
   const [to, setTo] = useState('');
   const records = useMemo(() => state?.records ?? [], [state?.records]);
   const actions = useMemo(() => sortAuditActions(state?.actions ?? []), [state?.actions]);
+  if (loading && state === null) {
+    return <div className="route-state">Carregando auditoria…</div>;
+  }
   const productionRecords = records.filter((record) => record.profile === 'production').length;
   const cashierRecords = records.length - productionRecords;
   const activeFilterCount = [
@@ -291,7 +294,6 @@ export function AuditPage(): React.JSX.Element {
       </article>
 
       {error === null ? null : <p className="form-error">{error}</p>}
-      {loading && state === null ? <div className="route-state">Carregando auditoria…</div> : null}
       {state === null ? null : <AuditRecordList records={records} />}
     </section>
   );

@@ -21,6 +21,13 @@ export const printingApi: PrintingApi = {
     return printerListSchema.parse(payload);
   },
 
+  async openReceiptFolder(): Promise<string> {
+    const path: unknown = await ipcRenderer.invoke(IPC_CHANNELS.printingOpenReceiptFolder);
+    if (typeof path !== 'string' || path.length === 0)
+      throw new Error('Pasta de notas indisponível.');
+    return path;
+  },
+
   async getSettings(): Promise<PrintingSettings> {
     const payload: unknown = await ipcRenderer.invoke(IPC_CHANNELS.printingGetSettings);
     return printingSettingsSchema.parse(payload);

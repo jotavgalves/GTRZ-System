@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 
 import type { EventDeletionResult, EventStatus, GtrzEvent } from '@gtrz/contracts';
 
 import { useSession } from '../../shared/session/session-context';
 import { useRealtimeReload } from '../../shared/realtime/useRealtimeReload';
+import { getCachedViewState, setCachedViewState } from '../../shared/navigation/view-state-cache';
 
 interface EventsState {
   readonly events: readonly GtrzEvent[];
@@ -26,8 +27,9 @@ function getErrorMessage(error: unknown): string {
 }
 
 export function useEvents(): EventsState {
-  const [events, setEvents] = useState<readonly GtrzEvent[]>([]);
-  const [loading, setLoading] = useState(true);
+  const initialEvents = useRef(getCachedViewState<readonly GtrzEvent[]>('events')).current;
+  const [events, setEvents] = useState<readonly GtrzEvent[]>(() => initialEvents ?? []);
+  const [loading, setLoading] = useState(() => initialEvents === null);
   const [error, setError] = useState<string | null>(null);
   const { setActiveEvent } = useSession();
 
@@ -36,7 +38,7 @@ export function useEvents(): EventsState {
     setError(null);
 
     try {
-      setEvents(await window.gtrz.events.list());
+      setEvents(setCachedViewState('events', await window.gtrz.events.list()));
     } catch (loadError: unknown) {
       setError(getErrorMessage(loadError));
     } finally {
@@ -45,8 +47,8 @@ export function useEvents(): EventsState {
   }, []);
 
   useEffect(() => {
-    void reload();
-  }, [reload]);
+    void reload(initialEvents !== null);
+  }, [initialEvents, reload]);
   useRealtimeReload(reload);
 
   const executeAndReload = useCallback(

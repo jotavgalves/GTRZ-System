@@ -192,9 +192,7 @@ export function TicketLotCard({
               value={deleteReason}
             />
           </label>
-          <small>
-            Remove o lote, todas as vendas/cortesias vinculadas e os códigos gerados.
-          </small>
+          <small>Remove o lote, todas as vendas/cortesias vinculadas e os códigos gerados.</small>
           <button
             className="button button--danger button--compact"
             disabled={busy || deleteReason.trim().length < 3}

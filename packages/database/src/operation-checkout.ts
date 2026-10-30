@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { appendAudit } from './audit';
 import { getOrder, listOrderItems, requireOpenOrderRow } from './operation-core';
 import { deductOrderStock } from './operation-stock';
-import { recordExternalFoodSettlements } from './food';
+import { recordExternalFoodSettlements } from './food-settlements';
 import type {
   DatabaseCloseOrderPaymentInput,
   DatabaseOrder,

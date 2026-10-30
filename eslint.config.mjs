@@ -15,6 +15,10 @@ export default defineConfig(
       '**/release/**',
       '**/coverage/**',
       '**/.wrangler/**',
+      '**/output/**',
+      '**/tmp/**',
+      'index.js',
+      'supabase/functions/**',
       'LOGOS.zip',
     ],
   },
@@ -112,9 +116,25 @@ export default defineConfig(
     },
   },
   {
+    files: ['apps/mobile-simulator/scripts/verify-live-sync.mjs'],
+    languageOptions: {
+      globals: {
+        ...globals.browser,
+        state: 'readonly',
+      },
+    },
+  },
+  {
+    files: ['apps/desktop/src/renderer/src/app/router.tsx'],
+    rules: {
+      'react-refresh/only-export-components': 'off',
+    },
+  },
+  {
     files: ['**/*.{test,spec}.ts', '**/*.{test,spec}.tsx'],
     rules: {
       '@typescript-eslint/no-magic-numbers': 'off',
+      '@typescript-eslint/no-unsafe-assignment': 'off',
     },
   },
 );

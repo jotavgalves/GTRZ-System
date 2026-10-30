@@ -203,7 +203,8 @@ function getExpenseTotals(
     )
     .get(eventId) as {
     readonly active_expenses_cents: number;
-    readonly paid_expenses_cents: number; readonly cash_expenses_cents: number;
+    readonly paid_expenses_cents: number;
+    readonly cash_expenses_cents: number;
   };
   return {
     activeExpensesCents: row.active_expenses_cents,
@@ -212,7 +213,13 @@ function getExpenseTotals(
 }
 
 function getCashRefundsCents(database: DatabaseContext, eventId: string): number {
-  return (database.sqlite.prepare("SELECT COALESCE(SUM(amount_cents), 0) AS value FROM order_refunds WHERE event_id = ? AND method = 'cash'").get(eventId) as { value: number }).value;
+  return (
+    database.sqlite
+      .prepare(
+        "SELECT COALESCE(SUM(amount_cents), 0) AS value FROM order_refunds WHERE event_id = ? AND method = 'cash'",
+      )
+      .get(eventId) as { value: number }
+  ).value;
 }
 
 function getMovementTotals(
@@ -256,7 +263,13 @@ function calculateState(database: DatabaseContext, eventId: string): DatabaseCas
   const expenses = getExpenseTotals(database, eventId);
   const capital = getCapitalState(database);
   const cashRefundsCents = getCashRefundsCents(database, eventId);
-  const paidExpensesCents = (database.sqlite.prepare(`SELECT COALESCE(SUM(ep.amount_cents), 0) AS value FROM expense_payments ep INNER JOIN expenses e ON e.id = ep.expense_id WHERE e.event_id = ? AND e.status = 'active'`).get(eventId) as {value:number}).value;
+  const paidExpensesCents = (
+    database.sqlite
+      .prepare(
+        `SELECT COALESCE(SUM(ep.amount_cents), 0) AS value FROM expense_payments ep INNER JOIN expenses e ON e.id = ep.expense_id WHERE e.event_id = ? AND e.status = 'active'`,
+      )
+      .get(eventId) as { value: number }
+  ).value;
   const movementTotals = getMovementTotals(database, registerRow?.id ?? null);
   const openingCashCents = registerRow?.opening_cash_cents ?? 0;
   const expectedCashCents =
@@ -264,7 +277,8 @@ function calculateState(database: DatabaseContext, eventId: string): DatabaseCas
     salesByMethod.cashCents +
     movementTotals.supplyCents -
     movementTotals.withdrawalCents -
-    expenses.cashExpensesCents - capital.cashReimbursementsCents;
+    expenses.cashExpensesCents -
+    capital.cashReimbursementsCents;
   const grossSalesCents =
     salesByMethod.cashCents +
     salesByMethod.pixCents +

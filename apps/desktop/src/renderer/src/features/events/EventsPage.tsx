@@ -49,6 +49,10 @@ export function EventsPage(): React.JSX.Element {
     [events],
   );
 
+  if (loading && events.length === 0) {
+    return <div className="route-state">Carregando eventos…</div>;
+  }
+
   async function handleCreate(formEvent: SyntheticEvent<HTMLFormElement>): Promise<void> {
     formEvent.preventDefault();
     setSubmitting(true);

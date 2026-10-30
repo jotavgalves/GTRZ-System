@@ -43,7 +43,9 @@ describe('troca de ambiente', () => {
     expect(switchRuntimeEnvironmentInputSchema.parse({ environment: 'test' })).toEqual({
       environment: 'test',
     });
-    expect(() => switchRuntimeEnvironmentInputSchema.parse({ environment: 'homologation' })).toThrow();
+    expect(() =>
+      switchRuntimeEnvironmentInputSchema.parse({ environment: 'homologation' }),
+    ).toThrow();
   });
 });
 

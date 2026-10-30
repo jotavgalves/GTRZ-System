@@ -42,12 +42,26 @@ export const IPC_CHANNELS = {
   settingsUpdatePaymentTerminal: 'settings:update-payment-terminal',
   settingsGetCloudSyncStatus: 'settings:get-cloud-sync-status',
   settingsGetCloudMonitor: 'settings:get-cloud-monitor',
+  settingsGetLocalQueue: 'settings:get-local-queue',
+  settingsGetOwnerSession: 'settings:get-owner-session',
+  settingsRegisterOwner: 'settings:register-owner',
+  settingsSignInOwner: 'settings:sign-in-owner',
+  settingsSignOutOwner: 'settings:sign-out-owner',
+  settingsCreateDesktopEnrollment: 'settings:create-desktop-enrollment',
+  settingsExchangeDesktopEnrollment: 'settings:exchange-desktop-enrollment',
+  settingsListDesktopDevices: 'settings:list-desktop-devices',
+  settingsRevokeDesktopDevice: 'settings:revoke-desktop-device',
+  settingsGetPrintStation: 'settings:get-print-station',
+  settingsSetPrintStation: 'settings:set-print-station',
+  settingsSetGlobalEvent: 'settings:set-global-event',
+  settingsResetGlobalEvent: 'settings:reset-global-event',
   settingsListMobileOperators: 'settings:list-mobile-operators',
   settingsCreateMobileOperator: 'settings:create-mobile-operator',
   settingsUpdateMobileOperator: 'settings:update-mobile-operator',
   settingsEndMobileOperatorSessions: 'settings:end-mobile-operator-sessions',
   settingsDeleteMobileOperator: 'settings:delete-mobile-operator',
   printingListPrinters: 'printing:list-printers',
+  printingOpenReceiptFolder: 'printing:open-receipt-folder',
   printingGetSettings: 'printing:get-settings',
   printingUpdateSettings: 'printing:update-settings',
   printingReprintOrder: 'printing:reprint-order',
@@ -62,6 +76,7 @@ export const IPC_CHANNELS = {
   foodCreateSupplier: 'food:create-supplier',
   foodUpdateSupplier: 'food:update-supplier',
   foodArchiveSupplier: 'food:archive-supplier',
+  foodDeleteSupplier: 'food:delete-supplier',
   foodCreateExternalItem: 'food:create-external-item',
   inventoryCreateCategory: 'inventory:create-category',
   inventoryUpdateCategory: 'inventory:update-category',
@@ -79,6 +94,7 @@ export const IPC_CHANNELS = {
   combosList: 'combos:list',
   combosCreate: 'combos:create',
   combosUpdate: 'combos:update',
+  combosDelete: 'combos:delete',
   operationsGetState: 'operations:get-state',
   operationsCreateServicePoint: 'operations:create-service-point',
   operationsRenameServicePoint: 'operations:rename-service-point',
@@ -98,6 +114,7 @@ export const IPC_CHANNELS = {
   vouchersChangeStatus: 'vouchers:change-status',
   vouchersUpdate: 'vouchers:update',
   vouchersAddBalance: 'vouchers:add-balance',
+  vouchersSetTotal: 'vouchers:set-total',
   vouchersDelete: 'vouchers:delete',
   cashGetState: 'cash:get-state',
   cashOpen: 'cash:open',
@@ -193,6 +210,13 @@ export const setActiveEventInputSchema = z.object({
   eventId: z.uuid().nullable(),
 });
 
+export const setGlobalEventInputSchema = z.object({ eventId: z.uuid() });
+export const resetGlobalEventInputSchema = z.object({
+  eventId: z.uuid(),
+  confirmationName: z.string().trim().min(2).max(100),
+  reason: z.string().trim().min(3).max(240),
+});
+
 export const sessionStateSchema = z.object({
   profile: userProfileSchema,
   activeEvent: eventSchema.nullable(),
@@ -233,11 +257,61 @@ export const cloudSyncStatusSchema = z.object({
   message: z.string().min(1).max(240),
 });
 
-export const mobileOperatorRoleSchema = z.enum(['sales', 'inventory', 'sales-and-inventory']);
+export const desktopEnrollmentSchema = z.object({
+  enrollmentCode: z.string().min(20).max(160),
+  expiresAt: z.number().int().positive(),
+});
+
+export const exchangeDesktopEnrollmentInputSchema = z.object({
+  enrollmentCode: z.string().trim().min(20).max(160),
+});
+
+export const desktopDeviceSchema = z.object({
+  deviceId: z.string().min(1).max(80),
+  label: z.string().min(1).max(80),
+  createdAt: z.number().int().nonnegative(),
+  lastSeenAt: z.number().int().nonnegative(),
+  revokedAt: z.number().int().nonnegative().nullable(),
+});
+export const desktopDeviceListSchema = z.array(desktopDeviceSchema);
+export const revokeDesktopDeviceInputSchema = z.object({ deviceId: z.string().min(1).max(80) });
+export const printStationInputSchema = z.object({
+  eventId: z.string().min(1).max(160),
+  deviceId: z.string().min(1).max(160).nullable(),
+});
+export const printStationSchema = z.object({
+  eventId: z.string(),
+  deviceId: z.string().nullable(),
+  printers: z.array(
+    z.object({
+      deviceId: z.string(),
+      deviceLabel: z.string(),
+      printerName: z.string(),
+      enabled: z.boolean(),
+      lastSeenAt: z.number(),
+      busyJobId: z.string().nullable(),
+    }),
+  ),
+  queued: z.number(),
+  needsAttention: z.number(),
+});
+export const ownerCredentialsSchema = z.object({
+  email: z.email().trim().max(254),
+  password: z.string().min(6).max(128),
+});
+export const ownerSessionSchema = z.object({ email: z.email() }).nullable();
+
+export const mobilePermissionsSchema = z.object({
+  sales: z.boolean(),
+  inventory: z.boolean(),
+  tickets: z.boolean(),
+  expenses: z.boolean(),
+  vouchers: z.boolean(),
+});
 export const mobileOperatorSchema = z.object({
   id: z.uuid(),
   name: z.string().trim().min(2).max(60),
-  role: mobileOperatorRoleSchema,
+  permissions: mobilePermissionsSchema,
   active: z.boolean(),
   createdAt: z.number().int().nonnegative(),
   updatedAt: z.number().int().nonnegative(),
@@ -248,13 +322,13 @@ export const mobileOperatorListSchema = z.array(mobileOperatorSchema);
 export const createMobileOperatorInputSchema = z.object({
   name: z.string().trim().min(2).max(60),
   password: z.string().min(6).max(128),
-  role: mobileOperatorRoleSchema,
+  permissions: mobilePermissionsSchema,
 });
 export const updateMobileOperatorInputSchema = z.object({
   operatorId: z.uuid(),
   name: z.string().trim().min(2).max(60).optional(),
   password: z.string().min(6).max(128).optional(),
-  role: mobileOperatorRoleSchema.optional(),
+  permissions: mobilePermissionsSchema.optional(),
   active: z.boolean().optional(),
 });
 export const endMobileOperatorSessionsInputSchema = z.object({
@@ -299,6 +373,7 @@ export const cloudSyncQueueSchema = z.object({
   inboxReceived: z.number().int().nonnegative(),
   inboxAwaitingApply: z.number().int().nonnegative(),
   conflictsOpen: z.number().int().nonnegative(),
+  printQueueError: z.string().nullable(),
 });
 
 export const cloudSyncConflictSchema = z.object({
@@ -324,6 +399,7 @@ export const cloudMonitorConflictSchema = z.object({
 export const cloudMonitorSchema = z.object({
   endpoint: z.url(),
   checkedAt: z.number().int().nonnegative(),
+  localDeviceId: z.string().min(1).max(80),
   activeDevices: z.array(cloudMonitorDeviceSchema),
   recentCommands: z.array(cloudMonitorCommandSchema),
   recentTransport: z.array(cloudMonitorTransportSchema),
@@ -337,7 +413,13 @@ export const cloudMonitorSchema = z.object({
   localConflicts: z.array(cloudSyncConflictSchema),
 });
 
-export const backupKindSchema = z.enum(['automatic', 'event-close', 'manual', 'pre-restore']);
+export const backupKindSchema = z.enum([
+  'automatic',
+  'event-close',
+  'manual',
+  'pre-restore',
+  'pre-event-reset',
+]);
 export const backupIntegritySchema = z.enum(['valid', 'invalid']);
 
 export const backupRecordSchema = z.object({
@@ -379,6 +461,8 @@ export type ChangeEventStatusInput = z.infer<typeof changeEventStatusInputSchema
 export type DeleteEventInput = z.infer<typeof deleteEventInputSchema>;
 export type EventDeletionResult = z.infer<typeof eventDeletionResultSchema>;
 export type SetActiveEventInput = z.infer<typeof setActiveEventInputSchema>;
+export type SetGlobalEventInput = z.infer<typeof setGlobalEventInputSchema>;
+export type ResetGlobalEventInput = z.infer<typeof resetGlobalEventInputSchema>;
 export type SessionState = z.infer<typeof sessionStateSchema>;
 export type SwitchProfileInput = z.infer<typeof switchProfileInputSchema>;
 export type ChangeProductionPasswordInput = z.infer<typeof changeProductionPasswordInputSchema>;
@@ -388,13 +472,22 @@ export type UpdatePaymentTerminalSettingsInput = z.infer<
 >;
 export type OperationResult = z.infer<typeof operationResultSchema>;
 export type CloudSyncStatus = z.infer<typeof cloudSyncStatusSchema>;
-export type MobileOperatorRole = z.infer<typeof mobileOperatorRoleSchema>;
+export type DesktopEnrollment = z.infer<typeof desktopEnrollmentSchema>;
+export type ExchangeDesktopEnrollmentInput = z.infer<typeof exchangeDesktopEnrollmentInputSchema>;
+export type DesktopDevice = z.infer<typeof desktopDeviceSchema>;
+export type RevokeDesktopDeviceInput = z.infer<typeof revokeDesktopDeviceInputSchema>;
+export type PrintStation = z.infer<typeof printStationSchema>;
+export type PrintStationInput = z.infer<typeof printStationInputSchema>;
+export type OwnerCredentials = z.infer<typeof ownerCredentialsSchema>;
+export type OwnerSession = z.infer<typeof ownerSessionSchema>;
+export type MobilePermissions = z.infer<typeof mobilePermissionsSchema>;
 export type MobileOperator = z.infer<typeof mobileOperatorSchema>;
 export type CreateMobileOperatorInput = z.infer<typeof createMobileOperatorInputSchema>;
 export type UpdateMobileOperatorInput = z.infer<typeof updateMobileOperatorInputSchema>;
 export type EndMobileOperatorSessionsInput = z.infer<typeof endMobileOperatorSessionsInputSchema>;
 export type DeleteMobileOperatorInput = z.infer<typeof deleteMobileOperatorInputSchema>;
 export type CloudMonitor = z.infer<typeof cloudMonitorSchema>;
+export type CloudSyncQueue = z.infer<typeof cloudSyncQueueSchema>;
 export type BackupKind = z.infer<typeof backupKindSchema>;
 export type BackupRecord = z.infer<typeof backupRecordSchema>;
 export type BackupState = z.infer<typeof backupStateSchema>;
@@ -432,6 +525,19 @@ export interface GtrzDesktopApi {
     ): Promise<PaymentTerminalSettings>;
     getCloudSyncStatus(): Promise<CloudSyncStatus>;
     getCloudMonitor(): Promise<CloudMonitor>;
+    getLocalQueue(): Promise<CloudSyncQueue>;
+    getOwnerSession(): Promise<OwnerSession>;
+    registerOwner(input: OwnerCredentials): Promise<OperationResult>;
+    signInOwner(input: OwnerCredentials): Promise<OwnerSession>;
+    signOutOwner(): Promise<OperationResult>;
+    createDesktopEnrollment(): Promise<DesktopEnrollment>;
+    exchangeDesktopEnrollment(input: ExchangeDesktopEnrollmentInput): Promise<OperationResult>;
+    listDesktopDevices(): Promise<readonly DesktopDevice[]>;
+    revokeDesktopDevice(input: RevokeDesktopDeviceInput): Promise<OperationResult>;
+    getPrintStation(eventId: string): Promise<PrintStation>;
+    setPrintStation(input: PrintStationInput): Promise<PrintStation>;
+    setGlobalEvent(input: SetGlobalEventInput): Promise<SessionState>;
+    resetGlobalEvent(input: ResetGlobalEventInput): Promise<OperationResult>;
     listMobileOperators(): Promise<readonly MobileOperator[]>;
     createMobileOperator(input: CreateMobileOperatorInput): Promise<MobileOperator>;
     updateMobileOperator(input: UpdateMobileOperatorInput): Promise<MobileOperator>;

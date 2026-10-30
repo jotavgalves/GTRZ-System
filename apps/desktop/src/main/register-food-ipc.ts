@@ -1,6 +1,7 @@
 import { ipcMain } from 'electron';
 import {
   archiveFoodSupplierInputSchema,
+  deleteFoodSupplierInputSchema,
   configureFoodInputSchema,
   createExternalFoodItemInputSchema,
   createFoodSupplierInputSchema,
@@ -11,6 +12,7 @@ import {
 } from '@gtrz/contracts';
 import {
   archiveFoodSupplier,
+  deleteFoodSupplier,
   configureFood,
   createExternalFoodItem,
   createFoodSupplier,
@@ -27,6 +29,7 @@ export function registerFoodIpcHandlers(options: {
     IPC_CHANNELS.foodCreateSupplier,
     IPC_CHANNELS.foodUpdateSupplier,
     IPC_CHANNELS.foodArchiveSupplier,
+    IPC_CHANNELS.foodDeleteSupplier,
     IPC_CHANNELS.foodCreateExternalItem,
   ])
     ipcMain.removeHandler(channel);
@@ -53,6 +56,9 @@ export function registerFoodIpcHandlers(options: {
       options.getDatabase(),
       archiveFoodSupplierInputSchema.parse(payload).supplierId,
     );
+  });
+  ipcMain.handle(IPC_CHANNELS.foodDeleteSupplier, (_event, payload: unknown) => {
+    deleteFoodSupplier(options.getDatabase(), deleteFoodSupplierInputSchema.parse(payload));
   });
   ipcMain.handle(IPC_CHANNELS.foodCreateExternalItem, (_event, payload: unknown) =>
     foodStateSchema.parse(

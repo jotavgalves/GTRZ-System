@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 
 import type {
   CreateProductInput,
@@ -10,6 +10,7 @@ import type {
 } from '@gtrz/contracts';
 
 import { useRealtimeReload } from '../../shared/realtime/useRealtimeReload';
+import { getCachedViewState, setCachedViewState } from '../../shared/navigation/view-state-cache';
 
 interface InventoryViewState {
   readonly state: InventoryState | null;
@@ -33,8 +34,9 @@ function getErrorMessage(error: unknown): string {
 }
 
 export function useInventory(): InventoryViewState {
-  const [state, setState] = useState<InventoryState | null>(null);
-  const [loading, setLoading] = useState(true);
+  const initialState = useRef(getCachedViewState<InventoryState>('inventory')).current;
+  const [state, setState] = useState<InventoryState | null>(() => initialState);
+  const [loading, setLoading] = useState(() => initialState === null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
@@ -43,7 +45,7 @@ export function useInventory(): InventoryViewState {
     if (!silent) setLoading(true);
     setError(null);
     try {
-      setState(await window.gtrz.inventory.getState());
+      setState(setCachedViewState('inventory', await window.gtrz.inventory.getState()));
     } catch (loadError: unknown) {
       setError(getErrorMessage(loadError));
     } finally {
@@ -52,8 +54,8 @@ export function useInventory(): InventoryViewState {
   }, []);
 
   useEffect(() => {
-    void reload();
-  }, [reload]);
+    void reload(initialState !== null);
+  }, [initialState, reload]);
   useRealtimeReload(reload);
 
   const run = useCallback(
@@ -78,7 +80,10 @@ export function useInventory(): InventoryViewState {
 
   const createCategory = useCallback(
     async (name: string): Promise<void> => {
-      await run(() => window.gtrz.inventory.createCategory({ name, engine: 'catalog' }), 'Categoria criada.');
+      await run(
+        () => window.gtrz.inventory.createCategory({ name, engine: 'catalog' }),
+        'Categoria criada.',
+      );
     },
     [run],
   );

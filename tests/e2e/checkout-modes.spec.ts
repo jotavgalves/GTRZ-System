@@ -2,6 +2,8 @@ import { expect, test } from '@playwright/test';
 
 import {
   closeElectronApplication,
+  activateEvent,
+  createInventoryCategory,
   ensureProduction,
   launchElectronApplication,
 } from './electron-app';
@@ -22,10 +24,10 @@ test('SMK-CHK-001 — só exige alocação manual no pagamento misto', async () 
     await window.getByRole('link', { name: 'Eventos' }).click();
     await window.getByPlaceholder('Ex.: La Rumba Neon — Agosto').fill(eventName);
     await window.getByRole('button', { name: 'Criar evento' }).click();
+    await activateEvent(window, eventName);
 
     await window.getByRole('link', { name: 'Estoque' }).click();
-    await window.getByPlaceholder('Ex.: Cervejas').fill(categoryName);
-    await window.getByRole('button', { name: 'Criar categoria' }).click();
+    await createInventoryCategory(window, categoryName);
     const productForm = window.locator('form.product-form');
     await productForm.getByLabel('Nome', { exact: true }).fill(productName);
     await productForm.getByRole('combobox').first().selectOption({ label: categoryName });
@@ -37,6 +39,7 @@ test('SMK-CHK-001 — só exige alocação manual no pagamento misto', async () 
     await productCard.getByRole('button', { name: 'Entrada', exact: true }).click();
     const movementForm = window.locator('form.movement-form');
     await movementForm.getByLabel('Quantidade', { exact: true }).fill('2');
+    await movementForm.getByLabel('Valor total pago').fill('4.00');
     await movementForm.getByRole('button', { name: 'Registrar entrada' }).click();
 
     await window.getByRole('link', { name: 'Mesas e balcão' }).click();

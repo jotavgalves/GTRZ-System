@@ -2,6 +2,8 @@ import { expect, test } from '@playwright/test';
 
 import {
   closeElectronApplication,
+  activateEvent,
+  createInventoryCategory,
   ensureProduction,
   launchElectronApplication,
 } from './electron-app';
@@ -24,10 +26,10 @@ test('SMK-VCH-001 — vincula voucher à mesa, usa saldo parcial e restitui no e
     await window.getByPlaceholder('Ex.: La Rumba Neon — Agosto').fill(eventName);
     await window.getByRole('button', { name: 'Criar evento' }).click();
     await expect(window.getByText(eventName, { exact: true }).first()).toBeVisible();
+    await activateEvent(window, eventName);
 
     await window.getByRole('link', { name: 'Estoque' }).click();
-    await window.getByPlaceholder('Ex.: Cervejas').fill(categoryName);
-    await window.getByRole('button', { name: 'Criar categoria' }).click();
+    await createInventoryCategory(window, categoryName);
     const productForm = window.locator('form.product-form');
     await productForm.getByLabel('Nome', { exact: true }).fill(productName);
     await productForm.getByRole('combobox').first().selectOption({ label: categoryName });
@@ -39,6 +41,7 @@ test('SMK-VCH-001 — vincula voucher à mesa, usa saldo parcial e restitui no e
     await productCard.getByRole('button', { name: 'Entrada', exact: true }).click();
     const movementForm = window.locator('form.movement-form');
     await movementForm.getByLabel('Quantidade', { exact: true }).fill('3');
+    await movementForm.getByLabel('Valor total pago').fill('6.00');
     await movementForm.getByRole('button', { name: 'Registrar entrada' }).click();
     await expect(productCard.getByText('3 un.', { exact: true })).toBeVisible();
 
@@ -65,7 +68,8 @@ test('SMK-VCH-001 — vincula voucher à mesa, usa saldo parcial e restitui no e
     await voucherSelect.selectOption(voucherCode);
     await expect(window.getByText('Saldo disponível', { exact: true })).toBeVisible();
     await window.getByLabel('Valor a utilizar').fill('4.00');
-    await expect(window.getByText('Saldo a pagar: R$ 6,00', { exact: false })).toBeVisible();
+    await expect(window.getByText('Valor cobrado', { exact: true })).toBeVisible();
+    await expect(window.getByText('R$ 6,00', { exact: true }).last()).toBeVisible();
     await window.getByLabel('Valor recebido', { exact: true }).fill('10.00');
     await expect(window.getByText('Troco: R$ 4,00', { exact: true })).toBeVisible();
     await window.getByRole('button', { name: 'Concluir venda' }).click();

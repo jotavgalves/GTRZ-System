@@ -6,7 +6,16 @@ import {
   changeEventStatusInputSchema,
   changeProductionPasswordInputSchema,
   cloudSyncStatusSchema,
+  cloudSyncQueueSchema,
   cloudMonitorSchema,
+  ownerCredentialsSchema,
+  ownerSessionSchema,
+  desktopEnrollmentSchema,
+  desktopDeviceListSchema,
+  exchangeDesktopEnrollmentInputSchema,
+  revokeDesktopDeviceInputSchema,
+  printStationInputSchema,
+  printStationSchema,
   createEventInputSchema,
   createMobileOperatorInputSchema,
   deleteMobileOperatorInputSchema,
@@ -18,10 +27,12 @@ import {
   IPC_CHANNELS,
   operationResultSchema,
   paymentTerminalSettingsSchema,
+  resetGlobalEventInputSchema,
   renameEventInputSchema,
   restoreBackupResultSchema,
   sessionStateSchema,
   setActiveEventInputSchema,
+  setGlobalEventInputSchema,
   switchProfileInputSchema,
   switchRuntimeEnvironmentInputSchema,
   systemInfoSchema,
@@ -63,6 +74,7 @@ import { registerVoucherIpcHandlers } from './register-voucher-ipc';
 import { ThermalPrintService } from './thermal-print-service';
 
 interface RegisterIpcOptions {
+  readonly receiptArchiveDirectory: string;
   readonly getDatabase: () => DatabaseContext;
   readonly databaseReady: () => boolean;
   readonly backupService: BackupService;
@@ -86,6 +98,15 @@ const CONTROL_CHANNELS = [
   IPC_CHANNELS.settingsUpdatePaymentTerminal,
   IPC_CHANNELS.settingsGetCloudSyncStatus,
   IPC_CHANNELS.settingsGetCloudMonitor,
+  IPC_CHANNELS.settingsGetLocalQueue,
+  IPC_CHANNELS.settingsCreateDesktopEnrollment,
+  IPC_CHANNELS.settingsExchangeDesktopEnrollment,
+  IPC_CHANNELS.settingsListDesktopDevices,
+  IPC_CHANNELS.settingsRevokeDesktopDevice,
+  IPC_CHANNELS.settingsGetPrintStation,
+  IPC_CHANNELS.settingsSetPrintStation,
+  IPC_CHANNELS.settingsSetGlobalEvent,
+  IPC_CHANNELS.settingsResetGlobalEvent,
   IPC_CHANNELS.settingsListMobileOperators,
   IPC_CHANNELS.settingsCreateMobileOperator,
   IPC_CHANNELS.settingsUpdateMobileOperator,
@@ -98,12 +119,15 @@ const CONTROL_CHANNELS = [
   IPC_CHANNELS.backupsVerify,
 ] as const;
 
-export function registerIpcHandlers(options: RegisterIpcOptions): void {
+export function registerIpcHandlers(options: RegisterIpcOptions): ThermalPrintService {
   for (const channel of CONTROL_CHANNELS) {
     ipcMain.removeHandler(channel);
   }
 
-  const printService = new ThermalPrintService({ getDatabase: options.getDatabase });
+  const printService = new ThermalPrintService({
+    archiveDirectory: options.receiptArchiveDirectory,
+    getDatabase: options.getDatabase,
+  });
   registerFoodIpcHandlers({ getDatabase: options.getDatabase });
 
   ipcMain.handle(IPC_CHANNELS.systemGetInfo, (): SystemInfo => {
@@ -207,6 +231,94 @@ export function registerIpcHandlers(options: RegisterIpcOptions): void {
     });
   });
 
+  ipcMain.handle(IPC_CHANNELS.settingsGetLocalQueue, () =>
+    cloudSyncQueueSchema.parse(options.cloudSyncService.getQueueState(options.getDatabase())),
+  );
+
+  ipcMain.handle(IPC_CHANNELS.settingsGetOwnerSession, () =>
+    ownerSessionSchema.parse(options.cloudSyncService.getOwnerSession()),
+  );
+  ipcMain.handle(IPC_CHANNELS.settingsRegisterOwner, async (_event, payload: unknown) => {
+    const input = ownerCredentialsSchema.parse(payload);
+    await options.cloudSyncService.registerOwnerAccount(input.email, input.password);
+    return operationResultSchema.parse({ success: true });
+  });
+  ipcMain.handle(IPC_CHANNELS.settingsSignInOwner, async (_event, payload: unknown) => {
+    const input = ownerCredentialsSchema.parse(payload);
+    return ownerSessionSchema.parse(
+      await options.cloudSyncService.signInOwner(input.email, input.password),
+    );
+  });
+  ipcMain.handle(IPC_CHANNELS.settingsSignOutOwner, () => {
+    options.cloudSyncService.signOutOwner();
+    return operationResultSchema.parse({ success: true });
+  });
+
+  ipcMain.handle(IPC_CHANNELS.settingsCreateDesktopEnrollment, async () => {
+    if (getSessionState(options.getDatabase()).profile !== 'production') {
+      throw new Error('Entre no perfil Produção para adicionar outro computador.');
+    }
+    return desktopEnrollmentSchema.parse(await options.cloudSyncService.createDesktopEnrollment());
+  });
+
+  ipcMain.handle(
+    IPC_CHANNELS.settingsExchangeDesktopEnrollment,
+    async (_event, payload: unknown) => {
+      await options.cloudSyncService.exchangeDesktopEnrollment(
+        exchangeDesktopEnrollmentInputSchema.parse(payload).enrollmentCode,
+      );
+      return operationResultSchema.parse({ success: true });
+    },
+  );
+
+  ipcMain.handle(IPC_CHANNELS.settingsListDesktopDevices, async () => {
+    if (getSessionState(options.getDatabase()).profile !== 'production') {
+      throw new Error('Entre no perfil Produção para administrar computadores vinculados.');
+    }
+    return desktopDeviceListSchema.parse(await options.cloudSyncService.listDesktopDevices());
+  });
+
+  ipcMain.handle(IPC_CHANNELS.settingsRevokeDesktopDevice, async (_event, payload: unknown) => {
+    if (getSessionState(options.getDatabase()).profile !== 'production') {
+      throw new Error('Entre no perfil Produção para bloquear outro computador.');
+    }
+    await options.cloudSyncService.revokeDesktopDevice(
+      revokeDesktopDeviceInputSchema.parse(payload).deviceId,
+    );
+    return operationResultSchema.parse({ success: true });
+  });
+
+  ipcMain.handle(IPC_CHANNELS.settingsGetPrintStation, async (_event, eventId: unknown) => {
+    if (typeof eventId !== 'string') throw new Error('Evento inválido.');
+    return printStationSchema.parse(await options.cloudSyncService.getPrintStation(eventId));
+  });
+
+  ipcMain.handle(IPC_CHANNELS.settingsSetPrintStation, async (_event, payload: unknown) => {
+    if (getSessionState(options.getDatabase()).profile !== 'production') {
+      throw new Error('Entre no perfil Produção para escolher a estação de impressão.');
+    }
+    const input = printStationInputSchema.parse(payload);
+    return printStationSchema.parse(
+      await options.cloudSyncService.setPrintStation(input.eventId, input.deviceId),
+    );
+  });
+
+  ipcMain.handle(IPC_CHANNELS.settingsSetGlobalEvent, async (_event, payload: unknown) => {
+    const database = options.getDatabase();
+    const input = setGlobalEventInputSchema.parse(payload);
+    await options.cloudSyncService.setGlobalEvent(database, input.eventId);
+    return sessionStateSchema.parse(getSessionState(database));
+  });
+
+  ipcMain.handle(IPC_CHANNELS.settingsResetGlobalEvent, async (_event, payload: unknown) => {
+    const database = options.getDatabase();
+    await options.cloudSyncService.resetGlobalEvent(
+      database,
+      resetGlobalEventInputSchema.parse(payload),
+    );
+    return operationResultSchema.parse({ success: true });
+  });
+
   ipcMain.handle(IPC_CHANNELS.settingsListMobileOperators, async () =>
     options.cloudSyncService.listMobileOperators(),
   );
@@ -268,8 +380,14 @@ export function registerIpcHandlers(options: RegisterIpcOptions): void {
   registerPrintingIpcHandlers({ printService });
   registerOperationsIpcHandlers({
     getDatabase: options.getDatabase,
-    printAfterSale: (orderId) => printService.printAfterSale(orderId),
+    printAfterSale: () => {
+      options.cloudSyncService.requestImmediateFlush(
+        options.getDatabase,
+        () => getSessionState(options.getDatabase()).activeEvent?.id ?? null,
+      );
+    },
   });
   registerTicketIpcHandlers({ getDatabase: options.getDatabase });
   registerVoucherIpcHandlers({ getDatabase: options.getDatabase });
+  return printService;
 }

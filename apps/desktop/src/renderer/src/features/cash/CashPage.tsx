@@ -28,6 +28,9 @@ export function CashPage(): React.JSX.Element {
     recordMovement,
     closeRegister,
   } = useCash();
+  if (loading && state === null) {
+    return <div className="route-state">Carregando caixa…</div>;
+  }
   const registerStatus =
     state?.register === null || state === null ? 'not-opened' : state.register.status;
   const sales = state?.salesByMethod;
@@ -39,7 +42,8 @@ export function CashPage(): React.JSX.Element {
           <span className="eyebrow">Conciliação derivada das operações</span>
           <h1>Caixa administrativo</h1>
           <p>
-            Resultado = faturamento − despesas registradas − custo do estoque − taxas da maquininha. Pagamentos e reembolsos mudam o caixa somente quando são lançados.
+            Resultado = faturamento − despesas registradas − custo do estoque − taxas da maquininha.
+            Pagamentos e reembolsos mudam o caixa somente quando são lançados.
           </p>
         </div>
         <button
@@ -168,8 +172,14 @@ export function CashPage(): React.JSX.Element {
                   <dt>Despesas pagas em dinheiro</dt>
                   <dd>{formatMoney(state.cashExpensesCents)}</dd>
                 </div>
-                <div><dt>Reembolsos em dinheiro</dt><dd>{formatMoney(state.cashCapitalReimbursementsCents)}</dd></div>
-                <div><dt>Devoluções em dinheiro</dt><dd>{formatMoney(state.cashRefundsCents)}</dd></div>
+                <div>
+                  <dt>Reembolsos em dinheiro</dt>
+                  <dd>{formatMoney(state.cashCapitalReimbursementsCents)}</dd>
+                </div>
+                <div>
+                  <dt>Devoluções em dinheiro</dt>
+                  <dd>{formatMoney(state.cashRefundsCents)}</dd>
+                </div>
                 <div>
                   <dt>Custo aportado no estoque</dt>
                   <dd>{formatMoney(state.stockCostCents)}</dd>

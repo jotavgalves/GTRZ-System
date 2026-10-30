@@ -76,6 +76,12 @@ export const addVoucherBalanceInputSchema = z.object({
   amountCents: z.number().int().positive(),
 });
 
+export const setVoucherTotalInputSchema = z.object({
+  voucherId: z.uuid(),
+  initialBalanceCents: z.number().int().positive(),
+  reason: z.string().trim().min(2).max(250),
+});
+
 export const deleteVoucherInputSchema = z.object({
   voucherId: z.uuid(),
   reason: z.string().trim().min(2).max(250),
@@ -95,6 +101,7 @@ export type CreateVoucherInput = z.infer<typeof createVoucherInputSchema>;
 export type ChangeVoucherStatusInput = z.infer<typeof changeVoucherStatusInputSchema>;
 export type UpdateVoucherInput = z.infer<typeof updateVoucherInputSchema>;
 export type AddVoucherBalanceInput = z.infer<typeof addVoucherBalanceInputSchema>;
+export type SetVoucherTotalInput = z.infer<typeof setVoucherTotalInputSchema>;
 export type DeleteVoucherInput = z.infer<typeof deleteVoucherInputSchema>;
 export type DeleteVoucherResult = z.infer<typeof deleteVoucherResultSchema>;
 
@@ -104,5 +111,6 @@ export interface VoucherApi {
   changeStatus(input: ChangeVoucherStatusInput): Promise<Voucher>;
   update(input: UpdateVoucherInput): Promise<Voucher>;
   addBalance(input: AddVoucherBalanceInput): Promise<Voucher>;
+  setTotal(input: SetVoucherTotalInput): Promise<Voucher>;
   delete(input: DeleteVoucherInput): Promise<DeleteVoucherResult>;
 }

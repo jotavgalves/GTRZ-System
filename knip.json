@@ -3,7 +3,9 @@
   "workspaces": {
     ".": {
       "entry": ["scripts/*.mjs", "tests/**/*.ts"],
-      "project": ["**/*.{ts,tsx,mjs}"]
+      "project": ["**/*.{ts,tsx,mjs}", "!output/**", "!tmp/**"],
+      "ignore": ["supabase/functions/**"],
+      "ignoreDependencies": ["cloudflare"]
     },
     "apps/desktop": {
       "entry": [
@@ -14,6 +16,10 @@
       ],
       "project": ["src/**/*.{ts,tsx}"],
       "ignoreDependencies": ["better-sqlite3"]
+    },
+    "apps/mobile-simulator": {
+      "entry": ["src/main/index.ts", "electron.vite.config.ts", "scripts/*.mjs"],
+      "project": ["src/**/*.{ts,tsx}", "scripts/*.mjs"]
     },
     "packages/contracts": {
       "project": ["src/**/*.ts"]

@@ -28,6 +28,9 @@ export function TicketsPage(): React.JSX.Element {
     cancelSale,
     deleteSale,
   } = useTickets();
+  if (loading && state === null) {
+    return <div className="route-state">Carregando ingressos…</div>;
+  }
   const lots = state?.lots ?? [];
   const sales = state?.sales ?? [];
   const activeSales = sales.filter((sale) => sale.status === 'active');

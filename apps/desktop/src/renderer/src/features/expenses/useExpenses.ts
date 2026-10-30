@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 
 import type {
   CreateExpenseInput,
@@ -8,6 +8,7 @@ import type {
 } from '@gtrz/contracts';
 
 import { useRealtimeReload } from '../../shared/realtime/useRealtimeReload';
+import { getCachedViewState, setCachedViewState } from '../../shared/navigation/view-state-cache';
 
 interface ExpenseViewState {
   readonly state: ExpenseState | null;
@@ -28,8 +29,9 @@ function getErrorMessage(error: unknown): string {
 }
 
 export function useExpenses(): ExpenseViewState {
-  const [state, setState] = useState<ExpenseState | null>(null);
-  const [loading, setLoading] = useState(true);
+  const initialState = useRef(getCachedViewState<ExpenseState>('expenses')).current;
+  const [state, setState] = useState<ExpenseState | null>(() => initialState);
+  const [loading, setLoading] = useState(() => initialState === null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
@@ -39,7 +41,7 @@ export function useExpenses(): ExpenseViewState {
     setError(null);
 
     try {
-      setState(await window.gtrz.expenses.getState());
+      setState(setCachedViewState('expenses', await window.gtrz.expenses.getState()));
     } catch (loadError: unknown) {
       setError(getErrorMessage(loadError));
     } finally {
@@ -48,8 +50,8 @@ export function useExpenses(): ExpenseViewState {
   }, []);
 
   useEffect(() => {
-    void reload();
-  }, [reload]);
+    void reload(initialState !== null);
+  }, [initialState, reload]);
   useRealtimeReload(reload);
 
   const run = useCallback(
@@ -78,9 +80,15 @@ export function useExpenses(): ExpenseViewState {
     [run],
   );
 
-  const recordPayment = useCallback(async (input: RecordExpensePaymentInput): Promise<void> => {
-    await run(() => window.gtrz.expenses.recordPayment(input), 'Pagamento registrado no livro financeiro.');
-  }, [run]);
+  const recordPayment = useCallback(
+    async (input: RecordExpensePaymentInput): Promise<void> => {
+      await run(
+        () => window.gtrz.expenses.recordPayment(input),
+        'Pagamento registrado no livro financeiro.',
+      );
+    },
+    [run],
+  );
 
   const updateExpense = useCallback(
     async (input: UpdateExpenseInput): Promise<void> => {

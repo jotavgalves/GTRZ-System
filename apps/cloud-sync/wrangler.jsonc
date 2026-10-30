@@ -13,11 +13,11 @@
     "bindings": [
       {
         "name": "EVENT_ROOM",
-        "class_name": "EventRoom",
+        "class_name": "EventRoomFresh",
       },
       {
         "name": "MONITOR_ROOM",
-        "class_name": "MonitorRoom",
+        "class_name": "MonitorRoomFresh",
       },
     ],
   },
@@ -29,6 +29,14 @@
     {
       "tag": "v2",
       "new_sqlite_classes": ["MonitorRoom"],
+    },
+    {
+      "tag": "v3",
+      "new_sqlite_classes": ["EventRoomFresh", "MonitorRoomFresh"],
+    },
+    {
+      "tag": "v4",
+      "deleted_classes": ["EventRoom", "MonitorRoom"],
     },
   ],
   "env": {
@@ -43,11 +51,11 @@
         "bindings": [
           {
             "name": "EVENT_ROOM",
-            "class_name": "EventRoom",
+            "class_name": "EventRoomFresh",
           },
           {
             "name": "MONITOR_ROOM",
-            "class_name": "MonitorRoom",
+            "class_name": "MonitorRoomFresh",
           },
         ],
       },
@@ -59,6 +67,14 @@
         {
           "tag": "v2",
           "new_sqlite_classes": ["MonitorRoom"],
+        },
+        {
+          "tag": "v3",
+          "new_sqlite_classes": ["EventRoomFresh", "MonitorRoomFresh"],
+        },
+        {
+          "tag": "v4",
+          "deleted_classes": ["EventRoom", "MonitorRoom"],
         },
       ],
       "vars": {

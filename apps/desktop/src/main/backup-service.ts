@@ -61,7 +61,8 @@ function isBackupKind(value: unknown): value is BackupKind {
     value === 'automatic' ||
     value === 'event-close' ||
     value === 'manual' ||
-    value === 'pre-restore'
+    value === 'pre-restore' ||
+    value === 'pre-event-reset'
   );
 }
 

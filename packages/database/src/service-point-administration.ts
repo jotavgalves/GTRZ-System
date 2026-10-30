@@ -40,7 +40,11 @@ function requireProduction(database: DatabaseContext): void {
   }
 }
 
-function requireActiveTable(database: DatabaseContext, eventId: string, servicePointId: string): ServicePointRow {
+function requireActiveTable(
+  database: DatabaseContext,
+  eventId: string,
+  servicePointId: string,
+): ServicePointRow {
   const servicePoint = database.sqlite
     .prepare(
       `SELECT id, event_id, label, type, active
@@ -60,7 +64,11 @@ function requireActiveTable(database: DatabaseContext, eventId: string, serviceP
   return servicePoint;
 }
 
-function getActiveServicePoint(database: DatabaseContext, eventId: string, id: string): DatabaseServicePoint {
+function getActiveServicePoint(
+  database: DatabaseContext,
+  eventId: string,
+  id: string,
+): DatabaseServicePoint {
   const servicePoint = listServicePoints(database, eventId).find((item) => item.id === id);
 
   if (servicePoint === undefined) {
@@ -199,7 +207,8 @@ export function deleteServicePoint(
   const preservedOrdersCount = orders.filter(
     (order) => !cancellableOrders.some((candidate) => candidate.id === order.id),
   ).length;
-  const voucherIds = input.mode === 'delete-all' ? listBoundVoucherIds(database, servicePoint.id) : [];
+  const voucherIds =
+    input.mode === 'delete-all' ? listBoundVoucherIds(database, servicePoint.id) : [];
 
   for (const order of cancellableOrders) {
     cancelOrder(database, {
