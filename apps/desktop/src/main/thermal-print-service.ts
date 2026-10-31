@@ -144,11 +144,15 @@ export class ThermalPrintService {
     // Never hand a receipt to Windows' implicit default target. On a new PC it
     // is commonly "Microsoft Print to PDF", which opens a save dialog and can
     // make a completed sale look as if it was printed by the thermal station.
-    await this.archiveOrder(orderId).catch(() => undefined);
-    if (isPdfOutput(getPrintingSettings(this.#getDatabase()))) return;
+    if (isPdfOutput(getPrintingSettings(this.#getDatabase()))) {
+      await this.archiveOrder(orderId).catch(() => undefined);
+      return;
+    }
     const registration = await this.getCloudPrinterRegistration();
-    if (!registration.enabled) return;
-    await this.#printOrder(orderId, false, false).catch(() => undefined);
+    if (registration.enabled) {
+      await this.#printOrder(orderId, false, false).catch(() => undefined);
+    }
+    await this.archiveOrder(orderId).catch(() => undefined);
   }
 
   async archiveOrder(orderId: string): Promise<void> {
