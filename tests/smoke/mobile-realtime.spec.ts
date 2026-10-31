@@ -11,6 +11,7 @@ const cashierClientScript = cashierSource.slice(
 function client() {
   const intervals = new Map<number, () => void>();
   const timeouts = new Map<number, () => void>();
+  const reconnectDelays: number[] = [];
   let id = 0;
   class Socket {
     static OPEN = 1;
@@ -38,6 +39,9 @@ function client() {
     generation: 1,
     streamGeneration: 1,
     realtimeSocket: null as Socket | null,
+    realtimeTopic: null as string | null,
+    realtimeJoinedAt: 0,
+    reconnectAttempts: 0,
     heartbeatTimer: null,
     reconnectTimer: null,
     sessionRefreshTimer: null,
@@ -45,10 +49,11 @@ function client() {
   };
   const refresh = vi.fn(() => Promise.resolve());
   const online = vi.fn();
+  const topic = vi.fn(() => Promise.resolve({ topic: 'event:test' }));
   const context = {
     state,
     WebSocket: Socket,
-    api: vi.fn(() => Promise.resolve({ topic: 'event:test' })),
+    api: topic,
     canonicalRealtimeEndpoint: 'wss://example.test',
     refreshSessionAndData: refresh,
     online,
@@ -59,7 +64,8 @@ function client() {
       return id;
     },
     clearInterval: (key: number) => intervals.delete(key),
-    setTimeout: (fn: () => void) => {
+    setTimeout: (fn: () => void, delay: number) => {
+      reconnectDelays.push(delay);
       timeouts.set(++id, fn);
       return id;
     },
@@ -79,7 +85,17 @@ function client() {
     openRealtime: (generation: number, streamGeneration: number) => Promise<void>;
     stopStreams: () => void;
   };
-  return { ...api, state, intervals, timeouts, refresh, online, sockets: Socket.sockets };
+  return {
+    ...api,
+    state,
+    intervals,
+    timeouts,
+    reconnectDelays,
+    refresh,
+    online,
+    topic,
+    sockets: Socket.sockets,
+  };
 }
 
 describe('mobile realtime recovery', () => {
@@ -145,5 +161,16 @@ describe('mobile realtime recovery', () => {
     expect(c.intervals.size).toBe(0);
     expect(c.timeouts.size).toBe(0);
     expect(c.online).not.toHaveBeenCalled();
+  });
+  it('reuses the session topic and backs off when the socket repeatedly fails', async () => {
+    const c = client();
+    await c.openRealtime(1, 1);
+    c.sockets[0]!.close();
+    expect(c.reconnectDelays).toEqual([1500]);
+    c.timeouts.values().next().value!();
+    await vi.waitFor(() => expect(c.sockets).toHaveLength(2));
+    c.sockets[1]!.close();
+    expect(c.reconnectDelays).toEqual([1500, 3000]);
+    expect(c.topic).toHaveBeenCalledOnce();
   });
 });

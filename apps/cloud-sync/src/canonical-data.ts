@@ -29,10 +29,22 @@ export async function fetchCanonicalData(
   const pathname = new URL(request.url).pathname;
   if (!pathname.includes('/v1/mobile/')) return fetcher(request);
   const catalogResponse = /\/mobile\/(refresh|catalog)$/.test(pathname);
-  // A sale waits on the event row lock while desktops sync, so it gets the longest deadline:
-  // cutting it short leaves an accepted sale looking pending on the phone.
-  const saleRequest = /\/mobile\/sales(\/status)?$/.test(pathname);
-  const deadline = timeoutMs ?? (saleRequest ? 45_000 : catalogResponse ? 30_000 : 12_000);
+  // Mutations may wait on the event row lock while desktops sync. Keep their
+  // deadline longer than reads, but return sale status promptly for recovery.
+  const saleRequest = pathname.endsWith('/mobile/sales');
+  const statusRequest = pathname.endsWith('/mobile/sales/status');
+  const mutationRequest = request.method !== 'GET';
+  const deadline =
+    timeoutMs ??
+    (saleRequest
+      ? 45_000
+      : statusRequest
+        ? 12_000
+        : catalogResponse
+          ? 30_000
+          : mutationRequest
+            ? 30_000
+            : 12_000);
   const controller = new AbortController();
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<never>((_resolve, reject) => {
