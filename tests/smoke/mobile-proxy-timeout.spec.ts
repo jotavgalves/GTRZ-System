@@ -20,6 +20,36 @@ if (!proxy) throw new Error('Canonical proxy export missing');
 const endpoint = 'https://example.test/functions/v1/gtrz-sync-fallback/v1/mobile/sales';
 
 describe('mobile canonical proxy', () => {
+  it.each(['refresh', 'catalog'])(
+    'removes inline images from %s without changing sale fields',
+    async (route) => {
+      const catalog = {
+        products: [
+          {
+            productId: 'p1',
+            label: 'Arepa',
+            quantity: 8,
+            unitPriceCents: 2000,
+            imageDataUrl: 'data:image/png;base64,' + 'A'.repeat(100000),
+            fallbackIcon: 'utensils',
+          },
+        ],
+      };
+      const payload =
+        route === 'refresh' ? { catalog, operator: { id: 'operator' }, eventId: 'event' } : catalog;
+      const response = await proxy(new Request(endpoint.replace(/sales$/, route)), () =>
+        Promise.resolve(Response.json(payload)),
+      );
+      const text = await response.text();
+      expect(text.length).toBeLessThan(1000);
+      expect(text).not.toContain('imageDataUrl');
+      expect(text).toContain('"quantity":8');
+      expect(text).toContain('"unitPriceCents":2000');
+      expect(text).toContain('"fallbackIcon":"utensils"');
+      if (route === 'refresh') expect(text).toContain('"eventId":"event"');
+    },
+  );
+
   it.each(['headers', 'body'])(
     'returns 504 when the upstream stalls at %s without retrying',
     async (stage) => {
