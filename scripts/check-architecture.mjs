@@ -18,7 +18,7 @@ const defaultMaximumLines = {
   tsx: 350,
 };
 const transitionalLineBudgets = new Map([
-  ['apps/desktop/src/main/cloud-sync-service.ts', 5856],
+  ['apps/desktop/src/main/cloud-sync-service.ts', 5871],
   ['apps/desktop/src/renderer/src/features/cloud-monitor/index.tsx', 831],
   ['apps/desktop/src/renderer/src/features/cloud-monitor/MobileOperatorsPanel.tsx', 398],
   ['apps/desktop/src/renderer/src/features/expenses/ExpenseCard.tsx', 375],

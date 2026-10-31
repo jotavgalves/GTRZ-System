@@ -2534,6 +2534,9 @@ export class CloudSyncService {
     const current = database.sqlite
       .prepare('SELECT value FROM sync_state WHERE key = ?')
       .get(stateKey) as { readonly value: string } | undefined;
+    // Reading the cloud state downloads the whole catalogue, photos included, so it only happens
+    // when there is something new to publish.
+    if (this.#projectionIsCurrent(stateKey, fingerprint, current?.value)) return;
     const canonicalState = canonicalCloud
       ? await this.#readCanonicalEventState(activeEventId, pairingKey)
       : null;
@@ -2719,6 +2722,7 @@ export class CloudSyncService {
     const current = database.sqlite
       .prepare('SELECT value FROM sync_state WHERE key = ?')
       .get(stateKey) as { readonly value: string } | undefined;
+    if (this.#projectionIsCurrent(stateKey, fingerprint, current?.value)) return;
     const canonicalState = canonicalCloud
       ? await this.#readCanonicalEventState(activeEventId, pairingKey)
       : null;
@@ -2757,6 +2761,17 @@ export class CloudSyncService {
       this.#canonicalProjectionPublished.add(stateKey);
       this.#canonicalProtectedProjectionFingerprints.delete(stateKey);
     }
+  }
+
+  #projectionIsCurrent(
+    stateKey: string,
+    fingerprint: string,
+    storedFingerprint: string | undefined,
+  ): boolean {
+    return (
+      this.#canonicalProtectedProjectionFingerprints.get(stateKey) === fingerprint ||
+      (this.#canonicalProjectionPublished.has(stateKey) && storedFingerprint === fingerprint)
+    );
   }
 
   #projectionArrayHasEntries(projection: unknown, key: string): boolean {
