@@ -69,6 +69,10 @@ function saleClient(
     navigator: { onLine: online },
     encodeURIComponent,
     JSON,
+    setTimeout: (callback: () => void) => {
+      callback();
+      return 0;
+    },
   };
   const source = functions.map((name) => {
     const line =
@@ -143,6 +147,26 @@ describe('mobile sale uncertainty', () => {
     expect(posts[0]).toBe(posts[1]);
     expect(client.storage.size).toBe(0);
     expect(client.notices).toContain('Venda confirmada');
+  });
+
+  it('confirms a slow sale on a later status check instead of leaving it pending', async () => {
+    let statusChecks = 0;
+    const client = saleClient((path) => {
+      if (!path.includes('/status')) {
+        const timeout = new Error('A central não confirmou a operação.') as Error & {
+          status: number;
+        };
+        timeout.status = 504;
+        throw timeout;
+      }
+      return Promise.resolve({ accepted: ++statusChecks >= 2 });
+    });
+
+    await client.charge();
+    expect(statusChecks).toBe(2);
+    expect(client.storage.size).toBe(0);
+    expect(client.notices).toContain('Venda confirmada');
+    expect(client.notices).not.toContain('Venda aguardando confirmação');
   });
 
   it('recovers a saved sale after reopening and checks the central before resending', async () => {
