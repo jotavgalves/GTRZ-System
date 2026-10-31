@@ -24,6 +24,8 @@ interface SaleClient {
   storage: Map<string, string>;
   notices: string[];
   submitting: () => boolean;
+  addItem: () => void;
+  backgroundLoads: () => number;
 }
 
 function saleClient(
@@ -32,6 +34,7 @@ function saleClient(
   online = true,
 ): SaleClient {
   let nextId = 0;
+  let backgroundLoads = 0;
   const notices: string[] = [];
   const state = {
     cart: new Map([['product:drink', { productId: 'drink', itemKind: 'product', quantity: 1 }]]),
@@ -64,7 +67,10 @@ function saleClient(
     drawSales: () => undefined,
     show: (title: string) => notices.push(title),
     money: (value: number) => String(value),
-    load: () => Promise.resolve(),
+    load: () => {
+      backgroundLoads++;
+      return Promise.resolve();
+    },
     document: { querySelector: () => null },
     navigator: { onLine: online },
     encodeURIComponent,
@@ -107,10 +113,41 @@ function saleClient(
     storage,
     notices,
     submitting: () => state.saleSubmitting,
+    addItem: () => {
+      state.cart.set('product:drink', { productId: 'drink', itemKind: 'product', quantity: 1 });
+    },
+    backgroundLoads: () => backgroundLoads,
   };
 }
 
 describe('mobile sale uncertainty', () => {
+  it('confirms two consecutive sales without starting duplicate catalog downloads between them', async () => {
+    const commandIds: string[] = [];
+    const client = saleClient((_path, options) => {
+      const payload = JSON.parse(options?.body ?? '{}') as { commandId: string; saleId: string };
+      commandIds.push(payload.commandId);
+      return Promise.resolve({
+        status: 'accepted',
+        response: {
+          commandId: payload.commandId,
+          event: {
+            commandId: payload.commandId,
+            payload: { action: 'operations.order-paid', entityId: payload.saleId },
+          },
+        },
+      });
+    });
+    await client.charge();
+    client.addItem();
+    await client.charge();
+    expect(commandIds).toHaveLength(2);
+    expect(new Set(commandIds).size).toBe(2);
+    expect(client.backgroundLoads()).toBe(0);
+    expect(client.storage.size).toBe(0);
+    expect(client.submitting()).toBe(false);
+    expect(client.notices.filter((notice) => notice === 'Venda confirmada')).toHaveLength(2);
+  });
+
   it('parses the complete embedded cashier script', () => {
     const start = cashierClientScript.indexOf('String.raw`') + 'String.raw`'.length;
     const end = cashierClientScript.lastIndexOf('`;');
