@@ -2,6 +2,7 @@ import { z } from 'zod';
 
 import type { ComboApi } from './combos';
 import type { EventCloseApi } from './event-close';
+import type { ForceWipeGlobalEventInput, ForceWipeResult } from './force-wipe';
 import type { CapitalApi, CashApi, ExpenseApi } from './finance';
 import type { AuditApi, DashboardApi } from './insights';
 import type { InventoryApi } from './inventory';
@@ -14,6 +15,7 @@ import type { FoodApi } from './food';
 export * from './combos';
 export * from './event-close';
 export * from './finance';
+export * from './force-wipe';
 export * from './food';
 export * from './insights';
 export * from './inventory';
@@ -55,6 +57,7 @@ export const IPC_CHANNELS = {
   settingsSetPrintStation: 'settings:set-print-station',
   settingsSetGlobalEvent: 'settings:set-global-event',
   settingsResetGlobalEvent: 'settings:reset-global-event',
+  settingsForceWipeGlobalEvent: 'settings:force-wipe-global-event',
   settingsListMobileOperators: 'settings:list-mobile-operators',
   settingsCreateMobileOperator: 'settings:create-mobile-operator',
   settingsUpdateMobileOperator: 'settings:update-mobile-operator',
@@ -538,6 +541,7 @@ export interface GtrzDesktopApi {
     setPrintStation(input: PrintStationInput): Promise<PrintStation>;
     setGlobalEvent(input: SetGlobalEventInput): Promise<SessionState>;
     resetGlobalEvent(input: ResetGlobalEventInput): Promise<OperationResult>;
+    forceWipeGlobalEvent(input: ForceWipeGlobalEventInput): Promise<ForceWipeResult>;
     listMobileOperators(): Promise<readonly MobileOperator[]>;
     createMobileOperator(input: CreateMobileOperatorInput): Promise<MobileOperator>;
     updateMobileOperator(input: UpdateMobileOperatorInput): Promise<MobileOperator>;

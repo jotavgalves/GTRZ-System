@@ -30,6 +30,8 @@ import {
   IPC_CHANNELS,
   operationResultSchema,
   paymentTerminalSettingsSchema,
+  forceWipeGlobalEventInputSchema,
+  forceWipeResultSchema,
   resetGlobalEventInputSchema,
   renameEventInputSchema,
   restoreBackupResultSchema,
@@ -73,6 +75,8 @@ import {
   type SessionState,
   type SetActiveEventInput,
   type SetGlobalEventInput,
+  type ForceWipeGlobalEventInput,
+  type ForceWipeResult,
   type ResetGlobalEventInput,
   type SwitchProfileInput,
   type SwitchRuntimeEnvironmentInput,
@@ -278,6 +282,13 @@ const api: GtrzDesktopApi = {
         resetGlobalEventInputSchema.parse(input),
       );
       return operationResultSchema.parse(payload);
+    },
+    async forceWipeGlobalEvent(input: ForceWipeGlobalEventInput): Promise<ForceWipeResult> {
+      const payload: unknown = await ipcRenderer.invoke(
+        IPC_CHANNELS.settingsForceWipeGlobalEvent,
+        forceWipeGlobalEventInputSchema.parse(input),
+      );
+      return forceWipeResultSchema.parse(payload);
     },
     async listMobileOperators(): Promise<readonly MobileOperator[]> {
       const payload: unknown = await ipcRenderer.invoke(IPC_CHANNELS.settingsListMobileOperators);

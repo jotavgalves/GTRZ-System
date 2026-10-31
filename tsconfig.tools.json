@@ -23,6 +23,7 @@
     "apps/desktop/src/main/local-mobile-server.ts",
     "apps/desktop/src/main/normalize-cloud-receipt.ts",
     "apps/desktop/src/main/escpos-raster.ts",
+    "apps/desktop/src/main/force-wipe.ts",
     "apps/desktop/src/main/raw-printer.ts",
     "apps/desktop/src/main/receipt-html.ts",
     "apps/desktop/src/main/thermal-print-service.ts"

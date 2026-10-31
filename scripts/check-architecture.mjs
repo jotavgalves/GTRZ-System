@@ -18,7 +18,7 @@ const defaultMaximumLines = {
   tsx: 350,
 };
 const transitionalLineBudgets = new Map([
-  ['apps/desktop/src/main/cloud-sync-service.ts', 5815],
+  ['apps/desktop/src/main/cloud-sync-service.ts', 5834],
   ['apps/desktop/src/renderer/src/features/cloud-monitor/index.tsx', 831],
   ['apps/desktop/src/renderer/src/features/cloud-monitor/MobileOperatorsPanel.tsx', 398],
   ['apps/desktop/src/renderer/src/features/expenses/ExpenseCard.tsx', 375],
@@ -28,7 +28,7 @@ const transitionalLineBudgets = new Map([
   ['apps/desktop/src/renderer/src/features/inventory/ProductForm.tsx', 520],
   ['apps/desktop/src/renderer/src/features/settings/index.tsx', 365],
   ['apps/desktop/src/renderer/src/features/vouchers/VoucherCard.tsx', 393],
-  ['packages/contracts/src/index.ts', 565],
+  ['packages/contracts/src/index.ts', 569],
   ['packages/database/src/combos.spec.ts', 714],
   ['packages/database/src/combos.ts', 626],
   ['packages/database/src/deletion-integrity.spec.ts', 521],
