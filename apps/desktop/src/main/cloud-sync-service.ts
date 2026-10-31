@@ -426,6 +426,8 @@ export class CloudSyncService {
   #desktopPresenceEventId: string | null = null;
   #replicationRunning = true;
   #flushInFlight = false;
+  #pushChain: Promise<unknown> = Promise.resolve();
+  #salePushInFlight = false;
   #immediateFlushRequest:
     | (() => { database: DatabaseContext; activeEventId: string | null })
     | null = null;
@@ -648,7 +650,48 @@ export class CloudSyncService {
       database: getDatabase(),
       activeEventId: getActiveEventId(),
     });
+    // The periodic cycle can spend many seconds on housekeeping against a slow central, or sit in
+    // its retry pause after a failure; the sale (and the receipt the print station waits for)
+    // leaves now instead of after either.
+    if (this.#flushInFlight || Date.now() < this.#cloudRetryNotBefore)
+      void this.#pushSaleNow(getDatabase()).catch(() => undefined);
     this.#runImmediateFlush();
+  }
+
+  async #pushSaleNow(database: DatabaseContext): Promise<void> {
+    if (
+      this.#salePushInFlight ||
+      !this.#replicationRunning ||
+      this.#pendingBootstrap !== null ||
+      !this.#endpoint.includes('.supabase.co/functions/')
+    )
+      return;
+    this.#salePushInFlight = true;
+    try {
+      this.#initializeOutboxAuditFloor(database);
+      const deviceId = await this.#readOrCreateDeviceId();
+      this.#enqueueNewAudits(database, deviceId);
+      if (!this.#hasWaitingOutbox(database)) return;
+      const pairingKey = await this.#readPairingKey();
+      if (pairingKey === null) return;
+      await this.#pushOutboxSerial(database, deviceId, pairingKey, true);
+    } finally {
+      this.#salePushInFlight = false;
+    }
+  }
+
+  /** Pushes never overlap, so the immediate sale lane and the cycle cannot send a row twice. */
+  #pushOutboxSerial(
+    database: DatabaseContext,
+    deviceId: string,
+    pairingKey: string,
+    canonicalCloud: boolean,
+  ): Promise<boolean> {
+    const run = this.#pushChain.then(() =>
+      this.#pushOutbox(database, deviceId, pairingKey, canonicalCloud),
+    );
+    this.#pushChain = run.catch(() => undefined);
+    return run;
   }
 
   #runImmediateFlush(): void {
@@ -1089,7 +1132,7 @@ export class CloudSyncService {
         this.#pendingBootstrap === null &&
         this.#hasWaitingOutbox(database)
       ) {
-        if (!(await this.#pushOutbox(database, deviceId, pairingKey, true))) return;
+        if (!(await this.#pushOutboxSerial(database, deviceId, pairingKey, true))) return;
         const liveEventId = getSessionState(database).activeEvent?.id ?? activeEventId;
         await this.#publishCashierCatalog(database, liveEventId, pairingKey);
         await this.#publishMobileContext(database, liveEventId, pairingKey);
@@ -1191,7 +1234,8 @@ export class CloudSyncService {
         );
       }
 
-      if (!(await this.#pushOutbox(workingDatabase, deviceId, pairingKey, canonicalCloud))) return;
+      if (!(await this.#pushOutboxSerial(workingDatabase, deviceId, pairingKey, canonicalCloud)))
+        return;
 
       // Journalled business commands are authoritative. Publish the derived
       // mobile projections only after those commands have reached the central.
