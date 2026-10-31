@@ -92,8 +92,8 @@ export function listOperationCatalog(
             salePriceCents: combo.salePriceCents,
             availableQuantity: combo.availableUnits,
             active: combo.active,
-            imageDataUrl: null,
-            fallbackIcon: 'package' as const,
+            imageDataUrl: combo.imageDataUrl,
+            fallbackIcon: combo.fallbackIcon,
             choiceGroups: [
               ...new Map(
                 combo.components

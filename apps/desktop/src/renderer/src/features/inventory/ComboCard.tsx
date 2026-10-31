@@ -1,8 +1,14 @@
-import { Boxes, Pencil, Tags } from 'lucide-react';
+import { Boxes, Pencil, Tags, Trash2 } from 'lucide-react';
 import { useState } from 'react';
 
-import type { InventoryCombo, InventoryProduct, UpdateComboInput } from '@gtrz/contracts';
+import type {
+  DeleteComboInput,
+  InventoryCombo,
+  InventoryProduct,
+  UpdateComboInput,
+} from '@gtrz/contracts';
 
+import { ProductVisual } from '../../shared/product/ProductVisual';
 import { ComboForm } from './ComboForm';
 
 interface ComboCardProps {
@@ -11,6 +17,7 @@ interface ComboCardProps {
   readonly production: boolean;
   readonly busy: boolean;
   readonly onUpdate: (input: UpdateComboInput) => Promise<void>;
+  readonly onDelete: (input: DeleteComboInput) => Promise<void>;
 }
 
 function formatMoney(cents: number): string {
@@ -26,8 +33,12 @@ export function ComboCard({
   production,
   busy,
   onUpdate,
+  onDelete,
 }: ComboCardProps): React.JSX.Element {
   const [editing, setEditing] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [reason, setReason] = useState('');
+  const [deleteError, setDeleteError] = useState<string | null>(null);
   const hasChoices = combo.components.some((component) => component.choiceGroup !== null);
 
   if (editing) {
@@ -52,6 +63,12 @@ export function ComboCard({
   return (
     <article className={combo.active ? 'combo-card' : 'combo-card combo-card--inactive'}>
       <div className="combo-card__header">
+        <ProductVisual
+          alt={combo.name}
+          fallbackIcon={combo.fallbackIcon}
+          imageDataUrl={combo.imageDataUrl}
+          size="small"
+        />
         <div>
           <span>Combo · {combo.kind === 'food' ? 'Comida' : 'Bebida'}</span>
           <h3>{combo.name}</h3>
@@ -139,7 +156,76 @@ export function ComboCard({
             Editar combo
           </button>
         ) : null}
+        {production ? (
+          <button
+            className="button button--ghost button--compact"
+            disabled={busy}
+            onClick={() => {
+              setDeleteError(null);
+              setDeleting(true);
+            }}
+            type="button"
+          >
+            <Trash2 size={15} aria-hidden="true" />
+            Excluir combo
+          </button>
+        ) : null}
       </div>
+
+      {deleting ? (
+        <form
+          className="combo-delete-panel"
+          onSubmit={(event) => {
+            event.preventDefault();
+            setDeleteError(null);
+            onDelete({ comboId: combo.id, reason: reason.trim() })
+              .then(() => {
+                setDeleting(false);
+                setReason('');
+              })
+              .catch((error: unknown) => {
+                setDeleteError(
+                  error instanceof Error ? error.message : 'Não foi possível excluir o combo.',
+                );
+              });
+          }}
+        >
+          <label className="form-field">
+            <span>Motivo da exclusão de “{combo.name}”</span>
+            <input
+              maxLength={200}
+              minLength={3}
+              onChange={(event) => {
+                setReason(event.target.value);
+              }}
+              placeholder="Ex.: combo antigo, não vendemos mais"
+              required
+              value={reason}
+            />
+          </label>
+          {deleteError === null ? null : <p className="form-error">{deleteError}</p>}
+          <div className="product-form__actions">
+            <button
+              className="button button--ghost button--compact"
+              disabled={busy}
+              onClick={() => {
+                setDeleting(false);
+              }}
+              type="button"
+            >
+              Cancelar
+            </button>
+            <button
+              className="button button--danger button--compact"
+              disabled={busy || reason.trim().length < 3}
+              type="submit"
+            >
+              <Trash2 size={15} aria-hidden="true" />
+              Confirmar exclusão
+            </button>
+          </div>
+        </form>
+      ) : null}
     </article>
   );
 }

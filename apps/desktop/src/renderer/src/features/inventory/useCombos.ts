@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 
 import type {
   CreateComboInput,
+  DeleteComboInput,
   InventoryCombo,
   InventoryProduct,
   UpdateComboInput,
@@ -18,6 +19,7 @@ interface ComboViewState {
   readonly reload: () => Promise<void>;
   readonly createCombo: (input: CreateComboInput) => Promise<void>;
   readonly updateCombo: (input: UpdateComboInput) => Promise<void>;
+  readonly deleteCombo: (input: DeleteComboInput) => Promise<void>;
 }
 
 function getErrorMessage(error: unknown): string {
@@ -84,6 +86,13 @@ export function useCombos(products: readonly InventoryProduct[]): ComboViewState
     [run],
   );
 
+  const deleteCombo = useCallback(
+    async (input: DeleteComboInput): Promise<void> => {
+      await run(() => window.gtrz.combos.delete(input), 'Combo excluído.');
+    },
+    [run],
+  );
+
   return {
     combos,
     loading,
@@ -93,5 +102,6 @@ export function useCombos(products: readonly InventoryProduct[]): ComboViewState
     reload,
     createCombo,
     updateCombo,
+    deleteCombo,
   };
 }

@@ -38,7 +38,12 @@ import {
   setActiveEvent,
   type DatabaseContext,
 } from '@gtrz/database';
-import { getProductPresentation } from '@gtrz/database/product-presentation';
+import {
+  clearProductPresentation,
+  getProductPresentation,
+  setProductPresentation,
+  type DatabaseProductFallbackIcon,
+} from '@gtrz/database/product-presentation';
 import { getPrintingSettings } from '@gtrz/database/printing';
 
 import type { DatabaseRuntime } from './database-runtime';
@@ -2508,8 +2513,8 @@ export class CloudSyncService {
           itemKind: 'combo',
           visible: true,
           categoryLabel: combo.kind === 'food' ? 'Comidas' : 'Combos',
-          imageDataUrl: null,
-          fallbackIcon: 'package',
+          imageDataUrl: combo.imageDataUrl,
+          fallbackIcon: combo.fallbackIcon,
           components: combo.components.map((component) => ({
             productId: component.productId,
             quantity: component.quantity,
@@ -4110,6 +4115,7 @@ export class CloudSyncService {
         .prepare('DELETE FROM combo_components WHERE combo_id = ?')
         .run(payload.entityId);
       database.sqlite.prepare('DELETE FROM combos WHERE id = ?').run(payload.entityId);
+      clearProductPresentation(database, payload.entityId);
       return;
     }
 
@@ -4233,6 +4239,22 @@ export class CloudSyncService {
             payload.createdAt,
             payload.createdAt,
           );
+      }
+      // Events from before combos had photos carry neither field and leave the photo alone.
+      if (details.imageDataUrl !== undefined || details.fallbackIcon !== undefined) {
+        const current = getProductPresentation(database, payload.entityId);
+        setProductPresentation(database, payload.entityId, {
+          imageDataUrl:
+            details.imageDataUrl === undefined
+              ? current.imageDataUrl
+              : typeof details.imageDataUrl === 'string'
+                ? details.imageDataUrl
+                : null,
+          fallbackIcon:
+            typeof details.fallbackIcon === 'string'
+              ? (details.fallbackIcon as DatabaseProductFallbackIcon)
+              : current.fallbackIcon,
+        });
       }
       return;
     }
