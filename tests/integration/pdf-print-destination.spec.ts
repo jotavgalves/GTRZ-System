@@ -25,6 +25,7 @@ vi.mock('electron', () => ({
       getPrintersAsync: () =>
         Promise.resolve([
           { name: 'Microsoft Print to PDF', displayName: 'Microsoft Print to PDF' },
+          { name: 'EPSON Teste', displayName: 'EPSON Teste' },
         ]),
       print: fake.print,
       printToPDF: fake.printToPDF,
@@ -70,9 +71,31 @@ afterEach(() => {
   fake.print.mockClear();
   fake.printToPDF.mockClear();
   fake.openPath.mockClear();
+  fake.settings.deviceName = 'Microsoft Print to PDF';
 });
 
 describe('Microsoft Print to PDF as receipt destination', () => {
+  it('sends a local thermal receipt before archiving its PDF', async () => {
+    const archiveDirectory = mkdtempSync(path.join(tmpdir(), 'gtrz-print-order-test-'));
+    directories.push(archiveDirectory);
+    fake.settings.deviceName = 'EPSON Teste';
+    const order: string[] = [];
+    fake.print.mockImplementation((_options: unknown, callback: (success: boolean) => void) => {
+      order.push('printer');
+      callback(true);
+    });
+    fake.printToPDF.mockImplementation(() => {
+      order.push('archive');
+      return Promise.resolve(Buffer.from('%PDF-1.4\nPDF de teste\n%%EOF'));
+    });
+    const service = new ThermalPrintService({
+      archiveDirectory,
+      getDatabase: () => ({}) as never,
+    });
+    await service.printAfterSale(receipt.orderId);
+    expect(order).toEqual(['printer', 'archive']);
+  });
+
   it('archives a local sale and reprint without invoking the Windows printer', async () => {
     const archiveDirectory = mkdtempSync(path.join(tmpdir(), 'gtrz-local-pdf-test-'));
     directories.push(archiveDirectory);

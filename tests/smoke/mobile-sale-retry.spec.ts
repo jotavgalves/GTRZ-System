@@ -104,6 +104,36 @@ function saleClient(
 }
 
 describe('mobile sale uncertainty', () => {
+  it('ends a stalled mobile request without claiming the sale succeeded', async () => {
+    const apiSource = cashierClientScript
+      .split('\n')
+      .find((line) => line.startsWith('async function api('));
+    expect(apiSource).toBeDefined();
+    const context = {
+      Headers,
+      AbortController,
+      canonicalEndpoint: 'https://example.test/cashier/api',
+      sessionToken: () => null,
+      fetch: (_url: string, options: { signal: AbortSignal }) =>
+        new Promise((_resolve, reject) => {
+          options.signal.addEventListener('abort', () => {
+            reject(new Error('aborted'));
+          });
+        }),
+      setTimeout: (callback: () => void) => {
+        queueMicrotask(callback);
+        return 1;
+      },
+      clearTimeout: () => undefined,
+    };
+    vm.runInNewContext(`${apiSource ?? ''}\nglobalThis.testApi=api;`, context);
+    await expect(
+      (context as typeof context & { testApi: (path: string) => Promise<unknown> }).testApi(
+        '/v1/mobile/sales',
+      ),
+    ).rejects.toThrow('A central demorou para responder');
+  });
+
   it('parses the complete embedded cashier script', () => {
     const start = cashierClientScript.indexOf('String.raw`') + 'String.raw`'.length;
     const end = cashierClientScript.lastIndexOf('`;');
