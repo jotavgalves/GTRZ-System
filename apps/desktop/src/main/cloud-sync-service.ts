@@ -25,6 +25,8 @@ import {
   type CloudMonitor,
   type CloudSyncStatus,
   type BackupRecord,
+  type ForceWipeGlobalEventInput,
+  type ForceWipeResult,
 } from '@gtrz/contracts';
 import {
   createDatabaseSnapshot,
@@ -40,6 +42,7 @@ import { getProductPresentation } from '@gtrz/database/product-presentation';
 import { getPrintingSettings } from '@gtrz/database/printing';
 
 import type { DatabaseRuntime } from './database-runtime';
+import { runForceWipe } from './force-wipe';
 import { reconcileOperationIds } from './operation-reconciliation';
 import { readReplicaIdBaseline, type ReplicaIdBaseline } from './replica-id-baseline';
 
@@ -1450,6 +1453,22 @@ export class CloudSyncService {
       deviceId,
     });
     await this.#pullGlobalControl(database, pairingKey, deviceId);
+  }
+
+  /** Owner-only forced wipe of one event, in the cloud and in this computer's SQLite. */
+  forceWipeGlobalEvent(
+    database: DatabaseContext,
+    input: ForceWipeGlobalEventInput,
+  ): Promise<ForceWipeResult> {
+    return runForceWipe({
+      database,
+      input,
+      endpoint: this.#endpoint,
+      headers: () => this.#administratorHeaders({ 'Content-Type': 'application/json' }),
+      onLocalCleared: () => {
+        this.#onDataChanged();
+      },
+    });
   }
 
   async getStatus(): Promise<CloudSyncStatus> {

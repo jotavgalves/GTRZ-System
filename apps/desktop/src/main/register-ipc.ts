@@ -27,6 +27,8 @@ import {
   IPC_CHANNELS,
   operationResultSchema,
   paymentTerminalSettingsSchema,
+  forceWipeGlobalEventInputSchema,
+  forceWipeResultSchema,
   resetGlobalEventInputSchema,
   renameEventInputSchema,
   restoreBackupResultSchema,
@@ -319,6 +321,15 @@ export function registerIpcHandlers(options: RegisterIpcOptions): ThermalPrintSe
     );
     return operationResultSchema.parse({ success: true });
   });
+
+  ipcMain.handle(IPC_CHANNELS.settingsForceWipeGlobalEvent, async (_event, payload: unknown) =>
+    forceWipeResultSchema.parse(
+      await options.cloudSyncService.forceWipeGlobalEvent(
+        options.getDatabase(),
+        forceWipeGlobalEventInputSchema.parse(payload),
+      ),
+    ),
+  );
 
   ipcMain.handle(IPC_CHANNELS.settingsListMobileOperators, async () =>
     options.cloudSyncService.listMobileOperators(),

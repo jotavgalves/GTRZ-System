@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react';
 import type { GtrzEvent } from '@gtrz/contracts';
 
 import { useSession } from '../../shared/session/session-context';
+import { ForceWipePanel } from './ForceWipePanel';
 
 export function CloudEventSelector(): React.JSX.Element {
   const { state, refresh } = useSession();
@@ -131,6 +132,13 @@ export function CloudEventSelector(): React.JSX.Element {
               : 'Preparar backups e zerar o evento'}
           </button>
         </details>
+      )}
+      {state?.activeEvent === null || state?.activeEvent === undefined ? null : (
+        <ForceWipePanel
+          eventId={state.activeEvent.id}
+          eventName={state.activeEvent.name}
+          onDone={refresh}
+        />
       )}
     </section>
   );

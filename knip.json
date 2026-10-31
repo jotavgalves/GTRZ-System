@@ -4,7 +4,7 @@
     ".": {
       "entry": ["scripts/*.mjs", "tests/**/*.ts"],
       "project": ["**/*.{ts,tsx,mjs}", "!output/**", "!tmp/**"],
-      "ignore": ["supabase/functions/**"],
+      "ignore": ["supabase/functions/**", "supabase/tests/**"],
       "ignoreDependencies": ["cloudflare"]
     },
     "apps/desktop": {
