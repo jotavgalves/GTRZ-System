@@ -1,4 +1,4 @@
-export const mobileClientRevision = '2026-10-31-mobile-rest-5';
+export const mobileClientRevision = '2026-10-31-mobile-no-photos-6';
 export const cashierClientScript = String.raw`
 const state={products:[],context:{ticketLots:[],servicePoints:[],voucherCodes:[],vouchers:[]},cart:new Map(),method:'cash',cashReceived:'',servicePointId:null,voucherCode:'',voucherAmount:'',online:false,apiReady:false,lastPeriodicRefresh:0,operator:null,eventId:null,pendingSale:null,saleSubmitting:false,realtimeSocket:null,realtimeTopic:null,realtimeJoinedAt:0,reconnectAttempts:0,realtimeRefreshInFlight:false,realtimeRefreshPromise:null,realtimeRefreshPending:false,generation:0,streamGeneration:0,reconnectTimer:null,sessionRefreshTimer:null,heartbeatTimer:null,view:'sales',noticeTimer:null,pendingCombo:null,pendingCartKey:null,pendingChoiceQuantities:{},catalogFilter:'all'};
 const $=id=>document.getElementById(id);
