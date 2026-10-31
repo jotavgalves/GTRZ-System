@@ -12,7 +12,7 @@ interface ComboSectionProps {
 }
 
 export function ComboSection({ products, production }: ComboSectionProps): React.JSX.Element {
-  const { combos, loading, busy, error, message, reload, createCombo, updateCombo } =
+  const { combos, loading, busy, error, message, reload, createCombo, updateCombo, deleteCombo } =
     useCombos(products);
   const activeProducts = products.filter((product) => product.active);
 
@@ -75,6 +75,7 @@ export function ComboSection({ products, production }: ComboSectionProps): React
             busy={busy}
             combo={combo}
             key={combo.id}
+            onDelete={deleteCombo}
             onUpdate={updateCombo}
             production={production}
             products={products}

@@ -8,8 +8,11 @@ import type {
   InventoryCombo,
   InventoryProduct,
   FoodState,
+  ProductFallbackIcon,
   UpdateComboInput,
 } from '@gtrz/contracts';
+
+import { ProductPhotoEditor } from '../../shared/product/ProductPhotoEditor';
 
 interface ComboFormBaseProps {
   readonly products: readonly InventoryProduct[];
@@ -83,6 +86,12 @@ export function ComboForm(props: ComboFormProps): React.JSX.Element {
   );
   const [commissionUnit, setCommissionUnit] = useState(
     centsToInput(props.combo?.externalFoodTerms?.commissionUnitCents),
+  );
+  const [imageDataUrl, setImageDataUrl] = useState<string | null>(
+    props.combo?.imageDataUrl ?? null,
+  );
+  const [fallbackIcon, setFallbackIcon] = useState<ProductFallbackIcon>(
+    props.combo?.fallbackIcon ?? 'package',
   );
   const [error, setError] = useState<string | null>(null);
 
@@ -217,6 +226,8 @@ export function ComboForm(props: ComboFormProps): React.JSX.Element {
         kind,
         salePriceCents: externalFood ? (externalFoodSalePriceCents ?? 0) : inputToCents(salePrice),
         components: orderedComponents,
+        imageDataUrl,
+        fallbackIcon,
         ...(externalFood
           ? {
               externalFoodTerms: {
@@ -235,6 +246,8 @@ export function ComboForm(props: ComboFormProps): React.JSX.Element {
         setComponents([]);
         setSupplierUnit('');
         setCommissionUnit('');
+        setImageDataUrl(null);
+        setFallbackIcon('package');
       } else {
         await props.onSubmit({
           ...baseInput,
@@ -506,6 +519,17 @@ export function ComboForm(props: ComboFormProps): React.JSX.Element {
           })
         )}
       </div>
+
+      <ProductPhotoEditor
+        disabled={props.busy}
+        fallbackIcon={fallbackIcon}
+        imageDataUrl={imageDataUrl}
+        name={name.trim() === '' ? 'Combo' : name}
+        onError={setError}
+        onIconChange={setFallbackIcon}
+        onImageChange={setImageDataUrl}
+        title="Foto do combo"
+      />
 
       {props.combo === undefined ? null : (
         <label className="checkbox-field">

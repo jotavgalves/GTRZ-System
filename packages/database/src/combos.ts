@@ -2,6 +2,13 @@ import { randomUUID } from 'node:crypto';
 
 import { appendAudit } from './audit';
 import { getSessionState } from './control';
+import {
+  clearProductPresentation,
+  getProductPresentation,
+  setProductPresentation,
+  type DatabaseProductFallbackIcon,
+  type DatabaseProductPresentation,
+} from './product-presentation';
 import type { DatabaseContext } from './types';
 
 export interface DatabaseComboComponentInput {
@@ -17,6 +24,8 @@ interface ComboWriteInput {
   readonly kind?: 'food' | 'drink' | undefined;
   readonly salePriceCents: number;
   readonly components: readonly DatabaseComboComponentInput[];
+  readonly imageDataUrl?: string | null | undefined;
+  readonly fallbackIcon?: DatabaseProductFallbackIcon | undefined;
   readonly externalFoodTerms?:
     | {
         readonly supplierId: string;
@@ -62,6 +71,8 @@ export interface DatabaseInventoryCombo {
   readonly components: readonly DatabaseComboComponent[];
   readonly externalFoodTerms: DatabaseExternalFoodComboTerms | null;
   readonly financials: DatabaseComboFinancials | null;
+  readonly imageDataUrl: string | null;
+  readonly fallbackIcon: DatabaseProductFallbackIcon;
   readonly createdAt: number;
   readonly updatedAt: number;
 }
@@ -274,6 +285,7 @@ function mapCombo(
   activeEventId: string | null,
   showFinancials: boolean,
   externalFoodTerms: DatabaseExternalFoodComboTerms | null,
+  presentation: DatabaseProductPresentation,
 ): DatabaseInventoryCombo {
   const components = componentRows.map((component) => ({
     productId: component.product_id,
@@ -352,6 +364,8 @@ function mapCombo(
           marginPercent: calculateMarginPercent(row.sale_price_cents, effectiveCostCents),
         }
       : null,
+    imageDataUrl: presentation.imageDataUrl,
+    fallbackIcon: presentation.fallbackIcon,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -404,6 +418,7 @@ export function listCombos(database: DatabaseContext): readonly DatabaseInventor
       activeEventId,
       showFinancials,
       externalTermsByCombo.get(combo.id) ?? null,
+      getProductPresentation(database, combo.id),
     ),
   );
 }
@@ -503,6 +518,10 @@ export function createCombo(
       .run(comboId, name, input.kind ?? 'drink', input.salePriceCents, now, now);
     insertComponents(database, comboId, input.components);
     saveExternalFoodTerms(database, comboId, externalFoodEventId, input.externalFoodTerms, now);
+    const presentation = setProductPresentation(database, comboId, {
+      imageDataUrl: input.imageDataUrl ?? null,
+      fallbackIcon: input.fallbackIcon ?? 'package',
+    });
     appendAudit(database, {
       action: 'combo.created',
       entityType: 'combo',
@@ -510,6 +529,8 @@ export function createCombo(
       details: {
         components: input.components,
         externalFoodTerms: input.externalFoodTerms,
+        fallbackIcon: presentation.fallbackIcon,
+        imageDataUrl: presentation.imageDataUrl,
         kind: input.kind ?? 'drink',
         name,
         salePriceCents: input.salePriceCents,
@@ -536,6 +557,7 @@ export function updateCombo(
   }
 
   const now = Date.now();
+  const currentPresentation = getProductPresentation(database, input.comboId);
 
   database.sqlite.transaction(() => {
     database.sqlite
@@ -561,6 +583,12 @@ export function updateCombo(
       input.externalFoodTerms,
       now,
     );
+    // Omitting the photo keeps the current one; null removes it.
+    const presentation = setProductPresentation(database, input.comboId, {
+      imageDataUrl:
+        input.imageDataUrl === undefined ? currentPresentation.imageDataUrl : input.imageDataUrl,
+      fallbackIcon: input.fallbackIcon ?? currentPresentation.fallbackIcon,
+    });
     appendAudit(database, {
       action: 'combo.updated',
       entityType: 'combo',
@@ -570,6 +598,8 @@ export function updateCombo(
           active: input.active,
           components: input.components,
           externalFoodTerms: input.externalFoodTerms,
+          fallbackIcon: presentation.fallbackIcon,
+          imageDataUrl: presentation.imageDataUrl,
           kind: input.kind ?? 'drink',
           name,
           salePriceCents: input.salePriceCents,
@@ -602,7 +632,7 @@ export function deleteCombo(
     .get(combo.id) as { readonly amount: number };
   if (referencedOrders.amount > 0) {
     throw new Error(
-      'O combo possui vendas ou comandas registradas. Cancele-as ou zere o evento antes de excluí-lo.',
+      'O combo possui vendas ou comandas registradas. Cancele-as, zere o evento ou apenas desative o combo (Editar combo) para ele sair da venda sem apagar o histórico.',
     );
   }
 
@@ -613,6 +643,7 @@ export function deleteCombo(
     database.sqlite.prepare('DELETE FROM food_combo_terms WHERE combo_id = ?').run(combo.id);
     database.sqlite.prepare('DELETE FROM combo_components WHERE combo_id = ?').run(combo.id);
     database.sqlite.prepare('DELETE FROM combos WHERE id = ?').run(combo.id);
+    clearProductPresentation(database, combo.id);
     appendAudit(database, {
       action: 'combo.deleted',
       entityType: 'combo',

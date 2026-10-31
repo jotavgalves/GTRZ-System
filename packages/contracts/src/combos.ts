@@ -1,5 +1,7 @@
 import { z } from 'zod';
 
+import { productFallbackIconSchema, productImageDataUrlSchema } from './inventory';
+
 export const comboKindSchema = z
   .enum(['food', 'drink', 'combo'])
   .transform((value): 'food' | 'drink' => (value === 'combo' ? 'drink' : value));
@@ -34,6 +36,8 @@ const comboWriteFields = {
   salePriceCents: z.number().int().nonnegative(),
   components: z.array(comboComponentInputSchema).min(1).max(50),
   externalFoodTerms: externalFoodComboTermsInputSchema.optional(),
+  imageDataUrl: productImageDataUrlSchema.optional(),
+  fallbackIcon: productFallbackIconSchema.optional(),
 } as const;
 
 interface ComponentCollection {
@@ -127,6 +131,8 @@ export const comboSchema = z.object({
   components: z.array(comboComponentSchema).min(1),
   externalFoodTerms: externalFoodComboTermsSchema.nullish().transform((value) => value ?? null),
   financials: comboFinancialsSchema.nullable(),
+  imageDataUrl: productImageDataUrlSchema.nullish().transform((value) => value ?? null),
+  fallbackIcon: productFallbackIconSchema.nullish().transform((value) => value ?? 'package'),
   createdAt: z.number().int().nonnegative(),
   updatedAt: z.number().int().nonnegative(),
 });

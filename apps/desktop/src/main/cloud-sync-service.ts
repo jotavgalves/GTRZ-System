@@ -38,7 +38,12 @@ import {
   setActiveEvent,
   type DatabaseContext,
 } from '@gtrz/database';
-import { getProductPresentation } from '@gtrz/database/product-presentation';
+import {
+  clearProductPresentation,
+  getProductPresentation,
+  setProductPresentation,
+  type DatabaseProductFallbackIcon,
+} from '@gtrz/database/product-presentation';
 import { getPrintingSettings } from '@gtrz/database/printing';
 
 import type { DatabaseRuntime } from './database-runtime';
@@ -71,11 +76,11 @@ const fetch = cloudFetch;
 
 const CONNECTION_TIMEOUT_MS = 20_000;
 const OUTBOX_INTERVAL_MS = 3_000;
-const PRINT_POLL_INTERVAL_MS = 1_000;
+const PRINT_POLL_INTERVAL_MS = 2_000;
 const PRINT_POLL_BACKOFF_MS = 5_000;
 const MOBILE_NOTICE_TIMEOUT_MS = 8_000;
 const CHANGE_WATCH_INTERVAL_MS = 400;
-const CLOUD_PROBE_INTERVAL_MS = 5_000;
+const CLOUD_PROBE_INTERVAL_MS = 10_000;
 const CLOUD_PROBE_TIMEOUT_MS = 8_000;
 const CLOUD_FRESH_MS = 20_000;
 const CLOUD_DISCONNECT_GRACE_MS = 30_000;
@@ -84,7 +89,7 @@ const ID_RECONCILIATION_INTERVAL_MS = 300_000;
 const ID_RECONCILIATION_RETRY_MS = 60_000;
 const PRINT_REGISTRATION_REFRESH_MS = 15_000;
 const DESKTOP_PRESENCE_REFRESH_MS = 10_000;
-const CANONICAL_FALLBACK_RECONCILIATION_INTERVAL_MS = 15_000;
+const CANONICAL_FALLBACK_RECONCILIATION_INTERVAL_MS = 30_000;
 const CANONICAL_REALTIME_RECONCILIATION_DELAY_MS = 750;
 const CANONICAL_SUPABASE_URL = 'https://muhzjnveqrahccoisddo.supabase.co';
 const CANONICAL_SUPABASE_PUBLISHABLE_KEY = 'sb_publishable_ikPSVbY1junIsMbz5SrFrg_wkobALXv';
@@ -2508,8 +2513,8 @@ export class CloudSyncService {
           itemKind: 'combo',
           visible: true,
           categoryLabel: combo.kind === 'food' ? 'Comidas' : 'Combos',
-          imageDataUrl: null,
-          fallbackIcon: 'package',
+          imageDataUrl: combo.imageDataUrl,
+          fallbackIcon: combo.fallbackIcon,
           components: combo.components.map((component) => ({
             productId: component.productId,
             quantity: component.quantity,
@@ -2529,6 +2534,9 @@ export class CloudSyncService {
     const current = database.sqlite
       .prepare('SELECT value FROM sync_state WHERE key = ?')
       .get(stateKey) as { readonly value: string } | undefined;
+    // Reading the cloud state downloads the whole catalogue, photos included, so it only happens
+    // when there is something new to publish.
+    if (this.#projectionIsCurrent(stateKey, fingerprint, current?.value)) return;
     const canonicalState = canonicalCloud
       ? await this.#readCanonicalEventState(activeEventId, pairingKey)
       : null;
@@ -2714,6 +2722,7 @@ export class CloudSyncService {
     const current = database.sqlite
       .prepare('SELECT value FROM sync_state WHERE key = ?')
       .get(stateKey) as { readonly value: string } | undefined;
+    if (this.#projectionIsCurrent(stateKey, fingerprint, current?.value)) return;
     const canonicalState = canonicalCloud
       ? await this.#readCanonicalEventState(activeEventId, pairingKey)
       : null;
@@ -2752,6 +2761,17 @@ export class CloudSyncService {
       this.#canonicalProjectionPublished.add(stateKey);
       this.#canonicalProtectedProjectionFingerprints.delete(stateKey);
     }
+  }
+
+  #projectionIsCurrent(
+    stateKey: string,
+    fingerprint: string,
+    storedFingerprint: string | undefined,
+  ): boolean {
+    return (
+      this.#canonicalProtectedProjectionFingerprints.get(stateKey) === fingerprint ||
+      (this.#canonicalProjectionPublished.has(stateKey) && storedFingerprint === fingerprint)
+    );
   }
 
   #projectionArrayHasEntries(projection: unknown, key: string): boolean {
@@ -4110,6 +4130,7 @@ export class CloudSyncService {
         .prepare('DELETE FROM combo_components WHERE combo_id = ?')
         .run(payload.entityId);
       database.sqlite.prepare('DELETE FROM combos WHERE id = ?').run(payload.entityId);
+      clearProductPresentation(database, payload.entityId);
       return;
     }
 
@@ -4233,6 +4254,22 @@ export class CloudSyncService {
             payload.createdAt,
             payload.createdAt,
           );
+      }
+      // Events from before combos had photos carry neither field and leave the photo alone.
+      if (details.imageDataUrl !== undefined || details.fallbackIcon !== undefined) {
+        const current = getProductPresentation(database, payload.entityId);
+        setProductPresentation(database, payload.entityId, {
+          imageDataUrl:
+            details.imageDataUrl === undefined
+              ? current.imageDataUrl
+              : typeof details.imageDataUrl === 'string'
+                ? details.imageDataUrl
+                : null,
+          fallbackIcon:
+            typeof details.fallbackIcon === 'string'
+              ? (details.fallbackIcon as DatabaseProductFallbackIcon)
+              : current.fallbackIcon,
+        });
       }
       return;
     }
