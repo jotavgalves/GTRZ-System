@@ -1,6 +1,6 @@
 import { BrowserWindow, shell } from 'electron';
 import { randomUUID } from 'node:crypto';
-import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { appendFile, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
 import type {
@@ -88,6 +88,12 @@ export class ThermalPrintService {
   readonly #archiveDirectory: string;
   readonly #archiveInFlight = new Map<string, Promise<void>>();
   #printChain: Promise<unknown> = Promise.resolve();
+  // Sales closed on this PC are printed here at once; the same note later comes back from the
+  // cloud queue and must not print a second time.
+  readonly #localPrints = new Map<
+    string,
+    { readonly result: Promise<PrintOrderResult>; readonly at: number }
+  >();
   #printerRegistrationCache: {
     readonly fingerprint: string;
     readonly value: CloudPrinterRegistration;
@@ -97,6 +103,29 @@ export class ThermalPrintService {
   constructor(options: ThermalPrintServiceOptions) {
     this.#getDatabase = options.getDatabase;
     this.#archiveDirectory = options.archiveDirectory;
+    // Records when the main process was too busy to run timers, which delays every print step.
+    let last = Date.now();
+    setInterval(() => {
+      const now = Date.now();
+      if (now - last > 1_000)
+        this.#trace(`processo principal parado por ${String(now - last - 250)} ms`);
+      last = now;
+    }, 250).unref();
+  }
+
+  /** Timing trail for print delays; kept in the notes folder so it can be read after the fact. */
+  #trace(message: string): void {
+    const line = `${new Date().toISOString()} ${message}`;
+    console.warn(`[impressao] ${message}`);
+    void mkdir(this.#archiveDirectory, { recursive: true })
+      .then(() =>
+        appendFile(
+          path.join(this.#archiveDirectory, 'impressao.log'),
+          `${line}
+`,
+        ),
+      )
+      .catch(() => undefined);
   }
 
   /**
@@ -144,11 +173,45 @@ export class ThermalPrintService {
     // Never hand a receipt to Windows' implicit default target. On a new PC it
     // is commonly "Microsoft Print to PDF", which opens a save dialog and can
     // make a completed sale look as if it was printed by the thermal station.
+    const settings = getPrintingSettings(this.#getDatabase());
+    this.#trace(`${orderId} venda local recebida`);
+    if (isPdfOutput(settings)) {
+      await this.archiveOrder(orderId).catch(() => undefined);
+      return;
+    }
+    // The local print path must not wait for Windows to enumerate all printers.
+    // Reprint already uses the selected queue directly and is much faster.
+    if (
+      settings.automaticPrinting &&
+      settings.deviceName !== null &&
+      !/^(OneNote(?: \(Desktop\))?|AnyDesk Printer|RustDesk Printer)$/iu.test(settings.deviceName)
+    ) {
+      const printing = this.#printOrder(orderId, false, false).catch(
+        (error: unknown): PrintOrderResult => ({
+          success: false,
+          skipped: false,
+          message: error instanceof Error ? error.message : 'erro desconhecido',
+        }),
+      );
+      this.#rememberLocalPrint(orderId, printing);
+      const result = await printing;
+      this.#trace(
+        `${orderId} impressão local: ${result.success ? 'ok' : `FALHOU - ${result.message}`}`,
+      );
+    } else {
+      this.#trace(
+        `${orderId} impressão local não tentada (automática desligada ou impressora virtual)`,
+      );
+    }
     await this.archiveOrder(orderId).catch(() => undefined);
-    if (isPdfOutput(getPrintingSettings(this.#getDatabase()))) return;
-    const registration = await this.getCloudPrinterRegistration();
-    if (!registration.enabled) return;
-    await this.#printOrder(orderId, false, false).catch(() => undefined);
+  }
+
+  #rememberLocalPrint(orderId: string, result: Promise<PrintOrderResult>): void {
+    const now = Date.now();
+    for (const [id, entry] of this.#localPrints) {
+      if (now - entry.at > 30 * 60_000) this.#localPrints.delete(id);
+    }
+    this.#localPrints.set(orderId, { result, at: now });
   }
 
   async archiveOrder(orderId: string): Promise<void> {
@@ -168,6 +231,12 @@ export class ThermalPrintService {
   }
 
   async printCloudJob(job: ClaimedCloudPrintJob): Promise<PrintOrderResult> {
+    this.#trace(`trabalho da nuvem recebido (${job.document.orderId})`);
+    const local = this.#localPrints.get(job.document.orderId);
+    if (local !== undefined && (await local.result).success) {
+      this.#trace(`${job.document.orderId} já impresso localmente; nuvem ignorada`);
+      return { success: true, skipped: true, message: 'Nota já impressa neste PC.' };
+    }
     const settings = getPrintingSettings(this.#getDatabase());
     if (!settings.automaticPrinting) {
       return {
@@ -299,7 +368,9 @@ export class ThermalPrintService {
     settings: PrintingSettings,
     archive = true,
   ): Promise<PrintOrderResult> {
+    const queuedAt = Date.now();
     const run = this.#printChain.then(async () => {
+      this.#trace(`${receipt.orderId} aguardou a fila: ${String(Date.now() - queuedAt)} ms`);
       const result = await this.#printReceiptNow(receipt, settings);
       if (archive) void this.#archiveReceiptDocument(receipt).catch(() => undefined);
       return result;
@@ -312,15 +383,26 @@ export class ThermalPrintService {
     receipt: DatabaseOrderReceipt,
     settings: PrintingSettings,
   ): Promise<PrintOrderResult> {
+    const startedAt = Date.now();
+    const mark = (step: string, since: number): number => {
+      const now = Date.now();
+      this.#trace(`${receipt.orderId} ${step}: ${String(now - since)} ms`);
+      return now;
+    };
     try {
       const html = buildReceiptHtml(receipt, settings.paperWidthMm);
       const window = createHiddenWindow();
 
       try {
         await window.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`);
+        let step = mark('janela carregada', startedAt);
         if (settings.deviceName !== null && (await queueNeedsRawRaster(settings.deviceName))) {
+          step = mark('driver verificado', step);
           const pages = await captureReceiptPages(window, settings.paperWidthMm);
+          step = mark('imagem capturada', step);
           await sendRawToPrinter(settings.deviceName, buildEscPosJob(pages));
+          mark('enviado a fila do Windows', step);
+          mark('total', startedAt);
           return { success: true, skipped: false, message: 'Nota enviada para a impressora.' };
         }
         const success = await new Promise<boolean>((resolve) => {
