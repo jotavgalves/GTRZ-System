@@ -3,6 +3,7 @@ import { canonicalDataRequest, fetchCanonicalData } from './canonical-data';
 import { cashierIcon, cashierManifest, cashierPage } from './cashier-page';
 import { monitorPage } from './monitor-page';
 import { printQueuePage } from './print-queue-page';
+import { mobileDiagnosticsPage } from './mobile-diagnostics-page';
 
 interface Env {
   readonly EVENT_ROOM: DurableObjectNamespace<EventRoom>;
@@ -5195,6 +5196,10 @@ export default {
     }
     const canonical = canonicalDataRequest(request, isTestEnvironment(env));
     if (canonical !== null) return fetchCanonicalData(canonical);
+
+    if (request.method === 'GET' && url.pathname === '/cashier/diagnostic') {
+      return mobileDiagnosticsPage();
+    }
 
     if (request.method === 'GET' && url.pathname === '/health') {
       return json({
