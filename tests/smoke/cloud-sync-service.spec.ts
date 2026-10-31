@@ -271,6 +271,69 @@ describe('cloud replication invariants', () => {
     ).toHaveLength(initialReads.length);
   });
 
+  it('sends a sale while a slow canonical cycle is still busy with housekeeping', async () => {
+    const canonical = new CloudSyncService(
+      'audit-key',
+      'audit-device',
+      (): void => undefined,
+      'https://audit.supabase.co/functions/v1/gtrz-sync-fallback',
+    );
+    const event = createEvent(db, { name: 'Busy central', startsAt: Date.now() });
+    const category = createProductCategory(db, 'Drinks');
+    const product = createInventoryProduct(db, {
+      categoryId: category.id,
+      name: 'Water',
+      kind: 'drink',
+      costCents: 100,
+      salePriceCents: 500,
+      lowStockThreshold: 0,
+    });
+    recordStockMovement(db, { productId: product.id, type: 'purchase', quantity: 1 });
+    const table = createServicePoint(db, { label: 'Table 1', type: 'table' });
+    let housekeepingStarted: (() => void) | undefined;
+    const busy = new Promise<void>((resolve) => {
+      housekeepingStarted = resolve;
+    });
+    request = vi.fn((url: string): Response | Promise<Response> => {
+      if (url.includes('/journal')) return new Response('{}', { status: 503 });
+      housekeepingStarted?.();
+      return new Promise<Response>(() => undefined);
+    });
+    vi.stubGlobal('fetch', request);
+    canonical.startReplication(
+      () => db,
+      () => event.id,
+    );
+    await busy;
+    await settle();
+    // Everything before the sale already reached the central.
+    db.sqlite.prepare("UPDATE sync_outbox SET status = 'accepted'").run();
+    const order = openOrder(db, table.id);
+    addOrderItem(db, { orderId: order.id, itemKind: 'product', itemId: product.id, quantity: 1 });
+    closeOrder(db, {
+      orderId: order.id,
+      discountCents: 0,
+      payments: [{ method: 'cash', amountCents: 500 }],
+    });
+    canonical.requestImmediateFlush(
+      () => db,
+      () => event.id,
+    );
+    const journalPosts = (): number =>
+      request.mock.calls.filter(([url, init]) => {
+        const body: unknown = (init as RequestInit | undefined)?.body;
+        return (
+          String(url).includes('/journal') &&
+          typeof body === 'string' &&
+          body.includes('operations.order-paid')
+        );
+      }).length;
+    for (let attempt = 0; attempt < 20 && journalPosts() === 0; attempt += 1) await settle();
+    canonical.stop();
+
+    expect(journalPosts()).toBeGreaterThan(0);
+  });
+
   it('sends a sale-triggered audit immediately after a busy flush, without a timer tick', async () => {
     let releaseSnapshot: ((response: Response) => void) | undefined;
     let snapshotRequested: (() => void) | undefined;
