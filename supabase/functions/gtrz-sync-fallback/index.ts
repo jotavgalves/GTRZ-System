@@ -148,6 +148,12 @@ function compactMobileProjection(projection: MobileProjection): MobileProjection
     context: projection.context,
   };
 }
+function compactMobileCatalog(value: unknown): Obj {
+  return compactMobileProjection({
+    catalog: asObj(value) ? value : emptyCatalog,
+    context: emptyContext,
+  }).catalog;
+}
 function cacheMobileEventState(eventId: string, state: Obj): void {
   const catalog = asObj(state.catalog) ? state.catalog : null,
     context = asObj(state.context) ? state.context : null,
@@ -317,8 +323,8 @@ Deno.serve(async (request) => {
       context: remote.context,
     };
   };
-  const currentSession = async (): Promise<Obj> => {
-    const refreshed = await mobileRefresh(),
+  const currentSession = async (includeState = true): Promise<Obj> => {
+    const refreshed = includeState ? await mobileRefresh() : await mobileAuthorization(),
       operator = asObj(refreshed.operator) ? refreshed.operator : null;
     if (
       !operator ||
@@ -1026,6 +1032,49 @@ Deno.serve(async (request) => {
       if (error) throw error;
       return ok(data, 202);
     }
+    // Owner-only forced wipe of one event. It never waits for other desktops and it deletes the
+    // event journal, state and print queue for real. Anything but an explicit `dryRun: false` is a
+    // simulation, and a real wipe also needs the typed confirmation.
+    if (path === '/v1/monitor/global-event/force-wipe' && request.method === 'POST') {
+      const actor = await authorizeOwner();
+      const input = await body(),
+        now = Date.now(),
+        dryRun = input.dryRun !== false,
+        eventId = string(input.eventId, 'eventId'),
+        eventName = string(input.eventName, 'eventName');
+      if (!dryRun && input.confirmation !== 'APAGAR TUDO') {
+        throw Object.assign(new Error('Digite APAGAR TUDO para confirmar a limpeza forçada.'), {
+          status: 400,
+          code: 'CONFIRMATION_REQUIRED',
+        });
+      }
+      const { data, error } = await db.rpc('gtrz_force_wipe_event', {
+        p_wipe_id: crypto.randomUUID(),
+        p_event_id: eventId,
+        p_event_name: eventName,
+        p_reason: string(input.reason, 'reason', 500),
+        p_actor: actor,
+        p_dry_run: dryRun,
+        p_now: now,
+      });
+      if (error) throw error;
+      if (!dryRun) {
+        const snapshotPaths =
+          asObj(data) && Array.isArray(data.snapshotPaths)
+            ? data.snapshotPaths.filter((item): item is string => typeof item === 'string')
+            : [];
+        if (snapshotPaths.length > 0) {
+          // The database rows are already gone; a failed file removal only leaves orphan files.
+          const { error: removeError } = await db.storage
+            .from('gtrz-replica-snapshots')
+            .remove(snapshotPaths);
+          if (removeError) console.warn('Replica snapshot files were not removed.');
+        }
+        await notifyRealtime('_catalog', 0, true);
+        await notifyRealtime(eventId, 0, false, null, true);
+      }
+      return ok(data);
+    }
     const resetBackupRoute = /^\/v1\/monitor\/reset-backup\/([^/]+)$/.exec(path);
     if (resetBackupRoute && request.method === 'POST') {
       await authorizeDesktop();
@@ -1411,7 +1460,7 @@ Deno.serve(async (request) => {
       return ok({
         operator,
         eventId: refreshed.eventId,
-        catalog: refreshed.catalog,
+        catalog: compactMobileCatalog(refreshed.catalog),
         context: {
           ...context,
           ticketLots: allowed.tickets ? context.ticketLots : [],
@@ -1423,7 +1472,9 @@ Deno.serve(async (request) => {
     }
     if (path === '/v1/mobile/sales' && request.method === 'POST')
       return ok(await commitMobileSaleFast(await body()));
-    const current = await currentSession(),
+    const current = await currentSession(
+        path !== '/v1/mobile/sales/status' && path !== '/v1/mobile/realtime-topic',
+      ),
       operator = current.operator as Obj,
       eventId = string(current.eventId, 'eventId'),
       allowed = operator.permissions as Record<Permission, boolean>;
@@ -1457,10 +1508,9 @@ Deno.serve(async (request) => {
       return ok({ topic: await mobileRealtimeTopic(await sha(raw)) });
     }
     if (path === '/v1/mobile/catalog' && request.method === 'GET')
-      return ok((await state(eventId)).catalog);
+      return ok(compactMobileCatalog(current.catalog));
     if (path === '/v1/mobile/context' && request.method === 'GET') {
-      const remote = await state(eventId),
-        context = asObj(remote.context) ? remote.context : emptyContext;
+      const context = asObj(current.context) ? current.context : emptyContext;
       return ok({
         ...context,
         ticketLots: allowed.tickets ? context.ticketLots : [],
