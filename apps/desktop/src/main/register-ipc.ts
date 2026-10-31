@@ -392,7 +392,11 @@ export function registerIpcHandlers(options: RegisterIpcOptions): ThermalPrintSe
   registerPrintingIpcHandlers({ printService });
   registerOperationsIpcHandlers({
     getDatabase: options.getDatabase,
-    printAfterSale: () => {
+    printAfterSale: (orderId) => {
+      // Print on this PC's printer at once; waiting for the cloud queue took ~18 s per sale.
+      void printService.printAfterSale(orderId).catch((error: unknown) => {
+        console.error('Falha na impressão da venda local:', error);
+      });
       options.cloudSyncService.requestImmediateFlush(
         options.getDatabase,
         () => getSessionState(options.getDatabase()).activeEvent?.id ?? null,
