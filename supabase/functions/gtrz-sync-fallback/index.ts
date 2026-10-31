@@ -148,6 +148,12 @@ function compactMobileProjection(projection: MobileProjection): MobileProjection
     context: projection.context,
   };
 }
+function compactMobileCatalog(value: unknown): Obj {
+  return compactMobileProjection({
+    catalog: asObj(value) ? value : emptyCatalog,
+    context: emptyContext,
+  }).catalog;
+}
 function cacheMobileEventState(eventId: string, state: Obj): void {
   const catalog = asObj(state.catalog) ? state.catalog : null,
     context = asObj(state.context) ? state.context : null,
@@ -317,8 +323,8 @@ Deno.serve(async (request) => {
       context: remote.context,
     };
   };
-  const currentSession = async (): Promise<Obj> => {
-    const refreshed = await mobileRefresh(),
+  const currentSession = async (includeState = true): Promise<Obj> => {
+    const refreshed = includeState ? await mobileRefresh() : await mobileAuthorization(),
       operator = asObj(refreshed.operator) ? refreshed.operator : null;
     if (
       !operator ||
@@ -1411,7 +1417,7 @@ Deno.serve(async (request) => {
       return ok({
         operator,
         eventId: refreshed.eventId,
-        catalog: refreshed.catalog,
+        catalog: compactMobileCatalog(refreshed.catalog),
         context: {
           ...context,
           ticketLots: allowed.tickets ? context.ticketLots : [],
@@ -1423,7 +1429,9 @@ Deno.serve(async (request) => {
     }
     if (path === '/v1/mobile/sales' && request.method === 'POST')
       return ok(await commitMobileSaleFast(await body()));
-    const current = await currentSession(),
+    const current = await currentSession(
+        path !== '/v1/mobile/sales/status' && path !== '/v1/mobile/realtime-topic',
+      ),
       operator = current.operator as Obj,
       eventId = string(current.eventId, 'eventId'),
       allowed = operator.permissions as Record<Permission, boolean>;
@@ -1457,10 +1465,9 @@ Deno.serve(async (request) => {
       return ok({ topic: await mobileRealtimeTopic(await sha(raw)) });
     }
     if (path === '/v1/mobile/catalog' && request.method === 'GET')
-      return ok((await state(eventId)).catalog);
+      return ok(compactMobileCatalog(current.catalog));
     if (path === '/v1/mobile/context' && request.method === 'GET') {
-      const remote = await state(eventId),
-        context = asObj(remote.context) ? remote.context : emptyContext;
+      const context = asObj(current.context) ? current.context : emptyContext;
       return ok({
         ...context,
         ticketLots: allowed.tickets ? context.ticketLots : [],
