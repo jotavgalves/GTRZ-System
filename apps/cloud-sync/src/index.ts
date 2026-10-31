@@ -1,5 +1,5 @@
 import { DurableObject } from 'cloudflare:workers';
-import { canonicalDataRequest } from './canonical-data';
+import { canonicalDataRequest, fetchCanonicalData } from './canonical-data';
 import { cashierIcon, cashierManifest, cashierPage } from './cashier-page';
 import { monitorPage } from './monitor-page';
 import { printQueuePage } from './print-queue-page';
@@ -5187,14 +5187,14 @@ let accessKey='';let timer=null;const $=id=>document.getElementById(id);const es
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
-    let url = new URL(request.url);
+    const url = new URL(request.url);
     // The mobile alias must not send the isolated test Worker to production.
     if (isTestEnvironment(env) && url.pathname.startsWith('/cashier/api/v1/')) {
       url.pathname = url.pathname.slice('/cashier/api'.length);
       request = new Request(url, request);
     }
     const canonical = canonicalDataRequest(request, isTestEnvironment(env));
-    if (canonical !== null) return fetch(canonical);
+    if (canonical !== null) return fetchCanonicalData(canonical);
 
     if (request.method === 'GET' && url.pathname === '/health') {
       return json({

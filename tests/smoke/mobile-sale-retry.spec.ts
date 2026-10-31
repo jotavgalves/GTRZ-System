@@ -13,6 +13,7 @@ const functions = [
   'savePendingSale',
   'clearPendingSale',
   'saleAccepted',
+  'saleConfirmed',
   'finishSale',
   'charge',
 ];
@@ -22,6 +23,7 @@ interface SaleClient {
   restorePendingSale: () => void;
   storage: Map<string, string>;
   notices: string[];
+  submitting: () => boolean;
 }
 
 function saleClient(
@@ -100,6 +102,7 @@ function saleClient(
     ).saleTest,
     storage,
     notices,
+    submitting: () => state.saleSubmitting,
   };
 }
 
@@ -119,7 +122,17 @@ describe('mobile sale uncertainty', () => {
       if (path.includes('/status')) return Promise.resolve({ accepted: false });
       posts.push(options?.body ?? '');
       if (++attempt === 1) throw new Error('network lost after commit');
-      return Promise.resolve({ status: 'replayed' });
+      const payload = JSON.parse(options?.body ?? '{}') as { commandId: string; saleId: string };
+      return Promise.resolve({
+        status: 'replayed',
+        response: {
+          commandId: payload.commandId,
+          event: {
+            commandId: payload.commandId,
+            payload: { action: 'operations.order-paid', entityId: payload.saleId },
+          },
+        },
+      });
     });
 
     await client.charge();
@@ -181,6 +194,48 @@ describe('mobile sale uncertainty', () => {
     expect(requests).toBe(0);
     expect(storage.size).toBe(1);
     expect(client.notices).toContain('Venda pendente em outro contexto');
+  });
+
+  it.each([new Error('status timed out'), {}])(
+    'preserves a pending sale without posting when the status is unavailable: %s',
+    async (status) => {
+      let posts = 0;
+      const storage = new Map([
+        [
+          'gtrz-mobile-pending-sale:device',
+          JSON.stringify({
+            eventId: 'event',
+            operatorId: 'operator',
+            totalCents: 1000,
+            payload: { commandId: 'saved-command', saleId: 'saved-sale', items: [] },
+          }),
+        ],
+      ]);
+      const client = saleClient((path) => {
+        if (path.includes('/status')) {
+          if (status instanceof Error) return Promise.reject(status);
+          return Promise.resolve(status);
+        }
+        posts++;
+        return Promise.resolve({});
+      }, storage);
+      client.restorePendingSale();
+      await client.charge();
+      expect(posts).toBe(0);
+      expect(storage.size).toBe(1);
+      expect(client.submitting()).toBe(false);
+      expect(client.notices).toContain('Venda aguardando confirmação');
+    },
+  );
+
+  it('does not clear a sale on an unrelated successful JSON response', async () => {
+    const client = saleClient((path) =>
+      Promise.resolve(path.includes('/status') ? { accepted: false } : {}),
+    );
+    await client.charge();
+    expect(client.storage.size).toBe(1);
+    expect(client.submitting()).toBe(false);
+    expect(client.notices).not.toContain('Venda confirmada');
   });
 
   it('does not claim to sell offline when the phone has no network', async () => {
