@@ -1,7 +1,12 @@
 param(
-  [string]$ReleaseTag = 'v0.1.1-pdf-output.1',
+  # Vazio = a ultima release publicada. Informe uma tag (ex.: v0.1.2) para fixar uma versao.
+  [string]$ReleaseTag = '',
+  # Codigo temporario gerado no PC administrador (Nuvem > Vincular computador). Vale 15 minutos.
+  [Alias('Codigo')]
   [string]$EnrollmentCode = '',
-  [switch]$SkipMobileSimulator,
+  # Tambem guarda um backup e apaga os dados locais antigos deste PC (SQLite, filas, credenciais).
+  [switch]$Limpo,
+  [switch]$IncluirSimuladorMobile,
   [switch]$PlanOnly
 )
 
@@ -19,6 +24,8 @@ foreach ($root in $programRoots) {
     $installTargets += [IO.Path]::GetFullPath((Join-Path $root $name)).TrimEnd('\')
   }
 }
+# Dados locais de cada conta Windows. So sao tocados com -Limpo, e sempre depois de um backup.
+$dataTargets = @($profiles | ForEach-Object { [IO.Path]::GetFullPath((Join-Path $_ 'AppData\Roaming\@gtrz')).TrimEnd('\') })
 
 $uninstallKeys = @(
   'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*',
@@ -36,20 +43,40 @@ $uninstallEntries = @($uninstallKeys | ForEach-Object { Get-ItemProperty $_ -Err
 if ($PlanOnly) {
   Write-Host "Instaladores registrados: $($uninstallEntries.Count)"
   foreach ($entry in $uninstallEntries) { Write-Host "- $($entry.DisplayName): $($entry.UninstallString)" }
-  Write-Host 'Pastas de instalacao encontradas:'
+  Write-Host 'Pastas de instalacao encontradas (serao apagadas):'
   foreach ($target in $installTargets) {
     if (Test-Path -LiteralPath $target) { Write-Host "- $target" }
   }
-  Write-Host 'AppData, SQLite, credenciais e backups locais serao preservados.'
+  Write-Host 'Dados locais encontrados:'
+  foreach ($target in $dataTargets) {
+    if (Test-Path -LiteralPath $target) { Write-Host "- $target" }
+  }
+  if ($Limpo) {
+    Write-Host 'Com -Limpo: um backup .zip de cada pasta de dados e guardado e depois ela e apagada.'
+  } else {
+    Write-Host 'Sem -Limpo: AppData, SQLite, credenciais e backups locais serao preservados.'
+  }
   return
 }
 
 $principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
 if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-  throw 'Execute este script como Administrador, na conta Windows que usara o GTRZ System.'
-}
-if ($ReleaseTag -notmatch '^v[0-9]+\.[0-9]+\.[0-9]+[A-Za-z0-9.-]*$') {
-  throw 'A tag da versao nao e valida.'
+  # Pede permissao de administrador sozinho e repete o mesmo comando com as mesmas opcoes.
+  $command = $MyInvocation.MyCommand
+  $scriptText = if ($command.ScriptContents) { $command.ScriptContents } elseif ($command.ScriptBlock) { $command.ScriptBlock.ToString() } else { '' }
+  if ([string]::IsNullOrWhiteSpace($scriptText)) {
+    throw 'Execute este script como Administrador, na conta Windows que usara o GTRZ System.'
+  }
+  $elevatedCopy = Join-Path ([IO.Path]::GetTempPath()) "install-gtrz-$([guid]::NewGuid().ToString('N')).ps1"
+  [IO.File]::WriteAllText($elevatedCopy, $scriptText, (New-Object Text.UTF8Encoding($true)))
+  $forward = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $elevatedCopy)
+  if ($ReleaseTag) { $forward += @('-ReleaseTag', $ReleaseTag) }
+  if ($EnrollmentCode) { $forward += @('-Codigo', $EnrollmentCode) }
+  if ($Limpo) { $forward += '-Limpo' }
+  if ($IncluirSimuladorMobile) { $forward += '-IncluirSimuladorMobile' }
+  Write-Host 'Pedindo permissao de administrador (aceite a janela do Windows)...'
+  Start-Process -FilePath 'powershell.exe' -Verb RunAs -ArgumentList $forward
+  return
 }
 
 function Stop-GtrzApps {
@@ -100,6 +127,28 @@ function Remove-GtrzInstallFolder {
   if (Test-Path -LiteralPath $full) { throw "A pasta antiga permaneceu: $full" }
 }
 
+# Guarda um .zip dos dados locais e so entao apaga a pasta. Se o backup falhar, nada e apagado.
+function Backup-And-Remove-GtrzData {
+  param([string]$Target, [string]$BackupRoot)
+  $full = [IO.Path]::GetFullPath($Target).TrimEnd('\')
+  if ($full -notin $dataTargets) { throw "Pasta fora da lista de dados locais: $full" }
+  if (-not (Test-Path -LiteralPath $full)) { return }
+  $item = Get-Item -LiteralPath $full -Force
+  if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+    throw "Pasta de dados redirecionada; remocao recusada: $full"
+  }
+  $owner = Split-Path (Split-Path (Split-Path (Split-Path $full -Parent) -Parent) -Parent) -Leaf
+  New-Item -ItemType Directory -Force -Path $BackupRoot | Out-Null
+  $zip = Join-Path $BackupRoot "$owner-$(Get-Date -Format 'yyyyMMdd-HHmmss').zip"
+  Compress-Archive -Path (Join-Path $full '*') -DestinationPath $zip -CompressionLevel Optimal
+  if (-not (Test-Path -LiteralPath $zip) -or (Get-Item -LiteralPath $zip).Length -le 0) {
+    throw "Backup dos dados locais nao foi criado; nada foi apagado: $full"
+  }
+  Remove-Item -LiteralPath $full -Recurse -Force
+  if (Test-Path -LiteralPath $full) { throw "A pasta de dados antiga permaneceu: $full" }
+  Write-Host "Dados antigos de $owner guardados em $zip e removidos."
+}
+
 function Get-VerifiedAsset {
   param($Release, [string]$Name, [string]$Directory)
   $asset = @($Release.assets | Where-Object { $_.name -eq $Name })
@@ -120,11 +169,22 @@ function Get-VerifiedAsset {
 }
 
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-$release = Invoke-RestMethod -Uri "https://api.github.com/repos/jotavgalves/GTRZ-System/releases/tags/$ReleaseTag" -Headers @{ 'User-Agent' = 'GTRZ-Installer' }
+$apiHeaders = @{ 'User-Agent' = 'GTRZ-Installer' }
+$releasesApi = 'https://api.github.com/repos/jotavgalves/GTRZ-System/releases'
+if ($ReleaseTag) {
+  if ($ReleaseTag -notmatch '^v[0-9]+\.[0-9]+\.[0-9]+[A-Za-z0-9.-]*$') { throw 'A tag da versao nao e valida.' }
+  $release = Invoke-RestMethod -Uri "$releasesApi/tags/$ReleaseTag" -Headers $apiHeaders
+} else {
+  $release = Invoke-RestMethod -Uri "$releasesApi/latest" -Headers $apiHeaders
+}
+$ReleaseTag = [string]$release.tag_name
+if ($ReleaseTag -notmatch '^v[0-9]+\.[0-9]+\.[0-9]+[A-Za-z0-9.-]*$') { throw 'A tag da versao nao e valida.' }
+Write-Host "Versao a instalar: $ReleaseTag"
+
 $desktopAsset = @($release.assets | Where-Object { $_.name -match '^GTRZ-System-[0-9]+\.[0-9]+\.[0-9]+-Setup\.exe$' })
 if ($desktopAsset.Count -ne 1) { throw 'A release nao possui exatamente um instalador desktop.' }
 $mobileAsset = @($release.assets | Where-Object { $_.name -match '^GTRZ-System-Mobile-[0-9]+\.[0-9]+\.[0-9]+-Setup\.exe$' })
-if (-not $SkipMobileSimulator -and $mobileAsset.Count -ne 1) {
+if ($IncluirSimuladorMobile -and $mobileAsset.Count -ne 1) {
   throw 'A release nao possui exatamente um instalador mobile.'
 }
 $tempRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\')
@@ -135,9 +195,11 @@ if (-not $workDir.StartsWith("$tempRoot\GTRZ-install-", [StringComparison]::Ordi
 New-Item -ItemType Directory -Path $workDir | Out-Null
 
 try {
+  Write-Host 'Baixando e conferindo o instalador (SHA-256)...'
   $desktopSetup = Get-VerifiedAsset $release $desktopAsset[0].name $workDir
-  $mobileSetup = if ($SkipMobileSimulator) { $null } else { Get-VerifiedAsset $release $mobileAsset[0].name $workDir }
+  $mobileSetup = if ($IncluirSimuladorMobile) { Get-VerifiedAsset $release $mobileAsset[0].name $workDir } else { $null }
 
+  Write-Host 'Fechando e removendo o sistema antigo...'
   Stop-GtrzApps
   foreach ($entry in $uninstallEntries) { Uninstall-GtrzEntry $entry }
   foreach ($target in $installTargets) { Remove-GtrzInstallFolder $target }
@@ -154,6 +216,12 @@ try {
     }
   }
 
+  if ($Limpo) {
+    $backupRoot = Join-Path ([Environment]::GetFolderPath('CommonDocuments')) 'GTRZ-backup-antigo'
+    foreach ($target in $dataTargets) { Backup-And-Remove-GtrzData $target $backupRoot }
+  }
+
+  Write-Host 'Instalando o sistema novo...'
   $desktopInstall = Start-Process -FilePath $desktopSetup -ArgumentList '/S' -Wait -PassThru -WindowStyle Hidden
   if ($desktopInstall.ExitCode -ne 0) { throw "Falha na instalacao desktop: $($desktopInstall.ExitCode)" }
   if ($mobileSetup) {
@@ -165,6 +233,7 @@ try {
   if (-not (Test-Path -LiteralPath $desktopExe -PathType Leaf)) {
     throw "O programa nao foi encontrado apos instalar: $desktopExe"
   }
+  Write-Host 'Vinculando este computador a nuvem...'
   do {
     $env:GTRZ_INSTALL_ENROLLMENT = '1'
     $env:GTRZ_INSTALL_ENROLLMENT_CODE = $EnrollmentCode
@@ -175,15 +244,18 @@ try {
       Remove-Item Env:\GTRZ_INSTALL_ENROLLMENT_CODE -ErrorAction SilentlyContinue
     }
     if ($verification.ExitCode -eq 2) {
-      $EnrollmentCode = Read-Host 'Cole o codigo temporario criado no PC administrador'
+      $EnrollmentCode = Read-Host 'Cole o codigo temporario criado no PC administrador (Nuvem > Vincular computador)'
       if ([string]::IsNullOrWhiteSpace($EnrollmentCode)) { throw 'Vinculo nao concluido: codigo nao informado.' }
     } elseif ($verification.ExitCode -ne 0) {
       throw 'O app nao conseguiu confirmar o vinculo com a nuvem. Verifique o codigo e a conexao.'
     }
   } while ($verification.ExitCode -eq 2)
 
-  Write-Host "GTRZ System $ReleaseTag instalado e vinculado. Dados locais preservados."
-  Start-Process -FilePath $desktopExe
+  Write-Host "GTRZ System $ReleaseTag instalado e vinculado."
+  if (-not $Limpo) { Write-Host 'Dados locais preservados.' }
+  Write-Host 'Se for imprimir, ligue a impressora termica USB antes de abrir: o app cria a fila POS-80 sozinho.'
+  # Abre pelo Explorer para o app rodar com o usuario normal, e nao como administrador.
+  Start-Process -FilePath 'explorer.exe' -ArgumentList "`"$desktopExe`""
 } finally {
   if (Test-Path -LiteralPath $workDir) {
     Remove-Item -LiteralPath $workDir -Recurse -Force
