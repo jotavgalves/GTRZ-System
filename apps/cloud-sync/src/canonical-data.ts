@@ -24,25 +24,47 @@ export function canonicalDataRequest(request: Request, testEnvironment: boolean)
 export async function fetchCanonicalData(
   request: Request,
   fetcher: (request: Request) => Promise<Response> = fetch,
-  timeoutMs = 12_000,
+  timeoutMs?: number,
 ): Promise<Response> {
-  if (!new URL(request.url).pathname.includes('/v1/mobile/')) return fetcher(request);
+  const pathname = new URL(request.url).pathname;
+  if (!pathname.includes('/v1/mobile/')) return fetcher(request);
+  const catalogResponse = /\/mobile\/(refresh|catalog)$/.test(pathname);
+  const deadline = timeoutMs ?? (catalogResponse ? 30_000 : 12_000);
   const controller = new AbortController();
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<never>((_resolve, reject) => {
     timer = setTimeout(() => {
       controller.abort();
       reject(new Error('MOBILE_UPSTREAM_TIMEOUT'));
-    }, timeoutMs);
+    }, deadline);
   });
   try {
     return await Promise.race([
       (async () => {
         const upstream = await fetcher(new Request(request, { signal: controller.signal }));
-        const body = await upstream.arrayBuffer();
         const headers = new Headers(upstream.headers);
         headers.delete('Content-Length');
         headers.set('Cache-Control', 'no-store');
+        if (catalogResponse && upstream.ok) {
+          const data: unknown = await upstream.json();
+          if (typeof data !== 'object' || data === null) throw new Error('INVALID_MOBILE_CATALOG');
+          const payload = data as Record<string, unknown>;
+          const catalog = pathname.endsWith('/refresh') ? payload.catalog : payload;
+          if (typeof catalog === 'object' && catalog !== null && 'products' in catalog) {
+            const products = catalog.products;
+            if (Array.isArray(products)) {
+              catalog.products = products.map((product: unknown) => {
+                if (typeof product !== 'object' || product === null) return product;
+                const compact: Record<string, unknown> = { ...product };
+                delete compact.imageDataUrl;
+                return compact;
+              });
+            }
+          }
+          headers.delete('Content-Encoding');
+          return Response.json(payload, { status: upstream.status, headers });
+        }
+        const body = await upstream.arrayBuffer();
         return new Response([204, 205, 304].includes(upstream.status) ? null : body, {
           status: upstream.status,
           statusText: upstream.statusText,
